@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agentbus.artifacts import extract_artifacts
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
 from agentbus.rbac import ForbiddenError, check_approve_rbac, check_publish_rbac
 from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
@@ -104,6 +105,23 @@ class EventStore:
         self._migrate_hitl_columns()
         self._migrate_sla_columns()
         self._migrate_trace_columns()
+        self._migrate_artifacts_table()
+
+    def _migrate_artifacts_table(self) -> None:
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                content_blob TEXT NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES events(event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_artifacts_event_id ON artifacts(event_id);
+            """
+        )
+        self._conn.commit()
 
     def _migrate_trace_columns(self) -> None:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
@@ -270,14 +288,16 @@ class EventStore:
                 (idempotency_key,),
             ).fetchone()
             if existing:
-                return self._row_to_event(existing), True
+                return self._hydrate_event(self._row_to_event(existing)), True
+
+        stored_payload, artifacts = extract_artifacts(payload)
 
         if not skip_rbac:
             check_publish_rbac(
                 self.workspace,
                 producer_id=producer_id,
                 topic=topic,
-                payload=payload,
+                payload=stored_payload,
                 auth_token=auth_token,
             )
 
@@ -296,7 +316,7 @@ class EventStore:
         event_pending_until = pending_until
 
         if not skip_intercept and event_status == STATUS_PUBLISHED:
-            rule = match_rule(self.workspace, topic, payload)
+            rule = match_rule(self.workspace, topic, stored_payload)
             if rule:
                 event_status = STATUS_PENDING
                 ttl = timedelta(minutes=rule.ttl_minutes or DEFAULT_TTL_MINUTES)
@@ -323,7 +343,7 @@ class EventStore:
                 producer_id,
                 ts,
                 schema_version,
-                json.dumps(payload),
+                json.dumps(stored_payload),
                 causation_id,
                 idempotency_key,
                 event_status,
@@ -335,12 +355,66 @@ class EventStore:
                 parent_span_id,
             ),
         )
+        event_id = cur.lastrowid
+        self._save_artifacts(event_id, artifacts)
         self._conn.commit()
         self.prune_expired()
         row = self._conn.execute(
-            "SELECT * FROM events WHERE event_id = ?", (cur.lastrowid,)
+            "SELECT * FROM events WHERE event_id = ?", (event_id,)
         ).fetchone()
-        return self._row_to_event(row), False
+        event = self._row_to_event(row)
+        return self._hydrate_event(event), False
+
+    def _save_artifacts(self, event_id: int, artifacts: list[dict]) -> None:
+        for art in artifacts:
+            self._conn.execute(
+                """
+                INSERT INTO artifacts (event_id, type, name, content_blob)
+                VALUES (?, ?, ?, ?)
+                """,
+                (event_id, art["type"], art["name"], art["content"]),
+            )
+
+    def _fetch_artifacts(self, event_ids: list[int]) -> dict[int, list[dict]]:
+        if not event_ids:
+            return {}
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = self._conn.execute(
+            f"""
+            SELECT event_id, type, name, content_blob
+            FROM artifacts
+            WHERE event_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            event_ids,
+        ).fetchall()
+        result: dict[int, list[dict]] = {}
+        for row in rows:
+            result.setdefault(row["event_id"], []).append(
+                {
+                    "type": row["type"],
+                    "name": row["name"],
+                    "content": row["content_blob"],
+                }
+            )
+        return result
+
+    def _hydrate_event(self, event: Event) -> Event:
+        arts = self._fetch_artifacts([event.event_id]).get(event.event_id)
+        if arts:
+            event.payload = {**event.payload, "artifacts": arts}
+        return event
+
+    def _hydrate_event_dicts(self, events: list[dict]) -> list[dict]:
+        by_event = self._fetch_artifacts([e["event_id"] for e in events])
+        hydrated: list[dict] = []
+        for ev in events:
+            data = dict(ev)
+            arts = by_event.get(ev["event_id"])
+            if arts:
+                data["payload"] = {**data["payload"], "artifacts": arts}
+            hydrated.append(data)
+        return hydrated
 
     def poll(self, topic: str, since_id: int = 0, limit: int = 50) -> dict:
         self.expire_pending()
@@ -356,7 +430,9 @@ class EventStore:
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        events = [self._row_to_event(r).to_dict() for r in rows]
+        events = self._hydrate_event_dicts(
+            [self._row_to_event(r).to_dict() for r in rows]
+        )
         latest_id = events[-1]["event_id"] if events else since_id
         return {"events": events, "latest_id": latest_id, "has_more": has_more}
 

@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
 from agentbus.leases import LeaseStore
+from agentbus.artifacts import PayloadTooLargeError
 from agentbus.rbac import ForbiddenError
 from agentbus.schemas import validate_payload
 from agentbus.store import EventStore
@@ -82,6 +83,8 @@ def agentbus_publish(
             parent_span_id=parent_span_id,
         )
     except ForbiddenError as exc:
+        return json.dumps({"error": str(exc), "code": exc.code})
+    except PayloadTooLargeError as exc:
         return json.dumps({"error": str(exc), "code": exc.code})
     out = {
         "event_id": event.event_id,

@@ -22,6 +22,7 @@ from agentbus.devex import (
     run_monitor,
 )
 from agentbus.intercepts import InterceptRule, add_rule, load_config
+from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
 from agentbus.rbac import ForbiddenError, assign_producer_role, ensure_default_roles, mint_droid_proof
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
@@ -103,6 +104,12 @@ def serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
 @click.option("--topic", required=True)
 @click.option("--payload", "payload_json", default=None, help="JSON object string")
 @click.option("--payload-file", type=click.Path(exists=True, dir_okay=False), default=None)
+@click.option(
+    "--attach",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Attach file as artifact (repeatable)",
+)
 @click.option("--schema-version", default="1.0", show_default=True)
 @click.option("--producer-id", default=None)
 @click.option("--causation-id", type=int, default=None)
@@ -122,6 +129,7 @@ def publish(
     topic: str,
     payload_json: str | None,
     payload_file: str | None,
+    attach: tuple[str, ...],
     schema_version: str,
     producer_id: str | None,
     causation_id: int | None,
@@ -142,6 +150,11 @@ def publish(
 
     ws = Path(workspace)
     _auth(ws, token)
+    if attach:
+        arts = list(payload.get("artifacts") or [])
+        for path in attach:
+            arts.append(artifact_from_file(Path(path)))
+        payload["artifacts"] = arts
     payload = validate_payload(topic, payload)
     store = _open_store(workspace, retention_days)
     try:
@@ -158,7 +171,7 @@ def publish(
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
             )
-        except ForbiddenError as exc:
+        except (ForbiddenError, PayloadTooLargeError) as exc:
             raise click.ClickException(str(exc)) from exc
         out = {
             "event_id": event.event_id,

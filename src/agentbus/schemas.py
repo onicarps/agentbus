@@ -37,6 +37,22 @@ KNOWN_TOPICS: dict[str, dict] = {
             },
             "initiative": {"type": "string"},
             "droid_proof": {"type": "string", "minLength": 8, "maxLength": 256},
+            "artifacts": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                    "type": "object",
+                    "required": ["type", "name", "content"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "type": {
+                            "enum": ["git_diff", "file_content", "error_trace"],
+                        },
+                        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
         },
     },
 }
