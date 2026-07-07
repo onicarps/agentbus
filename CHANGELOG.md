@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.2] - 2026-07-07
+
+### Added
+
+- Swarm RBAC: `.agentbus/roles.yaml`, producer→role map, forbidden payload patterns
+- `droid_proof` mint/verify for `qa_droid` role (single-use, 30m TTL)
+- CLI: `config init-rbac`, `droid mint`; `AGENTBUS_DISABLE_RBAC=1` bypass
+- MCP/CLI 403 on unauthorized publish or approve/reject
+- `examples/roles.yaml`; 8 RBAC tests (61 total)
+
 ## [0.2.3] - 2026-07-07
 
 ### Changed
