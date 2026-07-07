@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.5.0] - 2026-07-07
+
+### Added
+
+- Distributed tracing: `trace_id`, auto `span_id`, `parent_span_id` on events
+- CLI/MCP publish: `--trace-id`, `--parent-span-id`
+- `agentbus trace <trace_id>` rich waterfall visualization
+- 4 trace tests (69 total)
+
 ## [0.4.0] - 2026-07-07
 
 ### Added
