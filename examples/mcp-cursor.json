@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "agentbus": {
+      "command": "/path/to/agentbus/scripts/mcp-serve.sh",
+      "args": [],
+      "env": {
+        "AGENTBUS_WORKSPACE": "/path/to/your/workspace",
+        "AGENTBUS_PRODUCER_ID": "your-agent-id"
+      }
+    }
+  }
+}

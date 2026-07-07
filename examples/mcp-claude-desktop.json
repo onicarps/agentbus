@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agentbus": {
+      "command": "/path/to/agentbus/.venv/bin/agentbus",
+      "args": ["serve", "--workspace", "/path/to/your/workspace"],
+      "env": {
+        "AGENTBUS_PRODUCER_ID": "claude"
+      }
+    }
+  }
+}

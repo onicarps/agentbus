@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentbus"
+version = "0.1.0"
+description = "Local MCP event log for multi-agent workspaces"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "onicarps" }]
+keywords = ["mcp", "agents", "multi-agent", "event-log", "orchestration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "mcp>=1.0",
+    "jsonschema>=4.0",
+    "click>=8.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/onicarps/agentbus"
+Repository = "https://github.com/onicarps/agentbus"
+Issues = "https://github.com/onicarps/agentbus/issues"
+Documentation = "https://github.com/onicarps/agentbus/blob/main/docs/MCP_SCHEMA.md"
+
+[project.scripts]
+agentbus = "agentbus.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentbus"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/agentbus",
+    "tests",
+    "docs",
+    "examples",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "CONTRIBUTING.md",
+    "CHANGELOG.md",
+    "ROADMAP.md",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
