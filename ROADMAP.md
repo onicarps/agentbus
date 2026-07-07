@@ -18,13 +18,13 @@
 - [x] MCP: `agentbus_lock_acquire`, `agentbus_lock_release`, `agentbus_lock_renew`, `agentbus_lock_status`
 - [x] CLI: `agentbus lock acquire|release|renew|status`
 - [x] 40 tests including lease store + MCP stdio round-trip
-- [x] PyPI package name `agentbus-mcp` (avoids collision with unrelated `agentbus` on PyPI)
+- [x] PyPI package name `okf-agentbus` (`agentbus`/`agentbus-mcp` blocked on PyPI)
 
 ## Next (community-driven)
 
 ### v0.2.x — Distribution & onboarding
 
-- [ ] PyPI publish as `agentbus-mcp`
+- [x] PyPI publish as `okf-agentbus`
 - [ ] GitHub Release assets (wheel/sdist) on tag
 - [ ] End-to-end multi-agent handoff walkthrough in docs
 - [ ] Client capability matrix with tested configs per IDE

@@ -1,7 +1,7 @@
 # AgentBus
 
 [![Test](https://github.com/onicarps/agentbus/actions/workflows/test.yml/badge.svg)](https://github.com/onicarps/agentbus/actions/workflows/test.yml)
-[![Python](https://img.shields.io/pypi/pyversions/agentbus-mcp.svg)](https://pypi.org/project/agentbus-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/okf-agentbus.svg)](https://pypi.org/project/okf-agentbus/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Local MCP event log and advisory lease coordinator for multi-agent workspaces.**
@@ -12,7 +12,7 @@ AgentBus is a **localhost sidecar**: a Python MCP server backed by SQLite. Agent
 
 > **v0.2 (July 2026):** Events + advisory lease locks — `publish`, `poll`, `status`, `lock_*`. SSE subscribe and custom topics on the [roadmap](ROADMAP.md).
 
-> **Note:** The PyPI name `agentbus` is used by an unrelated NATS project. Install this package as **`agentbus-mcp`** (CLI command remains `agentbus`).
+> **Note:** PyPI names `agentbus` (NATS) and `agentbus-mcp` (blocked as too similar) are unavailable. Install as **`okf-agentbus`** (CLI command remains `agentbus`).
 
 ## Why AgentBus?
 
@@ -26,8 +26,10 @@ AgentBus is a **localhost sidecar**: a Python MCP server backed by SQLite. Agent
 ## Install
 
 ```bash
-# Recommended — from GitHub (PyPI name: agentbus-mcp)
-pip install "agentbus-mcp @ git+https://github.com/onicarps/agentbus@v0.2.2"
+pip install okf-agentbus
+
+# Or from GitHub
+pip install "okf-agentbus @ git+https://github.com/onicarps/agentbus@v0.2.3"
 
 # Or clone for development
 git clone https://github.com/onicarps/agentbus.git

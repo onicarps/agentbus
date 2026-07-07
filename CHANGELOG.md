@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.3] - 2026-07-07
+
+### Changed
+
+- PyPI package renamed to **`okf-agentbus`** — `agentbus-mcp` rejected as too similar to existing `agentbus` project
+
 ## [0.2.2] - 2026-07-07
 
 ### Added
@@ -47,6 +53,7 @@ All notable changes to this project are documented here.
 - Reference topics: `okf/handoff`, `okf/status/<initiative>`
 - 22 tests including MCP stdio round-trip
 
+[0.2.3]: https://github.com/onicarps/agentbus/releases/tag/v0.2.3
 [0.2.2]: https://github.com/onicarps/agentbus/releases/tag/v0.2.2
 [0.2.1]: https://github.com/onicarps/agentbus/releases/tag/v0.2.1
 [0.2.0]: https://github.com/onicarps/agentbus/releases/tag/v0.2.0
