@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import click
@@ -15,6 +14,7 @@ from agentbus.auth import (
     read_workspace_token,
     token_path,
 )
+from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
 from agentbus.schemas import validate_payload
 from agentbus.server import run_stdio
@@ -32,6 +32,17 @@ def _producer_id(override: str | None) -> str:
 
 def _open_store(workspace: str, retention_days: int) -> EventStore:
     return EventStore(Path(workspace), retention_days=retention_days)
+
+
+def _open_lease_store(workspace: str) -> LeaseStore:
+    return LeaseStore(Path(workspace))
+
+
+def _auth(ws: Path, token: str | None) -> None:
+    try:
+        check_publish_token(ws, auth_token=token)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @click.group()
@@ -54,11 +65,7 @@ def main() -> None:
 )
 def serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
     """Run MCP server on stdio."""
-    run_stdio(
-        Path(workspace),
-        retention_days=retention_days,
-        rotate_token=rotate_token,
-    )
+    run_stdio(Path(workspace), retention_days=retention_days, rotate_token=rotate_token)
 
 
 @main.command()
@@ -93,12 +100,8 @@ def publish(
         raise click.ClickException("Provide --payload or --payload-file")
 
     ws = Path(workspace)
-    try:
-        check_publish_token(ws, auth_token=token)
-    except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
-
-    validate_payload(topic, payload)
+    _auth(ws, token)
+    payload = validate_payload(topic, payload)
     store = _open_store(workspace, retention_days)
     try:
         event, duplicate = store.publish(
@@ -154,6 +157,94 @@ def status(workspace: str, producer_id: str | None, retention_days: int) -> None
     try:
         pid = producer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "")
         click.echo(json.dumps(store.status(producer_id=pid or None)))
+    finally:
+        store.close()
+
+
+@main.group()
+def lock() -> None:
+    """Advisory lease locks (Phase 5)."""
+
+
+@lock.command("acquire")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--resource", required=True, help="Absolute path within workspace")
+@click.option("--owner-id", required=True)
+@click.option("--ttl-seconds", type=int, default=None)
+@click.option("--token", default=None)
+def lock_acquire(
+    workspace: str,
+    resource: str,
+    owner_id: str,
+    ttl_seconds: int | None,
+    token: str | None,
+) -> None:
+    """Acquire a lease on a resource."""
+    ws = Path(workspace)
+    _auth(ws, token)
+    store = _open_lease_store(workspace)
+    try:
+        click.echo(json.dumps(store.lock_acquire(resource, owner_id, ttl_seconds)))
+    finally:
+        store.close()
+
+
+@lock.command("release")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--resource", required=True)
+@click.option("--lease-id", required=True)
+@click.option("--owner-id", required=True)
+@click.option("--token", default=None)
+def lock_release(
+    workspace: str,
+    resource: str,
+    lease_id: str,
+    owner_id: str,
+    token: str | None,
+) -> None:
+    """Release a held lease."""
+    ws = Path(workspace)
+    _auth(ws, token)
+    store = _open_lease_store(workspace)
+    try:
+        click.echo(json.dumps(store.lock_release(resource, lease_id, owner_id)))
+    finally:
+        store.close()
+
+
+@lock.command("renew")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--resource", required=True)
+@click.option("--lease-id", required=True)
+@click.option("--owner-id", required=True)
+@click.option("--ttl-seconds", type=int, default=None)
+@click.option("--token", default=None)
+def lock_renew(
+    workspace: str,
+    resource: str,
+    lease_id: str,
+    owner_id: str,
+    ttl_seconds: int | None,
+    token: str | None,
+) -> None:
+    """Renew (extend) a held lease."""
+    ws = Path(workspace)
+    _auth(ws, token)
+    store = _open_lease_store(workspace)
+    try:
+        click.echo(json.dumps(store.lock_renew(resource, lease_id, owner_id, ttl_seconds)))
+    finally:
+        store.close()
+
+
+@lock.command("status")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--resource", required=True)
+def lock_status(workspace: str, resource: str) -> None:
+    """Check lock state (no auth)."""
+    store = _open_lease_store(workspace)
+    try:
+        click.echo(json.dumps(store.lock_status(resource)))
     finally:
         store.close()
 
@@ -226,11 +317,7 @@ def token_ensure(workspace: str, quiet: bool) -> None:
     else:
         click.echo(
             json.dumps(
-                {
-                    "path": str(token_path(ws)),
-                    "token": value,
-                    "created": True,
-                }
+                {"path": str(token_path(ws)), "token": value, "created": True}
             )
         )
 
@@ -247,11 +334,7 @@ def token_rotate(workspace: str, quiet: bool) -> None:
     else:
         click.echo(
             json.dumps(
-                {
-                    "path": str(token_path(ws)),
-                    "token": value,
-                    "rotated": True,
-                }
+                {"path": str(token_path(ws)), "token": value, "rotated": True}
             )
         )
 

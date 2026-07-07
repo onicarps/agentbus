@@ -9,12 +9,14 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
+from agentbus.leases import LeaseStore
 from agentbus.schemas import validate_payload
 from agentbus.store import EventStore
 
 mcp = FastMCP("agentbus")
 
 _store: EventStore | None = None
+_lease_store: LeaseStore | None = None
 _workspace: Path | None = None
 
 
@@ -24,10 +26,17 @@ def _get_store() -> EventStore:
     return _store
 
 
+def _get_lease_store() -> LeaseStore:
+    if _lease_store is None:
+        raise RuntimeError("lease store not initialized — run via agentbus serve")
+    return _lease_store
+
+
 def init_store(workspace: Path, retention_days: int = 7) -> EventStore:
-    global _store, _workspace
+    global _store, _lease_store, _workspace
     _workspace = workspace.resolve()
-    _store = EventStore(workspace, retention_days=retention_days)
+    _store = EventStore(_workspace, retention_days=retention_days)
+    _lease_store = LeaseStore(_workspace)
     return _store
 
 
@@ -54,7 +63,7 @@ def agentbus_publish(
 ) -> str:
     """Append one event to the workspace event log."""
     check_publish_token(_auth_workspace(), auth_token=auth_token)
-    validate_payload(topic, payload)
+    payload = validate_payload(topic, payload)
     event, duplicate = _get_store().publish(
         topic=topic,
         producer_id=_producer_id(producer_id),
@@ -88,6 +97,55 @@ def agentbus_poll(
 def agentbus_status() -> str:
     """Workspace bus health and topic list."""
     return json.dumps(_get_store().status())
+
+
+@mcp.tool()
+def agentbus_lock_acquire(
+    resource: str,
+    owner_id: str,
+    ttl_seconds: int | None = None,
+    auth_token: str | None = None,
+) -> str:
+    """Acquire an exclusive advisory lease on a workspace resource."""
+    check_publish_token(_auth_workspace(), auth_token=auth_token)
+    return json.dumps(
+        _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
+    )
+
+
+@mcp.tool()
+def agentbus_lock_release(
+    resource: str,
+    lease_id: str,
+    owner_id: str,
+    auth_token: str | None = None,
+) -> str:
+    """Release a held lease (idempotent if already expired)."""
+    check_publish_token(_auth_workspace(), auth_token=auth_token)
+    return json.dumps(
+        _get_lease_store().lock_release(resource, lease_id, owner_id)
+    )
+
+
+@mcp.tool()
+def agentbus_lock_renew(
+    resource: str,
+    lease_id: str,
+    owner_id: str,
+    ttl_seconds: int | None = None,
+    auth_token: str | None = None,
+) -> str:
+    """Extend TTL on an active lease (heartbeat)."""
+    check_publish_token(_auth_workspace(), auth_token=auth_token)
+    return json.dumps(
+        _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
+    )
+
+
+@mcp.tool()
+def agentbus_lock_status(resource: str) -> str:
+    """Check lock state without acquiring (no auth required)."""
+    return json.dumps(_get_lease_store().lock_status(resource))
 
 
 def run_stdio(
