@@ -12,7 +12,7 @@ from agentbus.auth import check_publish_token, ensure_ephemeral_token
 from agentbus.leases import LeaseStore
 from agentbus.artifacts import PayloadTooLargeError
 from agentbus.rbac import ForbiddenError
-from agentbus.schemas import validate_payload
+from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.store import EventStore
 
 mcp = FastMCP("agentbus")
@@ -37,6 +37,7 @@ def _get_lease_store() -> LeaseStore:
 def init_store(workspace: Path, retention_days: int = 7) -> EventStore:
     global _store, _lease_store, _workspace
     _workspace = workspace.resolve()
+    set_validation_workspace(_workspace)
     _store = EventStore(_workspace, retention_days=retention_days)
     _lease_store = LeaseStore(_workspace)
     return _store

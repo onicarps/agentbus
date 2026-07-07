@@ -26,7 +26,8 @@ from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
 from agentbus.rbac import ForbiddenError, assign_producer_role, ensure_default_roles, mint_droid_proof
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
-from agentbus.schemas import validate_payload
+from agentbus.schema_registry import import_schema_file, list_schemas, register_schema
+from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
 from agentbus.store import EventStore
 
@@ -41,7 +42,9 @@ def _producer_id(override: str | None) -> str:
 
 
 def _open_store(workspace: str, retention_days: int) -> EventStore:
-    return EventStore(Path(workspace), retention_days=retention_days)
+    ws = Path(workspace)
+    set_validation_workspace(ws)
+    return EventStore(ws, retention_days=retention_days)
 
 
 def _open_lease_store(workspace: str) -> LeaseStore:
@@ -572,6 +575,47 @@ def reject(
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
+
+
+@main.group()
+def schema() -> None:
+    """Pluggable topic schema registry."""
+
+
+@schema.command("import")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+def schema_import(file: Path, workspace: str) -> None:
+    """Import topic schema from JSON (topic + json_schema)."""
+    try:
+        click.echo(json.dumps(import_schema_file(Path(workspace), file)))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@schema.command("register")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--topic", required=True)
+@click.option("--schema-file", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option("--version", default="1.0", show_default=True)
+def schema_register(workspace: str, topic: str, schema_file: str, version: str) -> None:
+    """Register a topic JSON Schema from a file."""
+    schema_obj = json.loads(Path(schema_file).read_text(encoding="utf-8"))
+    try:
+        click.echo(
+            json.dumps(
+                register_schema(Path(workspace), topic, schema_obj, version=version)
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@schema.command("list")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+def schema_list(workspace: str) -> None:
+    """List registered pluggable topic schemas."""
+    click.echo(json.dumps(list_schemas(Path(workspace))))
 
 
 @main.command()
