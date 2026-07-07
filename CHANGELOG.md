@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.7.0] - 2026-07-07
+
+### Added
+
+- Pluggable topic schemas: `topic_schemas` SQLite registry
+- `agentbus schema import/list/register` CLI
+- `agentbus.sdk` with `@bus.topic` Pydantic decorator (`[sdk]` extra)
+- Strict jsonschema validation for custom topics; 4 schema tests (77 total)
+
 ## [0.6.0] - 2026-07-07
 
 ### Added
