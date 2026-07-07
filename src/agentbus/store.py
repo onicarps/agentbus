@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agentbus.intercepts import DEFAULT_TTL_MINUTES, match_rule
+from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
 
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_PENDING = "PENDING_APPROVAL"
@@ -366,6 +366,7 @@ class EventStore:
             "event_count": count,
             "latest_event_id": latest or 0,
             "pending_approval_count": pending,
+            "hitl_enabled": not hitl_disabled(),
             "topics": topics,
             "retention_days": self.retention_days,
             "producer_id": producer_id or os.environ.get("AGENTBUS_PRODUCER_ID", ""),

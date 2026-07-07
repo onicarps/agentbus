@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -70,8 +71,20 @@ def add_rule(workspace: Path, rule: InterceptRule) -> InterceptConfig:
     return config
 
 
+def hitl_disabled() -> bool:
+    """Emergency bypass when AGENTBUS_DISABLE_HITL=1 (Agy PDD addendum event 87)."""
+    return os.environ.get("AGENTBUS_DISABLE_HITL", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def match_rule(workspace: Path, topic: str, payload: dict) -> InterceptRule | None:
     """Return first matching intercept rule for topic + payload text, else None."""
+    if hitl_disabled():
+        return None
     haystack = json.dumps(payload, ensure_ascii=False).lower()
     for rule in load_config(workspace).rules:
         if rule.topic != topic:

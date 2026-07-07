@@ -148,6 +148,23 @@ def test_cli_config_review_approve(tmp_path):
     assert len(json.loads(poll2.output)["events"]) == 1
 
 
+def test_disable_hitl_env_bypasses_intercept(store, tmp_path, monkeypatch):
+    add_rule(tmp_path, InterceptRule(topic="okf/handoff", contains="PyPI"))
+    monkeypatch.setenv("AGENTBUS_DISABLE_HITL", "1")
+
+    event, _ = store.publish(
+        topic="okf/handoff",
+        producer_id="grok",
+        schema_version="1.0",
+        payload=_handoff("PyPI emergency release"),
+    )
+    assert event.status == STATUS_PUBLISHED
+    assert len(store.poll("okf/handoff", since_id=0)["events"]) == 1
+
+    st = store.status()
+    assert st["hitl_enabled"] is False
+
+
 def test_non_matching_events_publish_immediately(store, tmp_path):
     add_rule(tmp_path, InterceptRule(topic="okf/handoff", contains="PyPI"))
     event, _ = store.publish(
