@@ -14,6 +14,13 @@ from agentbus.auth import (
     read_workspace_token,
     token_path,
 )
+from agentbus.devex import (
+    apply_init,
+    format_init_summary,
+    publish_ping,
+    resolve_workspace,
+    run_monitor,
+)
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
 from agentbus.schemas import validate_payload
@@ -48,6 +55,27 @@ def _auth(ws: Path, token: str | None) -> None:
 @click.group()
 def main() -> None:
     """Local MCP event log for multi-agent workspaces."""
+
+
+@main.command("mcp-serve")
+@click.option(
+    "--workspace",
+    type=click.Path(exists=True, file_okay=False, path_type=str),
+    default=DEFAULT_WORKSPACE,
+    show_default=True,
+)
+@click.option("--retention-days", default=7, show_default=True)
+@click.option(
+    "--rotate-token",
+    is_flag=True,
+    help="Regenerate workspace token on startup",
+)
+def mcp_serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
+    """MCP entrypoint for IDE configs (ensures token, then serve)."""
+    ws = Path(workspace)
+    ensure_ephemeral_token(ws, rotate=rotate_token)
+    os.environ["AGENTBUS_TOKEN"] = read_workspace_token(ws) or ""
+    run_stdio(ws, retention_days=retention_days, rotate_token=False)
 
 
 @main.command()
@@ -337,6 +365,68 @@ def token_rotate(workspace: str, quiet: bool) -> None:
                 {"path": str(token_path(ws)), "token": value, "rotated": True}
             )
         )
+
+
+@main.command()
+@click.option("--workspace", default=None, help="Workspace root (default: git root or cwd)")
+@click.option("--producer-id", default=None, help="MCP producer id for this client")
+@click.option("--apply", is_flag=True, help="Write MCP config updates (default: dry-run)")
+@click.option("--client", "clients", multiple=True, help="Limit to client id (repeatable)")
+def init(
+    workspace: str | None,
+    producer_id: str | None,
+    apply: bool,
+    clients: tuple[str, ...],
+) -> None:
+    """Auto-discover MCP clients and wire agentbus (idempotent)."""
+    try:
+        ws = resolve_workspace(workspace)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    pid = _producer_id(producer_id)
+    result = apply_init(
+        ws,
+        producer_id=pid,
+        dry_run=not apply,
+        clients=list(clients) if clients else None,
+    )
+    click.echo(format_init_summary(result))
+
+
+@main.command()
+@click.option("--workspace", default=None, help="Workspace root (default: git root or cwd)")
+@click.option("--topic", default=None, help="Filter by topic")
+@click.option("--interval", default=1.0, show_default=True, help="Refresh seconds")
+@click.option("--once", is_flag=True, help="Print snapshot and exit")
+@click.option("--retention-days", default=7, show_default=True)
+def monitor(
+    workspace: str | None,
+    topic: str | None,
+    interval: float,
+    once: bool,
+    retention_days: int,
+) -> None:
+    """Tail events.db (rich TUI when available)."""
+    try:
+        ws = resolve_workspace(workspace)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    run_monitor(ws, topic=topic, interval=interval, once=once, retention_days=retention_days)
+
+
+@main.command()
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--producer-id", default=None)
+@click.option("--retention-days", default=7, show_default=True)
+def ping(workspace: str, producer_id: str | None, retention_days: int) -> None:
+    """Publish a synthetic okf/handoff PING event."""
+    ws = Path(workspace)
+    pid = _producer_id(producer_id)
+    try:
+        result = publish_ping(ws, producer_id=pid, retention_days=retention_days)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result))
 
 
 if __name__ == "__main__":
