@@ -113,6 +113,8 @@ def serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
     default=None,
     help="SLA window; auto-escalate to okf/dead-letter if no causation_id reply",
 )
+@click.option("--trace-id", default=None, help="Distributed trace ID (W3C-style lineage)")
+@click.option("--parent-span-id", default=None, help="Parent span for trace waterfall")
 @click.option("--token", default=None, help="Publish auth token (default: workspace file)")
 @click.option("--retention-days", default=7, show_default=True)
 def publish(
@@ -125,6 +127,8 @@ def publish(
     causation_id: int | None,
     idempotency_key: str | None,
     sla_timeout_minutes: int | None,
+    trace_id: str | None,
+    parent_span_id: str | None,
     token: str | None,
     retention_days: int,
 ) -> None:
@@ -151,19 +155,22 @@ def publish(
                 idempotency_key=idempotency_key,
                 auth_token=token,
                 sla_timeout_minutes=sla_timeout_minutes,
+                trace_id=trace_id,
+                parent_span_id=parent_span_id,
             )
         except ForbiddenError as exc:
             raise click.ClickException(str(exc)) from exc
-        click.echo(
-            json.dumps(
-                {
-                    "event_id": event.event_id,
-                    "topic": event.topic,
-                    "timestamp": event.timestamp,
-                    "duplicate": duplicate,
-                }
-            )
-        )
+        out = {
+            "event_id": event.event_id,
+            "topic": event.topic,
+            "timestamp": event.timestamp,
+            "duplicate": duplicate,
+        }
+        if event.span_id:
+            out["span_id"] = event.span_id
+        if event.trace_id:
+            out["trace_id"] = event.trace_id
+        click.echo(json.dumps(out))
     finally:
         store.close()
 
@@ -547,6 +554,28 @@ def reject(
         )
     except (ValueError, ForbiddenError) as exc:
         raise click.ClickException(str(exc)) from exc
+    finally:
+        store.close()
+
+
+@main.command()
+@click.argument("trace_id")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--retention-days", default=7, show_default=True)
+def trace(workspace: str, trace_id: str, retention_days: int) -> None:
+    """Render a hierarchical trace waterfall for a trace_id."""
+    from agentbus.tracing import build_trace_tree, render_trace_tree
+
+    store = _open_store(workspace, retention_days)
+    try:
+        events = store.fetch_trace_events(trace_id)
+        roots = build_trace_tree(events)
+        try:
+            click.echo(render_trace_tree(trace_id, roots))
+        except ImportError as exc:
+            raise click.ClickException(
+                "rich required for trace visualization — pip install 'okf-agentbus[devex]'"
+            ) from exc
     finally:
         store.close()
 

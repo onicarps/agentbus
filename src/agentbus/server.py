@@ -62,6 +62,8 @@ def agentbus_publish(
     idempotency_key: str | None = None,
     auth_token: str | None = None,
     sla_timeout_minutes: int | None = None,
+    trace_id: str | None = None,
+    parent_span_id: str | None = None,
 ) -> str:
     """Append one event to the workspace event log."""
     check_publish_token(_auth_workspace(), auth_token=auth_token)
@@ -76,17 +78,22 @@ def agentbus_publish(
             idempotency_key=idempotency_key,
             auth_token=auth_token,
             sla_timeout_minutes=sla_timeout_minutes,
+            trace_id=trace_id,
+            parent_span_id=parent_span_id,
         )
     except ForbiddenError as exc:
         return json.dumps({"error": str(exc), "code": exc.code})
-    return json.dumps(
-        {
-            "event_id": event.event_id,
-            "topic": event.topic,
-            "timestamp": event.timestamp,
-            "duplicate": duplicate,
-        }
-    )
+    out = {
+        "event_id": event.event_id,
+        "topic": event.topic,
+        "timestamp": event.timestamp,
+        "duplicate": duplicate,
+    }
+    if event.span_id:
+        out["span_id"] = event.span_id
+    if event.trace_id:
+        out["trace_id"] = event.trace_id
+    return json.dumps(out)
 
 
 @mcp.tool()

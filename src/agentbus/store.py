@@ -12,6 +12,7 @@ from pathlib import Path
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
 from agentbus.rbac import ForbiddenError, check_approve_rbac, check_publish_rbac
 from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
+from agentbus.tracing import generate_span_id, normalize_parent_span_id, normalize_trace_id
 
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_PENDING = "PENDING_APPROVAL"
@@ -36,6 +37,9 @@ class Event:
     sla_timeout_minutes: int | None = None
     sla_deadline: str | None = None
     sla_cleared: bool = False
+    trace_id: str | None = None
+    span_id: str | None = None
+    parent_span_id: str | None = None
 
     def to_dict(self) -> dict:
         data = {
@@ -59,6 +63,12 @@ class Event:
             data["sla_deadline"] = self.sla_deadline
         if self.sla_cleared:
             data["sla_cleared"] = True
+        if self.trace_id:
+            data["trace_id"] = self.trace_id
+        if self.span_id:
+            data["span_id"] = self.span_id
+        if self.parent_span_id:
+            data["parent_span_id"] = self.parent_span_id
         return data
 
 
@@ -93,6 +103,20 @@ class EventStore:
         self._conn.commit()
         self._migrate_hitl_columns()
         self._migrate_sla_columns()
+        self._migrate_trace_columns()
+
+    def _migrate_trace_columns(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "trace_id" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN trace_id TEXT")
+        if "span_id" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN span_id TEXT")
+        if "parent_span_id" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN parent_span_id TEXT")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id)"
+        )
+        self._conn.commit()
 
     def _migrate_sla_columns(self) -> None:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
@@ -236,6 +260,8 @@ class EventStore:
         auth_token: str | None = None,
         skip_rbac: bool = False,
         sla_timeout_minutes: int | None = None,
+        trace_id: str | None = None,
+        parent_span_id: str | None = None,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
         if idempotency_key:
@@ -262,6 +288,10 @@ class EventStore:
             if sla_timeout_minutes < 1:
                 raise ValueError("invalid_sla_timeout_minutes: must be >= 1")
 
+        trace_id = normalize_trace_id(trace_id)
+        parent_span_id = normalize_parent_span_id(parent_span_id)
+        span_id = generate_span_id()
+
         event_status = status or STATUS_PUBLISHED
         event_pending_until = pending_until
 
@@ -284,8 +314,9 @@ class EventStore:
             INSERT INTO events
                 (topic, producer_id, timestamp, schema_version, payload,
                  causation_id, idempotency_key, status, pending_until,
-                 sla_timeout_minutes, sla_deadline, sla_cleared)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                 sla_timeout_minutes, sla_deadline, sla_cleared,
+                 trace_id, span_id, parent_span_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
             (
                 topic,
@@ -299,6 +330,9 @@ class EventStore:
                 event_pending_until,
                 sla_timeout_minutes,
                 sla_deadline,
+                trace_id,
+                span_id,
+                parent_span_id,
             ),
         )
         self._conn.commit()
@@ -349,6 +383,17 @@ class EventStore:
                 """,
                 (STATUS_PENDING, limit),
             ).fetchall()
+        return [self._row_to_event(r).to_dict() for r in rows]
+
+    def fetch_trace_events(self, trace_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE trace_id = ?
+            ORDER BY event_id ASC
+            """,
+            (trace_id,),
+        ).fetchall()
         return [self._row_to_event(r).to_dict() for r in rows]
 
     def get_event(self, event_id: int) -> Event | None:
@@ -547,4 +592,7 @@ class EventStore:
             ),
             sla_deadline=row["sla_deadline"] if "sla_deadline" in keys else None,
             sla_cleared=bool(row["sla_cleared"]) if "sla_cleared" in keys else False,
+            trace_id=row["trace_id"] if "trace_id" in keys else None,
+            span_id=row["span_id"] if "span_id" in keys else None,
+            parent_span_id=row["parent_span_id"] if "parent_span_id" in keys else None,
         )
