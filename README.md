@@ -99,7 +99,14 @@ Client-specific templates:
 | `agentbus_lock_renew` | Yes | Extend TTL (heartbeat) |
 | `agentbus_lock_status` | No | Check lock state without acquiring |
 
-Full schema: [docs/MCP_SCHEMA.md](docs/MCP_SCHEMA.md)
+## Documentation
+
+For full documentation, see the `docs/` directory:
+- [MCP Schema & Event Reference](docs/MCP_SCHEMA.md)
+- [Authentication](docs/AUTH.md)
+- [Lease Locks Architecture](docs/AGENT_LEASE_LOCKS.md)
+- [End-to-End Walkthrough](docs/WALKTHROUGH.md) - Learn how a PM, Engineer, and QA agent coordinate.
+- [Client Capability Matrix](docs/CLIENT_MATRIX.md) - See how Cursor, Claude, and Antigravity compare.
 
 ## Authentication
 
