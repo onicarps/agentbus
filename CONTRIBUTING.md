@@ -10,6 +10,7 @@ cd agentbus
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pytest tests/ -q
+python tests/factory_validate.py   # MCP integration validation (Agy gate)
 ```
 
 ## What to work on

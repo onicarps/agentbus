@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.2] - 2026-07-07
+
+### Added
+
+- `tests/factory_validate.py` — MCP integration validation (Agy event-56 criteria)
+- `tests/test_factory_mcp_validation.py` — pytest `@integration` wrapper
+
+### Fixed
+
+- Integration validation: real TTL wait, 3-client concurrency hammer, MCP-only auth test
+
 ## [0.2.1] - 2026-07-07
 
 ### Fixed
@@ -36,6 +47,7 @@ All notable changes to this project are documented here.
 - Reference topics: `okf/handoff`, `okf/status/<initiative>`
 - 22 tests including MCP stdio round-trip
 
+[0.2.2]: https://github.com/onicarps/agentbus/releases/tag/v0.2.2
 [0.2.1]: https://github.com/onicarps/agentbus/releases/tag/v0.2.1
 [0.2.0]: https://github.com/onicarps/agentbus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/onicarps/agentbus/releases/tag/v0.1.0
