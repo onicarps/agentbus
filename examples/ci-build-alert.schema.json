@@ -1,0 +1,14 @@
+{
+  "topic": "ci/build-alert",
+  "version": "1.0",
+  "json_schema": {
+    "type": "object",
+    "required": ["build_id", "status"],
+    "additionalProperties": false,
+    "properties": {
+      "build_id": { "type": "string", "minLength": 1 },
+      "status": { "type": "string" },
+      "failure_reason": { "type": ["string", "null"] }
+    }
+  }
+}

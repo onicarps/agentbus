@@ -3,10 +3,23 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
 TOPIC_PATTERN = re.compile(r"^[a-z][a-z0-9._/-]*$")
+_WORKSPACE: Path | None = None
+
+
+def set_validation_workspace(workspace: Path | None) -> None:
+    """Bind workspace for pluggable topic_schemas lookup (CLI/MCP startup)."""
+    global _WORKSPACE
+    _WORKSPACE = workspace.resolve() if workspace else None
+
+
+def validate_topic_name(topic: str) -> None:
+    if not topic or len(topic) > 128 or not TOPIC_PATTERN.match(topic):
+        raise ValueError(f"invalid_topic: {topic}")
 
 DEAD_LETTER_TOPIC = "okf/dead-letter"
 
@@ -54,11 +67,31 @@ STATUS_PAYLOAD_SCHEMA = {
 }
 
 
-def validate_topic(topic: str) -> None:
-    if not topic or len(topic) > 128 or not TOPIC_PATTERN.match(topic):
-        raise ValueError(f"invalid_topic: {topic}")
+def validate_topic(topic: str, *, workspace: Path | None = None) -> None:
+    validate_topic_name(topic)
     if topic in KNOWN_TOPICS or STATUS_TOPIC_PATTERN.match(topic):
         return
+    ws = workspace or _WORKSPACE
+    if ws is not None:
+        from agentbus.schema_registry import load_schema
+
+        if load_schema(ws, topic) is not None:
+            return
+    raise ValueError(f"unknown_topic: {topic}")
+
+
+def _resolve_schema(topic: str, workspace: Path | None = None) -> dict:
+    if STATUS_TOPIC_PATTERN.match(topic):
+        return STATUS_PAYLOAD_SCHEMA
+    if topic in KNOWN_TOPICS:
+        return KNOWN_TOPICS[topic]
+    ws = workspace or _WORKSPACE
+    if ws is not None:
+        from agentbus.schema_registry import load_schema
+
+        custom = load_schema(ws, topic)
+        if custom is not None:
+            return custom
     raise ValueError(f"unknown_topic: {topic}")
 
 
@@ -83,15 +116,14 @@ def normalize_handoff_payload(payload: dict) -> dict:
     return normalized
 
 
-def validate_payload(topic: str, payload: dict) -> dict:
+def validate_payload(
+    topic: str, payload: dict, *, workspace: Path | None = None
+) -> dict:
     """Validate and return normalized payload (may coerce common agent mistakes)."""
-    validate_topic(topic)
+    validate_topic(topic, workspace=workspace)
     if topic == "okf/handoff":
         payload = normalize_handoff_payload(payload)
-    if STATUS_TOPIC_PATTERN.match(topic):
-        schema = STATUS_PAYLOAD_SCHEMA
-    else:
-        schema = KNOWN_TOPICS[topic]
+    schema = _resolve_schema(topic, workspace=workspace)
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(payload), key=lambda e: e.path)
     if errors:
