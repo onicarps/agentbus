@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.6.0] - 2026-07-07
+
+### Added
+
+- Distributed context: `artifacts` table, `publish --attach`, poll hydration
+- 1MB per-artifact limit with `413 Payload Too Large`
+- `artifacts` array in `okf/handoff` payload schema; 4 artifact tests (73 total)
+
 ## [0.5.0] - 2026-07-07
 
 ### Added
