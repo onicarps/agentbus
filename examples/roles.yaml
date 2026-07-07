@@ -1,0 +1,15 @@
+# Swarm RBAC — copy to .agentbus/roles.yaml or run: agentbus config init-rbac
+roles:
+  architect:
+    can_publish_topics: ["okf/handoff", "okf/approval"]
+    can_approve: true
+  engineer:
+    can_publish_topics: ["okf/handoff"]
+    forbidden_payloads: ["*PASS*", "*FAIL*"]
+  qa_droid:
+    can_publish_topics: ["okf/handoff"]
+    requires_crypto_proof: true
+producers:
+  grok: engineer
+  agy: architect
+  hermes: qa_droid

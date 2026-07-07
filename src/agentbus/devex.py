@@ -365,6 +365,7 @@ def publish_ping(
             producer_id=producer_id,
             schema_version="1.0",
             payload=payload,
+            skip_rbac=True,
         )
         return {
             "event_id": event.event_id,

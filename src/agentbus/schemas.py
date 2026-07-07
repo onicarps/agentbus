@@ -23,6 +23,7 @@ KNOWN_TOPICS: dict[str, dict] = {
                 "maxItems": 10,
             },
             "initiative": {"type": "string"},
+            "droid_proof": {"type": "string", "minLength": 8, "maxLength": 256},
         },
     },
 }

@@ -22,6 +22,7 @@ from agentbus.devex import (
     run_monitor,
 )
 from agentbus.intercepts import InterceptRule, add_rule, load_config
+from agentbus.rbac import ForbiddenError, assign_producer_role, ensure_default_roles, mint_droid_proof
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
 from agentbus.schemas import validate_payload
@@ -133,14 +134,18 @@ def publish(
     payload = validate_payload(topic, payload)
     store = _open_store(workspace, retention_days)
     try:
-        event, duplicate = store.publish(
-            topic=topic,
-            producer_id=_producer_id(producer_id),
-            schema_version=schema_version,
-            payload=payload,
-            causation_id=causation_id,
-            idempotency_key=idempotency_key,
-        )
+        try:
+            event, duplicate = store.publish(
+                topic=topic,
+                producer_id=_producer_id(producer_id),
+                schema_version=schema_version,
+                payload=payload,
+                causation_id=causation_id,
+                idempotency_key=idempotency_key,
+                auth_token=token,
+            )
+        except ForbiddenError as exc:
+            raise click.ClickException(str(exc)) from exc
         click.echo(
             json.dumps(
                 {
@@ -443,6 +448,38 @@ def config_list_intercepts(workspace: str) -> None:
     click.echo(json.dumps(load_config(ws).to_dict()))
 
 
+@config.command("init-rbac")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+def config_init_rbac(workspace: str) -> None:
+    """Install default .agentbus/roles.yaml (Swarm RBAC)."""
+    ws = Path(workspace)
+    config = ensure_default_roles(ws)
+    click.echo(
+        json.dumps(
+            {
+                "path": str(ws / ".agentbus" / "roles.yaml"),
+                "producers": config.producers,
+                "roles": list(config.roles.keys()),
+            }
+        )
+    )
+
+
+@main.group()
+def droid() -> None:
+    """Factory droid cryptographic proof tokens."""
+
+
+@droid.command("mint")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--mission-id", default=None)
+@click.option("--ttl-minutes", default=30, show_default=True)
+def droid_mint(workspace: str, mission_id: str | None, ttl_minutes: int) -> None:
+    """Mint a short-lived droid_proof for qa_droid role publishes."""
+    ws = Path(workspace)
+    click.echo(json.dumps(mint_droid_proof(ws, mission_id=mission_id, ttl_minutes=ttl_minutes)))
+
+
 @main.command()
 @click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
 @click.option("--topic", default=None, help="Filter by topic")
@@ -469,8 +506,10 @@ def approve(
     store = _open_store(workspace, retention_days)
     try:
         rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "human")
-        click.echo(json.dumps(store.approve_event(event_id, reviewer_id=rid)))
-    except ValueError as exc:
+        click.echo(
+            json.dumps(store.approve_event(event_id, reviewer_id=rid, auth_token=None))
+        )
+    except (ValueError, ForbiddenError) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -493,8 +532,12 @@ def reject(
     store = _open_store(workspace, retention_days)
     try:
         rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "human")
-        click.echo(json.dumps(store.reject_event(event_id, reviewer_id=rid, reason=reason)))
-    except ValueError as exc:
+        click.echo(
+            json.dumps(
+                store.reject_event(event_id, reviewer_id=rid, reason=reason, auth_token=None)
+            )
+        )
+    except (ValueError, ForbiddenError) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()

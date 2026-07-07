@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okf-agentbus"
-version = "0.3.1"
+version = "0.3.2"
 description = "Local MCP event log for multi-agent workspaces"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,6 +24,7 @@ dependencies = [
     "mcp>=1.0",
     "jsonschema>=4.0",
     "click>=8.0",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
+from agentbus.rbac import ForbiddenError, check_approve_rbac, check_publish_rbac
 
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_PENDING = "PENDING_APPROVAL"
@@ -148,6 +149,8 @@ class EventStore:
         status: str | None = None,
         pending_until: str | None = None,
         skip_intercept: bool = False,
+        auth_token: str | None = None,
+        skip_rbac: bool = False,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
         if idempotency_key:
@@ -157,6 +160,15 @@ class EventStore:
             ).fetchone()
             if existing:
                 return self._row_to_event(existing), True
+
+        if not skip_rbac:
+            check_publish_rbac(
+                self.workspace,
+                producer_id=producer_id,
+                topic=topic,
+                payload=payload,
+                auth_token=auth_token,
+            )
 
         event_status = status or STATUS_PUBLISHED
         event_pending_until = pending_until
@@ -246,7 +258,18 @@ class EventStore:
             return None
         return self._row_to_event(row)
 
-    def approve_event(self, event_id: int, reviewer_id: str) -> dict:
+    def approve_event(
+        self,
+        event_id: int,
+        reviewer_id: str,
+        *,
+        auth_token: str | None = None,
+    ) -> dict:
+        check_approve_rbac(
+            self.workspace,
+            reviewer_id=reviewer_id,
+            auth_token=auth_token,
+        )
         self.expire_pending()
         row = self._conn.execute(
             "SELECT * FROM events WHERE event_id = ?", (event_id,)
@@ -280,7 +303,14 @@ class EventStore:
         event_id: int,
         reviewer_id: str,
         reason: str = "rejected by human reviewer",
+        *,
+        auth_token: str | None = None,
     ) -> dict:
+        check_approve_rbac(
+            self.workspace,
+            reviewer_id=reviewer_id,
+            auth_token=auth_token,
+        )
         row = self._conn.execute(
             "SELECT * FROM events WHERE event_id = ?", (event_id,)
         ).fetchone()
@@ -316,6 +346,7 @@ class EventStore:
             payload=notice_payload,
             causation_id=event_id,
             skip_intercept=True,
+            skip_rbac=True,
         )
         return {
             "event_id": event_id,

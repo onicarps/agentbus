@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
 from agentbus.leases import LeaseStore
+from agentbus.rbac import ForbiddenError
 from agentbus.schemas import validate_payload
 from agentbus.store import EventStore
 
@@ -64,14 +65,18 @@ def agentbus_publish(
     """Append one event to the workspace event log."""
     check_publish_token(_auth_workspace(), auth_token=auth_token)
     payload = validate_payload(topic, payload)
-    event, duplicate = _get_store().publish(
-        topic=topic,
-        producer_id=_producer_id(producer_id),
-        schema_version=schema_version,
-        payload=payload,
-        causation_id=causation_id,
-        idempotency_key=idempotency_key,
-    )
+    try:
+        event, duplicate = _get_store().publish(
+            topic=topic,
+            producer_id=_producer_id(producer_id),
+            schema_version=schema_version,
+            payload=payload,
+            causation_id=causation_id,
+            idempotency_key=idempotency_key,
+            auth_token=auth_token,
+        )
+    except ForbiddenError as exc:
+        return json.dumps({"error": str(exc), "code": exc.code})
     return json.dumps(
         {
             "event_id": event.event_id,
@@ -115,9 +120,12 @@ def agentbus_approve(
     check_publish_token(_auth_workspace(), auth_token=auth_token)
     rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
     try:
-        return json.dumps(_get_store().approve_event(event_id, reviewer_id=rid))
-    except ValueError as exc:
-        return json.dumps({"error": str(exc)})
+        return json.dumps(
+            _get_store().approve_event(event_id, reviewer_id=rid, auth_token=auth_token)
+        )
+    except (ValueError, ForbiddenError) as exc:
+        code = getattr(exc, "code", 400)
+        return json.dumps({"error": str(exc), "code": code})
 
 
 @mcp.tool()
@@ -131,9 +139,14 @@ def agentbus_reject(
     check_publish_token(_auth_workspace(), auth_token=auth_token)
     rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
     try:
-        return json.dumps(_get_store().reject_event(event_id, reviewer_id=rid, reason=reason))
-    except ValueError as exc:
-        return json.dumps({"error": str(exc)})
+        return json.dumps(
+            _get_store().reject_event(
+                event_id, reviewer_id=rid, reason=reason, auth_token=auth_token
+            )
+        )
+    except (ValueError, ForbiddenError) as exc:
+        code = getattr(exc, "code", 400)
+        return json.dumps({"error": str(exc), "code": code})
 
 
 @mcp.tool()
