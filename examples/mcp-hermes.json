@@ -5,7 +5,7 @@
       "args": [],
       "env": {
         "AGENTBUS_WORKSPACE": "/path/to/your/workspace",
-        "AGENTBUS_PRODUCER_ID": "claude"
+        "AGENTBUS_PRODUCER_ID": "hermes"
       }
     }
   }

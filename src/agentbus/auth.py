@@ -59,13 +59,13 @@ def provided_publish_token(
 ) -> str:
     if auth_token:
         return auth_token
-    env_token = os.environ.get("AGENTBUS_TOKEN", "")
-    if env_token:
-        return env_token
     if workspace is not None:
         file_token = read_workspace_token(workspace)
         if file_token:
             return file_token
+    env_token = os.environ.get("AGENTBUS_TOKEN", "")
+    if env_token:
+        return env_token
     return ""
 
 

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [0.2.1] - 2026-07-07
+
+### Fixed
+
+- MCP auth: workspace token file now wins over stale `AGENTBUS_TOKEN` env in subprocesses
+- `mcp-serve.sh` resolves `agentbus` from `$PATH` (pip install) before repo venv
+
+### Changed
+
+- PyPI package renamed to **`agentbus-mcp`** (avoids collision with unrelated `agentbus` NATS project)
+- Docs updated to v0.2: lease tools, 40 tests, Hermes MCP example
+- MCP integration tests for lock tools
+
 ## [0.2.0] - 2026-07-07
 
 ### Added
@@ -23,4 +36,6 @@ All notable changes to this project are documented here.
 - Reference topics: `okf/handoff`, `okf/status/<initiative>`
 - 22 tests including MCP stdio round-trip
 
+[0.2.1]: https://github.com/onicarps/agentbus/releases/tag/v0.2.1
+[0.2.0]: https://github.com/onicarps/agentbus/releases/tag/v0.2.0
 [0.1.0]: https://github.com/onicarps/agentbus/releases/tag/v0.1.0

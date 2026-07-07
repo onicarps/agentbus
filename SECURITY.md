@@ -4,7 +4,8 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | Yes       |
+| 0.2.x   | Yes       |
+| 0.1.x   | Best effort |
 
 ## Reporting a vulnerability
 
@@ -22,22 +23,25 @@ We aim to acknowledge reports within **72 hours**.
 
 In scope:
 
-- The `agentbus` Python package (`src/agentbus/`)
+- The `agentbus-mcp` Python package (`src/agentbus/`)
 - MCP stdio server and CLI
 - Workspace token authentication (`{workspace}/.agentbus/token`)
+- Advisory lease store (`leases` table in `events.db`)
 
 Out of scope:
 
-- Third-party MCP clients (Cursor, Claude Desktop, etc.)
+- Third-party MCP clients (Cursor, Claude Desktop, Hermes, etc.)
 - User workspace content published to topics
 
-## Threat model (v0.1)
+## Threat model (v0.2)
 
-AgentBus v0.1 is designed for **local single-user workspaces**:
+AgentBus is designed for **local single-user workspaces**:
 
 - Persistence is SQLite under `{workspace}/.agentbus/`
 - Auth uses a workspace-scoped ephemeral token file (mode `0600`)
-- Poll and status are unauthenticated; publish requires a valid token when auth is enabled
-- There is no network listener in v0.1 (stdio MCP only)
+- Poll, status, and lock_status are unauthenticated
+- Publish and lock mutations require a valid token when auth is enabled
+- Advisory locks do not enforce OS-level file mutexes — malicious clients can ignore them
+- There is no network listener in v0.2 (stdio MCP only)
 
 Do not expose AgentBus beyond localhost without additional hardening.

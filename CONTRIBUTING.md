@@ -36,7 +36,8 @@ See [ROADMAP.md](ROADMAP.md) and [open issues](https://github.com/onicarps/agent
 | `server.py` | FastMCP tool definitions |
 | `auth.py` | Workspace ephemeral token |
 | `schemas.py` | Topic registry + JSON Schema validation |
-| `cli.py` | `serve`, `publish`, `poll`, `status`, `token`, `project-log` |
+| `leases.py` | Advisory lease store (SQLite `leases` table) |
+| `cli.py` | `serve`, `publish`, `poll`, `status`, `token`, `lock`, `project-log` |
 
 ## Versioning
 

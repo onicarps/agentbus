@@ -1,6 +1,6 @@
-# AgentBus MCP Schema — v0.1
+# AgentBus MCP Schema — v0.2
 
-Canonical tool and event contract for the events-only MVP.
+Canonical tool and event contract.
 
 ## Server
 
@@ -9,7 +9,7 @@ Canonical tool and event contract for the events-only MVP.
 | Name | `agentbus` |
 | Transport | stdio |
 | Runtime | Python 3.11+ |
-| Persistence | `{workspace}/.agentbus/events.db` |
+| Persistence | `{workspace}/.agentbus/events.db` (events + leases tables) |
 
 ## Event envelope
 
@@ -64,9 +64,11 @@ Required: `from`, `to`, `summary`.
 
 `state` enum: `idle`, `active`, `blocked`, `complete`.
 
-## Tools
+## Event tools
 
 ### `agentbus_publish`
+
+**Auth:** Required when workspace token exists.
 
 **Input:** `topic`, `payload`, optional `schema_version`, `producer_id`, `causation_id`, `idempotency_key`, `auth_token`
 
@@ -79,6 +81,8 @@ Required: `from`, `to`, `summary`.
 **Errors:** `unknown_topic`, `invalid_payload`, `unauthorized`
 
 ### `agentbus_poll`
+
+**Auth:** Not required.
 
 **Input:** `topic`, `since_id` (default 0), `limit` (max 100)
 
@@ -96,6 +100,8 @@ Semantics: at-least-once delivery; client advances cursor to `latest_id`.
 
 ### `agentbus_status`
 
+**Auth:** Not required.
+
 **Success:**
 
 ```json
@@ -105,6 +111,76 @@ Semantics: at-least-once delivery; client advances cursor to `latest_id`.
   "latest_event_id": 42,
   "topics": ["okf/handoff"],
   "retention_days": 7
+}
+```
+
+## Lease tools (v0.2)
+
+Advisory locks only — clients must cooperate. Resources are **absolute paths** within the workspace.
+
+| Parameter | Rules |
+|-----------|-------|
+| `resource` | Absolute file or directory path |
+| `owner_id` | Agent identity (`[a-z][a-z0-9-]*`) |
+| `ttl_seconds` | Default 300, max 3600 |
+| `lease_id` | UUID returned by acquire |
+
+### `agentbus_lock_acquire`
+
+**Auth:** Required.
+
+**Input:** `resource`, `owner_id`, optional `ttl_seconds`, `auth_token`
+
+**Success (acquired):**
+
+```json
+{"acquired": true, "lease_id": "<uuid>", "expires_at": "2026-07-07T12:00:00Z", "resource": "/path"}
+```
+
+**Held by another owner:**
+
+```json
+{"acquired": false, "current_owner": "hermes", "expires_at": "...", "resource": "/path"}
+```
+
+### `agentbus_lock_release`
+
+**Auth:** Required.
+
+**Input:** `resource`, `lease_id`, `owner_id`, `auth_token`
+
+**Success:** `{"released": true}` (idempotent if already expired)
+
+### `agentbus_lock_renew`
+
+**Auth:** Required.
+
+**Input:** `resource`, `lease_id`, `owner_id`, optional `ttl_seconds`, `auth_token`
+
+**Success:** `{"renewed": true, "expires_at": "..."}` or `{"renewed": false}` if expired
+
+### `agentbus_lock_status`
+
+**Auth:** Not required.
+
+**Input:** `resource`
+
+**Unlocked:**
+
+```json
+{"locked": false, "resource": "/path"}
+```
+
+**Locked:**
+
+```json
+{
+  "locked": true,
+  "resource": "/path",
+  "lease_id": "<uuid>",
+  "current_owner": "hermes",
+  "acquired_at": "...",
+  "expires_at": "..."
 }
 ```
 

@@ -19,18 +19,20 @@ def server_params(tmp_path):
     agentbus_bin = ROOT / ".venv" / "bin" / "agentbus"
     if not agentbus_bin.exists():
         pytest.skip("agentbus not installed — run pip install -e '.[dev]'")
-    return StdioServerParameters(
+    params = StdioServerParameters(
         command=str(agentbus_bin),
         args=["serve", "--workspace", str(ws)],
         env={
             "AGENTBUS_PRODUCER_ID": "pytest",
         },
     )
+    return ws, params
 
 
 @pytest.mark.asyncio
 async def test_mcp_publish_poll_roundtrip(server_params):
-    async with stdio_client(server_params) as (read, write):
+    ws, params = server_params
+    async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
@@ -39,6 +41,10 @@ async def test_mcp_publish_poll_roundtrip(server_params):
             assert "agentbus_publish" in names
             assert "agentbus_poll" in names
             assert "agentbus_status" in names
+            assert "agentbus_lock_acquire" in names
+            assert "agentbus_lock_release" in names
+            assert "agentbus_lock_renew" in names
+            assert "agentbus_lock_status" in names
 
             payload = {
                 "from": "grok",
@@ -70,3 +76,28 @@ async def test_mcp_publish_poll_roundtrip(server_params):
             status_data = json.loads(status.content[0].text)
             assert status_data["event_count"] == 1
             assert "okf/handoff" in status_data["topics"]
+
+            resource = str(ws / "shared.md")
+            lock = await session.call_tool(
+                "agentbus_lock_acquire",
+                {"resource": resource, "owner_id": "pytest"},
+            )
+            lock_data = json.loads(lock.content[0].text)
+            assert lock_data["acquired"] is True
+            lease_id = lock_data["lease_id"]
+
+            lock_status = await session.call_tool(
+                "agentbus_lock_status",
+                {"resource": resource},
+            )
+            assert json.loads(lock_status.content[0].text)["locked"] is True
+
+            release = await session.call_tool(
+                "agentbus_lock_release",
+                {
+                    "resource": resource,
+                    "lease_id": lease_id,
+                    "owner_id": "pytest",
+                },
+            )
+            assert json.loads(release.content[0].text)["released"] is True

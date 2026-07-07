@@ -116,9 +116,9 @@ def test_normalize_resource_absolute(ws):
 
 def test_lock_auth_required(monkeypatch, ws):
     write_workspace_token(ws, "secret")
-    monkeypatch.setenv("AGENTBUS_TOKEN", "wrong-token")
+    monkeypatch.delenv("AGENTBUS_TOKEN", raising=False)
     with pytest.raises(ValueError, match="unauthorized"):
-        check_publish_token(ws)
+        check_publish_token(ws, auth_token="wrong-token")
 
 
 def test_uses_events_db_not_separate_file(ws, leases):

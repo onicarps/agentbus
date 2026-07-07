@@ -43,12 +43,12 @@ def test_missing_token_raises(monkeypatch, tmp_path):
         check_publish_token(tmp_path)
 
 
-def test_workspace_token_file_rejects_wrong_token(monkeypatch, tmp_path):
+def test_workspace_token_file_preferred_over_stale_env(monkeypatch, tmp_path):
+    """MCP subprocess may carry a stale AGENTBUS_TOKEN; file token wins."""
     monkeypatch.delenv("AGENTBUS_EXPECTED_TOKEN", raising=False)
     write_workspace_token(tmp_path, "ws-secret")
     monkeypatch.setenv("AGENTBUS_TOKEN", "wrong")
-    with pytest.raises(ValueError, match="unauthorized"):
-        check_publish_token(tmp_path)
+    check_publish_token(tmp_path)
 
 
 def test_workspace_token_file_auto_provided(monkeypatch, tmp_path):
