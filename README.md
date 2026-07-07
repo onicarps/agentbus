@@ -27,7 +27,7 @@ AgentBus is a **localhost sidecar**: a Python MCP server backed by SQLite. Agent
 
 ```bash
 # Recommended — from GitHub (PyPI name: agentbus-mcp)
-pip install "agentbus-mcp @ git+https://github.com/onicarps/agentbus@v0.2.1"
+pip install "agentbus-mcp @ git+https://github.com/onicarps/agentbus@v0.2.2"
 
 # Or clone for development
 git clone https://github.com/onicarps/agentbus.git
