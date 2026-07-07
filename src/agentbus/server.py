@@ -61,6 +61,7 @@ def agentbus_publish(
     causation_id: int | None = None,
     idempotency_key: str | None = None,
     auth_token: str | None = None,
+    sla_timeout_minutes: int | None = None,
 ) -> str:
     """Append one event to the workspace event log."""
     check_publish_token(_auth_workspace(), auth_token=auth_token)
@@ -74,6 +75,7 @@ def agentbus_publish(
             causation_id=causation_id,
             idempotency_key=idempotency_key,
             auth_token=auth_token,
+            sla_timeout_minutes=sla_timeout_minutes,
         )
     except ForbiddenError as exc:
         return json.dumps({"error": str(exc), "code": exc.code})

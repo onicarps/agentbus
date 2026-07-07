@@ -107,6 +107,12 @@ def serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
 @click.option("--producer-id", default=None)
 @click.option("--causation-id", type=int, default=None)
 @click.option("--idempotency-key", default=None)
+@click.option(
+    "--sla-timeout-minutes",
+    type=int,
+    default=None,
+    help="SLA window; auto-escalate to okf/dead-letter if no causation_id reply",
+)
 @click.option("--token", default=None, help="Publish auth token (default: workspace file)")
 @click.option("--retention-days", default=7, show_default=True)
 def publish(
@@ -118,6 +124,7 @@ def publish(
     producer_id: str | None,
     causation_id: int | None,
     idempotency_key: str | None,
+    sla_timeout_minutes: int | None,
     token: str | None,
     retention_days: int,
 ) -> None:
@@ -143,6 +150,7 @@ def publish(
                 causation_id=causation_id,
                 idempotency_key=idempotency_key,
                 auth_token=token,
+                sla_timeout_minutes=sla_timeout_minutes,
             )
         except ForbiddenError as exc:
             raise click.ClickException(str(exc)) from exc

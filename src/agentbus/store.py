@@ -11,10 +11,13 @@ from pathlib import Path
 
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
 from agentbus.rbac import ForbiddenError, check_approve_rbac, check_publish_rbac
+from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
 
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_PENDING = "PENDING_APPROVAL"
 STATUS_REJECTED = "REJECTED"
+STATUS_TIMEOUT_FAILED = "TIMEOUT_FAILED"
+SLA_BREACH_REASON = "SLA_BREACH"
 
 
 @dataclass
@@ -30,6 +33,9 @@ class Event:
     status: str = STATUS_PUBLISHED
     pending_until: str | None = None
     rejection_reason: str | None = None
+    sla_timeout_minutes: int | None = None
+    sla_deadline: str | None = None
+    sla_cleared: bool = False
 
     def to_dict(self) -> dict:
         data = {
@@ -47,6 +53,12 @@ class Event:
             data["pending_until"] = self.pending_until
         if self.rejection_reason:
             data["rejection_reason"] = self.rejection_reason
+        if self.sla_timeout_minutes is not None:
+            data["sla_timeout_minutes"] = self.sla_timeout_minutes
+        if self.sla_deadline:
+            data["sla_deadline"] = self.sla_deadline
+        if self.sla_cleared:
+            data["sla_cleared"] = True
         return data
 
 
@@ -80,6 +92,19 @@ class EventStore:
         )
         self._conn.commit()
         self._migrate_hitl_columns()
+        self._migrate_sla_columns()
+
+    def _migrate_sla_columns(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "sla_timeout_minutes" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN sla_timeout_minutes INTEGER")
+        if "sla_deadline" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN sla_deadline TEXT")
+        if "sla_cleared" not in cols:
+            self._conn.execute(
+                "ALTER TABLE events ADD COLUMN sla_cleared INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.commit()
 
     def _migrate_hitl_columns(self) -> None:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
@@ -137,6 +162,65 @@ class EventStore:
             rejected.append(result["event_id"])
         return rejected
 
+    def expire_sla_breaches(self) -> list[int]:
+        """Mark SLA-expired events TIMEOUT_FAILED and publish okf/dead-letter escalations."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE status = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
+              AND sla_deadline < ?
+            ORDER BY event_id ASC
+            """,
+            (STATUS_PUBLISHED, now),
+        ).fetchall()
+        timed_out: list[int] = []
+        for row in rows:
+            event = self._row_to_event(row)
+            self._conn.execute(
+                "UPDATE events SET status = ? WHERE event_id = ?",
+                (STATUS_TIMEOUT_FAILED, event.event_id),
+            )
+            self._conn.commit()
+            dead_letter_payload = validate_payload(
+                DEAD_LETTER_TOPIC,
+                {
+                    "reason": SLA_BREACH_REASON,
+                    "original_event_id": event.event_id,
+                    "original_event": event.to_dict(),
+                    "summary": (
+                        f"SLA breach: no response within "
+                        f"{event.sla_timeout_minutes}m for event {event.event_id}"
+                    ),
+                },
+            )
+            self.publish(
+                topic=DEAD_LETTER_TOPIC,
+                producer_id="agentbus",
+                schema_version=event.schema_version,
+                payload=dead_letter_payload,
+                causation_id=event.event_id,
+                skip_intercept=True,
+                skip_rbac=True,
+            )
+            timed_out.append(event.event_id)
+        return timed_out
+
+    def _clear_sla(self, event_id: int) -> None:
+        self._conn.execute(
+            """
+            UPDATE events SET sla_cleared = 1
+            WHERE event_id = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
+            """,
+            (event_id,),
+        )
+        self._conn.commit()
+
+    def _sla_deadline_from_now(self, minutes: int) -> str:
+        return (
+            datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     def publish(
         self,
         *,
@@ -151,6 +235,7 @@ class EventStore:
         skip_intercept: bool = False,
         auth_token: str | None = None,
         skip_rbac: bool = False,
+        sla_timeout_minutes: int | None = None,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
         if idempotency_key:
@@ -170,6 +255,13 @@ class EventStore:
                 auth_token=auth_token,
             )
 
+        if causation_id is not None:
+            self._clear_sla(causation_id)
+
+        if sla_timeout_minutes is not None:
+            if sla_timeout_minutes < 1:
+                raise ValueError("invalid_sla_timeout_minutes: must be >= 1")
+
         event_status = status or STATUS_PUBLISHED
         event_pending_until = pending_until
 
@@ -182,13 +274,18 @@ class EventStore:
                     datetime.now(timezone.utc) + ttl
                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+        sla_deadline = None
+        if sla_timeout_minutes is not None and event_status == STATUS_PUBLISHED:
+            sla_deadline = self._sla_deadline_from_now(sla_timeout_minutes)
+
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         cur = self._conn.execute(
             """
             INSERT INTO events
                 (topic, producer_id, timestamp, schema_version, payload,
-                 causation_id, idempotency_key, status, pending_until)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 causation_id, idempotency_key, status, pending_until,
+                 sla_timeout_minutes, sla_deadline, sla_cleared)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """,
             (
                 topic,
@@ -200,6 +297,8 @@ class EventStore:
                 idempotency_key,
                 event_status,
                 event_pending_until,
+                sla_timeout_minutes,
+                sla_deadline,
             ),
         )
         self._conn.commit()
@@ -211,6 +310,7 @@ class EventStore:
 
     def poll(self, topic: str, since_id: int = 0, limit: int = 50) -> dict:
         self.expire_pending()
+        self.expire_sla_breaches()
         rows = self._conn.execute(
             """
             SELECT * FROM events
@@ -228,6 +328,7 @@ class EventStore:
 
     def review_pending(self, topic: str | None = None, limit: int = 50) -> list[dict]:
         self.expire_pending()
+        self.expire_sla_breaches()
         if topic:
             rows = self._conn.execute(
                 """
@@ -280,13 +381,27 @@ class EventStore:
         if event.status != STATUS_PENDING:
             raise ValueError(f"event_not_pending: {event_id} status={event.status}")
 
+        updates = {
+            "status": STATUS_PUBLISHED,
+            "pending_until": None,
+            "rejection_reason": None,
+        }
+        if event.sla_timeout_minutes and not event.sla_deadline:
+            updates["sla_deadline"] = self._sla_deadline_from_now(
+                event.sla_timeout_minutes
+            )
         self._conn.execute(
             """
             UPDATE events
-            SET status = ?, pending_until = NULL, rejection_reason = NULL
+            SET status = ?, pending_until = NULL, rejection_reason = NULL,
+                sla_deadline = COALESCE(?, sla_deadline)
             WHERE event_id = ?
             """,
-            (STATUS_PUBLISHED, event_id),
+            (
+                STATUS_PUBLISHED,
+                updates.get("sla_deadline"),
+                event_id,
+            ),
         )
         self._conn.commit()
         updated = self.get_event(event_id)
@@ -380,11 +495,19 @@ class EventStore:
 
     def status(self, producer_id: str | None = None) -> dict:
         self.expire_pending()
+        self.expire_sla_breaches()
         count = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
         latest = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()["m"]
         pending = self._conn.execute(
             "SELECT COUNT(*) AS c FROM events WHERE status = ?",
             (STATUS_PENDING,),
+        ).fetchone()["c"]
+        sla_active = self._conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM events
+            WHERE status = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
+            """,
+            (STATUS_PUBLISHED,),
         ).fetchone()["c"]
         topics = [
             r["topic"]
@@ -397,6 +520,7 @@ class EventStore:
             "event_count": count,
             "latest_event_id": latest or 0,
             "pending_approval_count": pending,
+            "sla_active_count": sla_active,
             "hitl_enabled": not hitl_disabled(),
             "topics": topics,
             "retention_days": self.retention_days,
@@ -418,4 +542,9 @@ class EventStore:
             status=row["status"] if "status" in keys else STATUS_PUBLISHED,
             pending_until=row["pending_until"] if "pending_until" in keys else None,
             rejection_reason=row["rejection_reason"] if "rejection_reason" in keys else None,
+            sla_timeout_minutes=(
+                row["sla_timeout_minutes"] if "sla_timeout_minutes" in keys else None
+            ),
+            sla_deadline=row["sla_deadline"] if "sla_deadline" in keys else None,
+            sla_cleared=bool(row["sla_cleared"]) if "sla_cleared" in keys else False,
         )

@@ -8,7 +8,20 @@ from jsonschema import Draft202012Validator
 
 TOPIC_PATTERN = re.compile(r"^[a-z][a-z0-9._/-]*$")
 
+DEAD_LETTER_TOPIC = "okf/dead-letter"
+
 KNOWN_TOPICS: dict[str, dict] = {
+    DEAD_LETTER_TOPIC: {
+        "type": "object",
+        "required": ["reason", "original_event_id", "original_event", "summary"],
+        "additionalProperties": False,
+        "properties": {
+            "reason": {"enum": ["SLA_BREACH"]},
+            "original_event_id": {"type": "integer", "minimum": 1},
+            "original_event": {"type": "object"},
+            "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+    },
     "okf/handoff": {
         "type": "object",
         "required": ["from", "to", "summary"],
