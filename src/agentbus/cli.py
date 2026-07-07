@@ -21,6 +21,7 @@ from agentbus.devex import (
     resolve_workspace,
     run_monitor,
 )
+from agentbus.intercepts import InterceptRule, add_rule, load_config
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
 from agentbus.schemas import validate_payload
@@ -412,6 +413,91 @@ def monitor(
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     run_monitor(ws, topic=topic, interval=interval, once=once, retention_days=retention_days)
+
+
+@main.group()
+def config() -> None:
+    """Workspace intercept rules (HITL)."""
+
+
+@config.command("set-intercept")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--topic", required=True)
+@click.option("--contains", required=True, help="Substring match in JSON payload")
+@click.option("--ttl-minutes", default=60, show_default=True)
+def config_set_intercept(
+    workspace: str, topic: str, contains: str, ttl_minutes: int
+) -> None:
+    """Add or update an intercept rule (matched events require human approval)."""
+    ws = Path(workspace)
+    rule = InterceptRule(topic=topic, contains=contains, ttl_minutes=ttl_minutes)
+    config_data = add_rule(ws, rule)
+    click.echo(json.dumps({"path": str(ws / ".agentbus" / "intercepts.json"), "rules": config_data.to_dict()["rules"]}))
+
+
+@config.command("list-intercepts")
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+def config_list_intercepts(workspace: str) -> None:
+    """List configured intercept rules."""
+    ws = Path(workspace)
+    click.echo(json.dumps(load_config(ws).to_dict()))
+
+
+@main.command()
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--topic", default=None, help="Filter by topic")
+@click.option("--limit", default=50, show_default=True)
+@click.option("--retention-days", default=7, show_default=True)
+def review(workspace: str, topic: str | None, limit: int, retention_days: int) -> None:
+    """List events pending human approval (hidden from agent poll)."""
+    store = _open_store(workspace, retention_days)
+    try:
+        click.echo(json.dumps(store.review_pending(topic=topic, limit=limit)))
+    finally:
+        store.close()
+
+
+@main.command()
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.argument("event_id", type=int)
+@click.option("--reviewer-id", default=None)
+@click.option("--retention-days", default=7, show_default=True)
+def approve(
+    workspace: str, event_id: int, reviewer_id: str | None, retention_days: int
+) -> None:
+    """Approve a pending event — makes it visible to agent poll."""
+    store = _open_store(workspace, retention_days)
+    try:
+        rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "human")
+        click.echo(json.dumps(store.approve_event(event_id, reviewer_id=rid)))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        store.close()
+
+
+@main.command()
+@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.argument("event_id", type=int)
+@click.option("--reason", default="rejected by human reviewer", show_default=True)
+@click.option("--reviewer-id", default=None)
+@click.option("--retention-days", default=7, show_default=True)
+def reject(
+    workspace: str,
+    event_id: int,
+    reason: str,
+    reviewer_id: str | None,
+    retention_days: int,
+) -> None:
+    """Reject a pending event and notify the originating agent."""
+    store = _open_store(workspace, retention_days)
+    try:
+        rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "human")
+        click.echo(json.dumps(store.reject_event(event_id, reviewer_id=rid, reason=reason)))
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        store.close()
 
 
 @main.command()

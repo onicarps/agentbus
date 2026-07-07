@@ -9,6 +9,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agentbus.intercepts import DEFAULT_TTL_MINUTES, match_rule
+
+STATUS_PUBLISHED = "PUBLISHED"
+STATUS_PENDING = "PENDING_APPROVAL"
+STATUS_REJECTED = "REJECTED"
+
 
 @dataclass
 class Event:
@@ -20,9 +26,12 @@ class Event:
     payload: dict
     causation_id: int | None
     idempotency_key: str | None
+    status: str = STATUS_PUBLISHED
+    pending_until: str | None = None
+    rejection_reason: str | None = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "event_id": self.event_id,
             "topic": self.topic,
             "producer_id": self.producer_id,
@@ -31,7 +40,13 @@ class Event:
             "payload": self.payload,
             "causation_id": self.causation_id,
             "idempotency_key": self.idempotency_key,
+            "status": self.status,
         }
+        if self.pending_until:
+            data["pending_until"] = self.pending_until
+        if self.rejection_reason:
+            data["rejection_reason"] = self.rejection_reason
+        return data
 
 
 class EventStore:
@@ -63,6 +78,27 @@ class EventStore:
             """
         )
         self._conn.commit()
+        self._migrate_hitl_columns()
+
+    def _migrate_hitl_columns(self) -> None:
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
+        if "status" not in cols:
+            self._conn.execute(
+                f"ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT '{STATUS_PUBLISHED}'"
+            )
+        if "pending_until" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN pending_until TEXT")
+        if "rejection_reason" not in cols:
+            self._conn.execute("ALTER TABLE events ADD COLUMN rejection_reason TEXT")
+        if "projected_to_log" not in cols:
+            self._conn.execute(
+                "ALTER TABLE events ADD COLUMN projected_to_log INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.execute("UPDATE events SET projected_to_log = 1")
+        self._conn.execute(
+            f"UPDATE events SET status = '{STATUS_PUBLISHED}' WHERE status IS NULL OR status = ''"
+        )
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -80,6 +116,26 @@ class EventStore:
         self._conn.commit()
         return cur.rowcount
 
+    def expire_pending(self) -> list[int]:
+        """Auto-reject pending events past pending_until. Returns rejected event ids."""
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = self._conn.execute(
+            """
+            SELECT event_id FROM events
+            WHERE status = ? AND pending_until IS NOT NULL AND pending_until < ?
+            """,
+            (STATUS_PENDING, now),
+        ).fetchall()
+        rejected: list[int] = []
+        for row in rows:
+            result = self.reject_event(
+                row["event_id"],
+                reviewer_id="hitl",
+                reason="auto-rejected: approval TTL expired",
+            )
+            rejected.append(result["event_id"])
+        return rejected
+
     def publish(
         self,
         *,
@@ -89,6 +145,9 @@ class EventStore:
         payload: dict,
         causation_id: int | None = None,
         idempotency_key: str | None = None,
+        status: str | None = None,
+        pending_until: str | None = None,
+        skip_intercept: bool = False,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
         if idempotency_key:
@@ -99,13 +158,25 @@ class EventStore:
             if existing:
                 return self._row_to_event(existing), True
 
+        event_status = status or STATUS_PUBLISHED
+        event_pending_until = pending_until
+
+        if not skip_intercept and event_status == STATUS_PUBLISHED:
+            rule = match_rule(self.workspace, topic, payload)
+            if rule:
+                event_status = STATUS_PENDING
+                ttl = timedelta(minutes=rule.ttl_minutes or DEFAULT_TTL_MINUTES)
+                event_pending_until = (
+                    datetime.now(timezone.utc) + ttl
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         cur = self._conn.execute(
             """
             INSERT INTO events
                 (topic, producer_id, timestamp, schema_version, payload,
-                 causation_id, idempotency_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                 causation_id, idempotency_key, status, pending_until)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 topic,
@@ -115,6 +186,8 @@ class EventStore:
                 json.dumps(payload),
                 causation_id,
                 idempotency_key,
+                event_status,
+                event_pending_until,
             ),
         )
         self._conn.commit()
@@ -125,14 +198,15 @@ class EventStore:
         return self._row_to_event(row), False
 
     def poll(self, topic: str, since_id: int = 0, limit: int = 50) -> dict:
+        self.expire_pending()
         rows = self._conn.execute(
             """
             SELECT * FROM events
-            WHERE topic = ? AND event_id > ?
+            WHERE topic = ? AND event_id > ? AND status = ?
             ORDER BY event_id ASC
             LIMIT ?
             """,
-            (topic, since_id, limit + 1),
+            (topic, since_id, STATUS_PUBLISHED, limit + 1),
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
@@ -140,9 +214,147 @@ class EventStore:
         latest_id = events[-1]["event_id"] if events else since_id
         return {"events": events, "latest_id": latest_id, "has_more": has_more}
 
+    def review_pending(self, topic: str | None = None, limit: int = 50) -> list[dict]:
+        self.expire_pending()
+        if topic:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM events
+                WHERE status = ? AND topic = ?
+                ORDER BY event_id ASC
+                LIMIT ?
+                """,
+                (STATUS_PENDING, topic, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM events
+                WHERE status = ?
+                ORDER BY event_id ASC
+                LIMIT ?
+                """,
+                (STATUS_PENDING, limit),
+            ).fetchall()
+        return [self._row_to_event(r).to_dict() for r in rows]
+
+    def get_event(self, event_id: int) -> Event | None:
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_event(row)
+
+    def approve_event(self, event_id: int, reviewer_id: str) -> dict:
+        self.expire_pending()
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"event_not_found: {event_id}")
+        event = self._row_to_event(row)
+        if event.status != STATUS_PENDING:
+            raise ValueError(f"event_not_pending: {event_id} status={event.status}")
+
+        self._conn.execute(
+            """
+            UPDATE events
+            SET status = ?, pending_until = NULL, rejection_reason = NULL
+            WHERE event_id = ?
+            """,
+            (STATUS_PUBLISHED, event_id),
+        )
+        self._conn.commit()
+        updated = self.get_event(event_id)
+        assert updated is not None
+        return {
+            "event_id": event_id,
+            "status": STATUS_PUBLISHED,
+            "reviewer_id": reviewer_id,
+            "event": updated.to_dict(),
+        }
+
+    def reject_event(
+        self,
+        event_id: int,
+        reviewer_id: str,
+        reason: str = "rejected by human reviewer",
+    ) -> dict:
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"event_not_found: {event_id}")
+        event = self._row_to_event(row)
+        if event.status not in (STATUS_PENDING,):
+            raise ValueError(f"event_not_pending: {event_id} status={event.status}")
+
+        self._conn.execute(
+            """
+            UPDATE events
+            SET status = ?, pending_until = NULL, rejection_reason = ?
+            WHERE event_id = ?
+            """,
+            (STATUS_REJECTED, reason, event_id),
+        )
+        self._conn.commit()
+
+        notice_payload = {
+            "from": "hitl",
+            "to": event.producer_id,
+            "summary": (
+                f"REJECTED event {event_id} on {event.topic}: {reason}. "
+                f"Original: {event.payload.get('summary', '')[:200]}"
+            ),
+            "links": [f"event://{event_id}"],
+        }
+        notice, _ = self.publish(
+            topic="okf/handoff",
+            producer_id=reviewer_id,
+            schema_version=event.schema_version,
+            payload=notice_payload,
+            causation_id=event_id,
+            skip_intercept=True,
+        )
+        return {
+            "event_id": event_id,
+            "status": STATUS_REJECTED,
+            "reviewer_id": reviewer_id,
+            "reason": reason,
+            "rejection_notice_event_id": notice.event_id,
+        }
+
+    def fetch_unprojected_handoffs(self, limit: int = 100) -> list[Event]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE topic = 'okf/handoff' AND status = ? AND projected_to_log = 0
+            ORDER BY event_id ASC
+            LIMIT ?
+            """,
+            (STATUS_PUBLISHED, limit),
+        ).fetchall()
+        return [self._row_to_event(r) for r in rows]
+
+    def mark_projected(self, event_ids: list[int]) -> None:
+        if not event_ids:
+            return
+        placeholders = ",".join("?" for _ in event_ids)
+        self._conn.execute(
+            f"UPDATE events SET projected_to_log = 1 WHERE event_id IN ({placeholders})",
+            event_ids,
+        )
+        self._conn.commit()
+
     def status(self, producer_id: str | None = None) -> dict:
+        self.expire_pending()
         count = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
         latest = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()["m"]
+        pending = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM events WHERE status = ?",
+            (STATUS_PENDING,),
+        ).fetchone()["c"]
         topics = [
             r["topic"]
             for r in self._conn.execute(
@@ -153,6 +365,7 @@ class EventStore:
             "workspace": str(self.workspace),
             "event_count": count,
             "latest_event_id": latest or 0,
+            "pending_approval_count": pending,
             "topics": topics,
             "retention_days": self.retention_days,
             "producer_id": producer_id or os.environ.get("AGENTBUS_PRODUCER_ID", ""),
@@ -160,6 +373,7 @@ class EventStore:
 
     @staticmethod
     def _row_to_event(row: sqlite3.Row) -> Event:
+        keys = row.keys()
         return Event(
             event_id=row["event_id"],
             topic=row["topic"],
@@ -169,4 +383,7 @@ class EventStore:
             payload=json.loads(row["payload"]),
             causation_id=row["causation_id"],
             idempotency_key=row["idempotency_key"],
+            status=row["status"] if "status" in keys else STATUS_PUBLISHED,
+            pending_until=row["pending_until"] if "pending_until" in keys else None,
+            rejection_reason=row["rejection_reason"] if "rejection_reason" in keys else None,
         )

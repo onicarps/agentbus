@@ -100,6 +100,43 @@ def agentbus_status() -> str:
 
 
 @mcp.tool()
+def agentbus_review(topic: str | None = None, limit: int = 50) -> str:
+    """List events pending human approval (hidden from standard poll)."""
+    return json.dumps(_get_store().review_pending(topic=topic, limit=min(limit, 100)))
+
+
+@mcp.tool()
+def agentbus_approve(
+    event_id: int,
+    reviewer_id: str | None = None,
+    auth_token: str | None = None,
+) -> str:
+    """Approve a pending event so agents can see it on poll."""
+    check_publish_token(_auth_workspace(), auth_token=auth_token)
+    rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
+    try:
+        return json.dumps(_get_store().approve_event(event_id, reviewer_id=rid))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
+def agentbus_reject(
+    event_id: int,
+    reason: str = "rejected by human reviewer",
+    reviewer_id: str | None = None,
+    auth_token: str | None = None,
+) -> str:
+    """Reject a pending event and notify the originating agent."""
+    check_publish_token(_auth_workspace(), auth_token=auth_token)
+    rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
+    try:
+        return json.dumps(_get_store().reject_event(event_id, reviewer_id=rid, reason=reason))
+    except ValueError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool()
 def agentbus_lock_acquire(
     resource: str,
     owner_id: str,

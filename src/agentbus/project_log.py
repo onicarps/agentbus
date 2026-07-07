@@ -72,6 +72,9 @@ def _dict_to_event(row: dict) -> Event:
         payload=row["payload"],
         causation_id=row["causation_id"],
         idempotency_key=row["idempotency_key"],
+        status=row.get("status", "PUBLISHED"),
+        pending_until=row.get("pending_until"),
+        rejection_reason=row.get("rejection_reason"),
     )
 
 
@@ -83,16 +86,20 @@ def project_handoffs(
     dry_run: bool = False,
     reset: bool = False,
 ) -> dict:
-    state = {"last_event_id": 0} if reset else load_state(workspace)
-    since_id = state["last_event_id"]
+    if reset:
+        store._conn.execute(
+            "UPDATE events SET projected_to_log = 0 WHERE topic = ?",
+            (HANDOFF_TOPIC,),
+        )
+        store._conn.commit()
 
-    poll_result = store.poll(topic=HANDOFF_TOPIC, since_id=since_id, limit=100)
-    events = [_dict_to_event(row) for row in poll_result["events"]]
+    events = store.fetch_unprojected_handoffs(limit=100)
 
     if not events:
+        state = load_state(workspace)
         return {
             "projected": 0,
-            "last_event_id": since_id,
+            "last_event_id": state.get("last_event_id", 0),
             "dry_run": dry_run,
             "lines": [],
         }
@@ -107,6 +114,7 @@ def project_handoffs(
     last_id = events[-1].event_id
     if not dry_run:
         log_path.write_text(log_text, encoding="utf-8")
+        store.mark_projected([e.event_id for e in events])
         save_state(workspace, last_id)
 
     return {
