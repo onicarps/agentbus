@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.0] - 2026-07-07
+
+### Added
+
+- SLA timeouts: `sla_timeout_minutes` on publish (CLI/MCP)
+- Auto-escalation to `okf/dead-letter` on breach (`SLA_BREACH`, `TIMEOUT_FAILED`)
+- `causation_id` reply clears SLA before deadline
+- `sla_active_count` in `agentbus status`; 4 SLA tests (65 total)
+
 ## [0.3.2] - 2026-07-07
 
 ### Added
