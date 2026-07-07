@@ -150,12 +150,15 @@ def publish(
 
     ws = Path(workspace)
     _auth(ws, token)
-    if attach:
-        arts = list(payload.get("artifacts") or [])
-        for path in attach:
-            arts.append(artifact_from_file(Path(path)))
-        payload["artifacts"] = arts
-    payload = validate_payload(topic, payload)
+    try:
+        if attach:
+            arts = list(payload.get("artifacts") or [])
+            for path in attach:
+                arts.append(artifact_from_file(Path(path)))
+            payload["artifacts"] = arts
+        payload = validate_payload(topic, payload)
+    except PayloadTooLargeError as exc:
+        raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
     try:
         try:
