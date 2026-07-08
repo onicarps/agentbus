@@ -269,8 +269,18 @@ def run_monitor(
     interval: float = 1.0,
     once: bool = False,
     retention_days: int = 7,
+    plain: bool = False,
 ) -> None:
-    """Tail events.db; rich.live if available, else plain poll."""
+    """Tail events.db; Textual TUI (default), rich snapshot, or plain poll."""
+    if not once and not plain and topic is None:
+        try:
+            from agentbus.tui import run_monitor_tui
+
+            run_monitor_tui(workspace, interval=interval, retention_days=retention_days)
+            return
+        except RuntimeError:
+            pass
+
     try:
         from rich.console import Console
         from rich.live import Live

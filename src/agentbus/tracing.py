@@ -84,3 +84,27 @@ def _span_label(node: dict[str, Any]) -> str:
         summary = summary[:77] + "..."
     span = node.get("span_id", "?")
     return f"[cyan]{who}[/cyan] [dim]{span}[/dim] — {summary or '(no summary)'}"
+
+
+def format_trace_tree_plain(trace_id: str, roots: list[dict[str, Any]]) -> str:
+    """ASCII trace waterfall for TUI / non-rich consumers."""
+
+    def walk(node: dict[str, Any], indent: int = 0) -> list[str]:
+        payload = node.get("payload") or {}
+        who = payload.get("from") or node.get("producer_id", "?")
+        summary = payload.get("summary", "")
+        if len(summary) > 60:
+            summary = summary[:57] + "..."
+        span = node.get("span_id", "?")
+        prefix = "  " * indent
+        lines = [f"{prefix}├─ {who} ({span}) — {summary or '(no summary)'}"]
+        for child in node.get("children", []):
+            lines.extend(walk(child, indent + 1))
+        return lines
+
+    if not roots:
+        return f"trace {trace_id}\n  (no events)"
+    body: list[str] = [f"trace {trace_id} ({len(roots)} root span(s))"]
+    for root in roots:
+        body.extend(walk(root))
+    return "\n".join(body)

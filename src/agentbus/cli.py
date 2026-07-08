@@ -159,7 +159,7 @@ def publish(
             for path in attach:
                 arts.append(artifact_from_file(Path(path)))
             payload["artifacts"] = arts
-        payload = validate_payload(topic, payload)
+        payload = validate_payload(topic, payload, workspace=ws)
     except PayloadTooLargeError as exc:
         raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
@@ -438,20 +438,29 @@ def init(
 @click.option("--topic", default=None, help="Filter by topic")
 @click.option("--interval", default=1.0, show_default=True, help="Refresh seconds")
 @click.option("--once", is_flag=True, help="Print snapshot and exit")
+@click.option("--plain", is_flag=True, help="Plain/rich poll loop (no Textual TUI)")
 @click.option("--retention-days", default=7, show_default=True)
 def monitor(
     workspace: str | None,
     topic: str | None,
     interval: float,
     once: bool,
+    plain: bool,
     retention_days: int,
 ) -> None:
-    """Tail events.db (rich TUI when available)."""
+    """Mission-control TUI (Textual) or tail events.db."""
     try:
         ws = resolve_workspace(workspace)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    run_monitor(ws, topic=topic, interval=interval, once=once, retention_days=retention_days)
+    run_monitor(
+        ws,
+        topic=topic,
+        interval=interval,
+        once=once,
+        plain=plain,
+        retention_days=retention_days,
+    )
 
 
 @main.group()

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.8.0] - 2026-07-08
+
+### Added
+
+- Textual mission-control TUI for `agentbus monitor` (3-pane layout, HITL approve/reject hotkeys)
+- `agentbus monitor --plain` for non-TUI tail mode
+- Seven OSS onboarding scripts in `examples/` (v0.1–v0.7 feature tour)
+- `format_trace_tree_plain()` for TUI trace waterfall
+
 ## [0.7.0] - 2026-07-07
 
 ### Added
