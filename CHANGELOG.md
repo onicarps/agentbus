@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.8.3] - 2026-07-08
+
+### Added
+
+- Built-in `okf/approval` topic schema (`event_id`, `approver`, `decision`) — Power Ranking AB-B06c
+
 ## [0.8.2] - 2026-07-08
 
 ### Added

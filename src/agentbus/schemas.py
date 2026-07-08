@@ -35,6 +35,17 @@ KNOWN_TOPICS: dict[str, dict] = {
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
         },
     },
+    "okf/approval": {
+        "type": "object",
+        "required": ["event_id", "approver", "decision"],
+        "additionalProperties": False,
+        "properties": {
+            "event_id": {"type": "integer", "minimum": 1},
+            "approver": {"type": "string", "pattern": r"^[a-z][a-z0-9_-]*$"},
+            "decision": {"enum": ["approve", "reject"]},
+            "reason": {"type": "string", "maxLength": 2000},
+        },
+    },
     "okf/handoff": {
         "type": "object",
         "required": ["from", "to", "summary"],

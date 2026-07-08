@@ -30,6 +30,15 @@ def store(tmp_path):
     s.close()
 
 
+def test_okf_approval_builtin_topic():
+    validate_payload(
+        "okf/approval",
+        {"event_id": 42, "approver": "grok", "decision": "approve"},
+    )
+    with pytest.raises(ValueError, match="invalid_payload"):
+        validate_payload("okf/approval", {"event_id": 1})
+
+
 def test_strict_validation_rejects_wrong_type(store, tmp_path):
     """PDD AC1: registered schema rejects invalid payload types."""
     register_schema(tmp_path, "ci/build-alert", CI_SCHEMA)
