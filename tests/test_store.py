@@ -33,6 +33,38 @@ def test_publish_and_poll(store):
     assert result["has_more"] is False
 
 
+def test_content_dedup_within_window(store):
+    payload = {"from": "grok", "to": "hermes", "summary": "same content"}
+    e1, dup1 = store.publish(
+        topic="okf/handoff",
+        producer_id="grok",
+        schema_version="1.0",
+        payload=payload,
+    )
+    e2, dup2 = store.publish(
+        topic="okf/handoff",
+        producer_id="grok",
+        schema_version="1.0",
+        payload=payload,
+    )
+    assert not dup1
+    assert dup2
+    assert e1.event_id == e2.event_id
+
+
+def test_status_aliases(store):
+    payload = {"from": "grok", "to": "agy", "summary": "status aliases"}
+    store.publish(
+        topic="okf/handoff",
+        producer_id="grok",
+        schema_version="1.0",
+        payload=payload,
+    )
+    st = store.status()
+    assert st["event_count"] == st["total_events"] == 1
+    assert st["pending_approval_count"] == st["pending_count"] == 0
+
+
 def test_idempotency(store):
     payload = {"from": "grok", "to": "hermes", "summary": "dup test"}
     e1, _ = store.publish(

@@ -20,6 +20,7 @@ STATUS_PENDING = "PENDING_APPROVAL"
 STATUS_REJECTED = "REJECTED"
 STATUS_TIMEOUT_FAILED = "TIMEOUT_FAILED"
 SLA_BREACH_REASON = "SLA_BREACH"
+CONTENT_DEDUP_SECONDS = int(os.environ.get("AGENTBUS_CONTENT_DEDUP_SECONDS", "60"))
 
 
 @dataclass
@@ -263,6 +264,30 @@ class EventStore:
             datetime.now(timezone.utc) + timedelta(minutes=minutes)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    def _find_recent_content_duplicate(
+        self,
+        topic: str,
+        producer_id: str,
+        payload: dict,
+        *,
+        window_seconds: int = CONTENT_DEDUP_SECONDS,
+    ) -> sqlite3.Row | None:
+        if window_seconds < 1:
+            return None
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload_json = json.dumps(payload)
+        return self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE topic = ? AND producer_id = ? AND payload = ?
+              AND timestamp >= ? AND status != ?
+            ORDER BY event_id DESC LIMIT 1
+            """,
+            (topic, producer_id, payload_json, cutoff, STATUS_REJECTED),
+        ).fetchone()
+
     def publish(
         self,
         *,
@@ -291,6 +316,13 @@ class EventStore:
                 return self._hydrate_event(self._row_to_event(existing)), True
 
         stored_payload, artifacts = extract_artifacts(payload)
+
+        if not idempotency_key:
+            recent = self._find_recent_content_duplicate(
+                topic, producer_id, stored_payload
+            )
+            if recent:
+                return self._hydrate_event(self._row_to_event(recent)), True
 
         if not skip_rbac:
             check_publish_rbac(
@@ -639,8 +671,10 @@ class EventStore:
         return {
             "workspace": str(self.workspace),
             "event_count": count,
+            "total_events": count,
             "latest_event_id": latest or 0,
             "pending_approval_count": pending,
+            "pending_count": pending,
             "sla_active_count": sla_active,
             "hitl_enabled": not hitl_disabled(),
             "topics": topics,

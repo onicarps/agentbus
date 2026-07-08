@@ -45,4 +45,49 @@ def test_cli_publish_poll_status(tmp_path):
 
     st = runner.invoke(main, ["status", "--workspace", ws, "--producer-id", "agy"])
     assert st.exit_code == 0
-    assert json.loads(st.output)["event_count"] == 1
+    st_data = json.loads(st.output)
+    assert st_data["event_count"] == 1
+    assert st_data["total_events"] == 1
+
+
+def test_cli_publish_batch(tmp_path):
+    ws = str(tmp_path)
+    runner = CliRunner()
+    runner.invoke(main, ["token", "ensure", "--workspace", ws, "--quiet"])
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "topic": "okf/handoff",
+                        "payload": {"from": "grok", "to": "agy", "summary": "one"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "topic": "okf/handoff",
+                        "payload": {"from": "grok", "to": "hermes", "summary": "two"},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(
+        main,
+        [
+            "publish-batch",
+            "--workspace",
+            ws,
+            "--file",
+            str(batch),
+            "--producer-id",
+            "grok",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["count"] == 2
+    assert data["events"][0]["duplicate"] is False

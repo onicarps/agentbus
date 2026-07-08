@@ -31,7 +31,13 @@ from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
 from agentbus.store import EventStore
 
-DEFAULT_WORKSPACE = os.environ.get("AGENTBUS_WORKSPACE", str(Path.cwd()))
+def _cli_workspace(workspace: str | None) -> Path:
+    if workspace:
+        return resolve_workspace(workspace)
+    env = os.environ.get("AGENTBUS_WORKSPACE")
+    if env:
+        return Path(env).resolve()
+    return resolve_workspace()
 
 
 def _producer_id(override: str | None) -> str:
@@ -41,14 +47,14 @@ def _producer_id(override: str | None) -> str:
     return pid
 
 
-def _open_store(workspace: str, retention_days: int) -> EventStore:
-    ws = Path(workspace)
+def _open_store(workspace: str | None, retention_days: int) -> EventStore:
+    ws = _cli_workspace(workspace)
     set_validation_workspace(ws)
     return EventStore(ws, retention_days=retention_days)
 
 
-def _open_lease_store(workspace: str) -> LeaseStore:
-    return LeaseStore(Path(workspace))
+def _open_lease_store(workspace: str | None) -> LeaseStore:
+    return LeaseStore(_cli_workspace(workspace))
 
 
 def _auth(ws: Path, token: str | None) -> None:
@@ -67,8 +73,8 @@ def main() -> None:
 @click.option(
     "--workspace",
     type=click.Path(exists=True, file_okay=False, path_type=str),
-    default=DEFAULT_WORKSPACE,
-    show_default=True,
+    default=None,
+    envvar="AGENTBUS_WORKSPACE",
 )
 @click.option("--retention-days", default=7, show_default=True)
 @click.option(
@@ -76,9 +82,9 @@ def main() -> None:
     is_flag=True,
     help="Regenerate workspace token on startup",
 )
-def mcp_serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
+def mcp_serve(workspace: str | None, retention_days: int, rotate_token: bool) -> None:
     """MCP entrypoint for IDE configs (ensures token, then serve)."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     ensure_ephemeral_token(ws, rotate=rotate_token)
     os.environ["AGENTBUS_TOKEN"] = read_workspace_token(ws) or ""
     run_stdio(ws, retention_days=retention_days, rotate_token=False)
@@ -88,8 +94,8 @@ def mcp_serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
 @click.option(
     "--workspace",
     type=click.Path(exists=True, file_okay=False, path_type=str),
-    default=DEFAULT_WORKSPACE,
-    show_default=True,
+    default=None,
+    envvar="AGENTBUS_WORKSPACE",
 )
 @click.option("--retention-days", default=7, show_default=True)
 @click.option(
@@ -97,13 +103,13 @@ def mcp_serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
     is_flag=True,
     help="Regenerate workspace token on startup",
 )
-def serve(workspace: str, retention_days: int, rotate_token: bool) -> None:
+def serve(workspace: str | None, retention_days: int, rotate_token: bool) -> None:
     """Run MCP server on stdio."""
-    run_stdio(Path(workspace), retention_days=retention_days, rotate_token=rotate_token)
+    run_stdio(_cli_workspace(workspace), retention_days=retention_days, rotate_token=rotate_token)
 
 
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", required=True)
 @click.option("--payload", "payload_json", default=None, help="JSON object string")
 @click.option("--payload-file", type=click.Path(exists=True, dir_okay=False), default=None)
@@ -151,7 +157,7 @@ def publish(
     else:
         raise click.ClickException("Provide --payload or --payload-file")
 
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     _auth(ws, token)
     try:
         if attach:
@@ -194,8 +200,74 @@ def publish(
         store.close()
 
 
+@main.command("publish-batch")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--file",
+    "batch_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="JSONL file: one publish spec per line",
+)
+@click.option("--producer-id", default=None)
+@click.option("--token", default=None)
+@click.option("--retention-days", default=7, show_default=True)
+def publish_batch(
+    workspace: str | None,
+    batch_file: str,
+    producer_id: str | None,
+    token: str | None,
+    retention_days: int,
+) -> None:
+    """Publish many events in one process (faster than repeated CLI subprocesses)."""
+    ws = _cli_workspace(workspace)
+    _auth(ws, token)
+    pid = _producer_id(producer_id)
+    store = _open_store(workspace, retention_days)
+    results: list[dict] = []
+    try:
+        for line_no, line in enumerate(Path(batch_file).read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                spec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise click.ClickException(f"line {line_no}: invalid JSON") from exc
+            topic = spec.get("topic")
+            payload = spec.get("payload")
+            if not topic or not isinstance(payload, dict):
+                raise click.ClickException(f"line {line_no}: require topic and payload object")
+            payload = validate_payload(topic, payload, workspace=ws)
+            try:
+                event, duplicate = store.publish(
+                    topic=topic,
+                    producer_id=spec.get("producer_id") or pid,
+                    schema_version=spec.get("schema_version", "1.0"),
+                    payload=payload,
+                    causation_id=spec.get("causation_id"),
+                    idempotency_key=spec.get("idempotency_key"),
+                    auth_token=token,
+                    sla_timeout_minutes=spec.get("sla_timeout_minutes"),
+                    trace_id=spec.get("trace_id"),
+                    parent_span_id=spec.get("parent_span_id"),
+                )
+            except (ForbiddenError, PayloadTooLargeError) as exc:
+                raise click.ClickException(str(exc)) from exc
+            results.append(
+                {
+                    "line": line_no,
+                    "event_id": event.event_id,
+                    "duplicate": duplicate,
+                    "topic": event.topic,
+                }
+            )
+        click.echo(json.dumps({"count": len(results), "events": results}))
+    finally:
+        store.close()
+
+
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", required=True)
 @click.option("--since-id", type=int, default=0, show_default=True)
 @click.option("--limit", type=int, default=50, show_default=True)
@@ -216,7 +288,7 @@ def poll(
 
 
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--producer-id", default=None)
 @click.option("--retention-days", default=7, show_default=True)
 def status(workspace: str, producer_id: str | None, retention_days: int) -> None:
@@ -235,7 +307,7 @@ def lock() -> None:
 
 
 @lock.command("acquire")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--resource", required=True, help="Absolute path within workspace")
 @click.option("--owner-id", required=True)
 @click.option("--ttl-seconds", type=int, default=None)
@@ -248,7 +320,7 @@ def lock_acquire(
     token: str | None,
 ) -> None:
     """Acquire a lease on a resource."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
@@ -258,7 +330,7 @@ def lock_acquire(
 
 
 @lock.command("release")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--resource", required=True)
 @click.option("--lease-id", required=True)
 @click.option("--owner-id", required=True)
@@ -271,7 +343,7 @@ def lock_release(
     token: str | None,
 ) -> None:
     """Release a held lease."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
@@ -281,7 +353,7 @@ def lock_release(
 
 
 @lock.command("renew")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--resource", required=True)
 @click.option("--lease-id", required=True)
 @click.option("--owner-id", required=True)
@@ -296,7 +368,7 @@ def lock_renew(
     token: str | None,
 ) -> None:
     """Renew (extend) a held lease."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
@@ -306,7 +378,7 @@ def lock_renew(
 
 
 @lock.command("status")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--resource", required=True)
 def lock_status(workspace: str, resource: str) -> None:
     """Check lock state (no auth)."""
@@ -318,7 +390,7 @@ def lock_status(workspace: str, resource: str) -> None:
 
 
 @main.command("project-log")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option(
     "--log-file",
     default="log.md",
@@ -336,7 +408,7 @@ def project_log(
     retention_days: int,
 ) -> None:
     """Project okf/handoff events into OKF log.md format."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     log_path = ws / log_file
     store = _open_store(workspace, retention_days)
     try:
@@ -357,11 +429,11 @@ def token() -> None:
 
 
 @token.command("show")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--quiet", is_flag=True, help="Print token only (no path)")
 def token_show(workspace: str, quiet: bool) -> None:
     """Print the workspace publish token."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     value = read_workspace_token(ws)
     if not value:
         raise click.ClickException(
@@ -374,11 +446,11 @@ def token_show(workspace: str, quiet: bool) -> None:
 
 
 @token.command("ensure")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--quiet", is_flag=True, help="Print token only")
 def token_ensure(workspace: str, quiet: bool) -> None:
     """Create workspace token if missing."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     value = ensure_ephemeral_token(ws, rotate=False)
     if quiet:
         click.echo(value)
@@ -391,11 +463,11 @@ def token_ensure(workspace: str, quiet: bool) -> None:
 
 
 @token.command("rotate")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--quiet", is_flag=True, help="Print token only")
 def token_rotate(workspace: str, quiet: bool) -> None:
     """Regenerate workspace publish token."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     value = ensure_ephemeral_token(ws, rotate=True)
     if quiet:
         click.echo(value)
@@ -469,7 +541,7 @@ def config() -> None:
 
 
 @config.command("set-intercept")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", required=True)
 @click.option("--contains", required=True, help="Substring match in JSON payload")
 @click.option("--ttl-minutes", default=60, show_default=True)
@@ -477,25 +549,25 @@ def config_set_intercept(
     workspace: str, topic: str, contains: str, ttl_minutes: int
 ) -> None:
     """Add or update an intercept rule (matched events require human approval)."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     rule = InterceptRule(topic=topic, contains=contains, ttl_minutes=ttl_minutes)
     config_data = add_rule(ws, rule)
     click.echo(json.dumps({"path": str(ws / ".agentbus" / "intercepts.json"), "rules": config_data.to_dict()["rules"]}))
 
 
 @config.command("list-intercepts")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 def config_list_intercepts(workspace: str) -> None:
     """List configured intercept rules."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     click.echo(json.dumps(load_config(ws).to_dict()))
 
 
 @config.command("init-rbac")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 def config_init_rbac(workspace: str) -> None:
     """Install default .agentbus/roles.yaml (Swarm RBAC)."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     config = ensure_default_roles(ws)
     click.echo(
         json.dumps(
@@ -514,17 +586,17 @@ def droid() -> None:
 
 
 @droid.command("mint")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--mission-id", default=None)
 @click.option("--ttl-minutes", default=30, show_default=True)
 def droid_mint(workspace: str, mission_id: str | None, ttl_minutes: int) -> None:
     """Mint a short-lived droid_proof for qa_droid role publishes."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     click.echo(json.dumps(mint_droid_proof(ws, mission_id=mission_id, ttl_minutes=ttl_minutes)))
 
 
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", default=None, help="Filter by topic")
 @click.option("--limit", default=50, show_default=True)
 @click.option("--retention-days", default=7, show_default=True)
@@ -538,7 +610,7 @@ def review(workspace: str, topic: str | None, limit: int, retention_days: int) -
 
 
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.argument("event_id", type=int)
 @click.option("--reviewer-id", default=None)
 @click.option("--retention-days", default=7, show_default=True)
@@ -559,7 +631,7 @@ def approve(
 
 
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.argument("event_id", type=int)
 @click.option("--reason", default="rejected by human reviewer", show_default=True)
 @click.option("--reviewer-id", default=None)
@@ -593,17 +665,17 @@ def schema() -> None:
 
 @schema.command("import")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 def schema_import(file: Path, workspace: str) -> None:
     """Import topic schema from JSON (topic + json_schema)."""
     try:
-        click.echo(json.dumps(import_schema_file(Path(workspace), file)))
+        click.echo(json.dumps(import_schema_file(_cli_workspace(workspace), file)))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
 
 @schema.command("register")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", required=True)
 @click.option("--schema-file", type=click.Path(exists=True, dir_okay=False), required=True)
 @click.option("--version", default="1.0", show_default=True)
@@ -613,7 +685,7 @@ def schema_register(workspace: str, topic: str, schema_file: str, version: str) 
     try:
         click.echo(
             json.dumps(
-                register_schema(Path(workspace), topic, schema_obj, version=version)
+                register_schema(_cli_workspace(workspace), topic, schema_obj, version=version)
             )
         )
     except ValueError as exc:
@@ -621,15 +693,15 @@ def schema_register(workspace: str, topic: str, schema_file: str, version: str) 
 
 
 @schema.command("list")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 def schema_list(workspace: str) -> None:
     """List registered pluggable topic schemas."""
-    click.echo(json.dumps(list_schemas(Path(workspace))))
+    click.echo(json.dumps(list_schemas(_cli_workspace(workspace))))
 
 
 @main.command()
 @click.argument("trace_id")
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--retention-days", default=7, show_default=True)
 def trace(workspace: str, trace_id: str, retention_days: int) -> None:
     """Render a hierarchical trace waterfall for a trace_id."""
@@ -650,12 +722,12 @@ def trace(workspace: str, trace_id: str, retention_days: int) -> None:
 
 
 @main.command()
-@click.option("--workspace", default=DEFAULT_WORKSPACE, show_default=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--producer-id", default=None)
 @click.option("--retention-days", default=7, show_default=True)
 def ping(workspace: str, producer_id: str | None, retention_days: int) -> None:
     """Publish a synthetic okf/handoff PING event."""
-    ws = Path(workspace)
+    ws = _cli_workspace(workspace)
     pid = _producer_id(producer_id)
     try:
         result = publish_ping(ws, producer_id=pid, retention_days=retention_days)

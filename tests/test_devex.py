@@ -27,6 +27,15 @@ def test_merge_json_config_idempotent():
     assert changed2 is False
 
 
+def test_init_writes_workspace_marker(tmp_path):
+    mcp_dir = tmp_path / ".cursor"
+    mcp_dir.mkdir()
+    (mcp_dir / "mcp.json").write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    apply_init(tmp_path, producer_id="grok", dry_run=False)
+    marker = tmp_path / ".agentbus" / "workspace"
+    assert marker.read_text(encoding="utf-8").strip() == str(tmp_path.resolve())
+
+
 def test_init_apply_empty_json_config(tmp_path):
     mcp_dir = tmp_path / ".cursor"
     mcp_dir.mkdir()

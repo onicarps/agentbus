@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [0.8.2] - 2026-07-08
+
+### Added
+
+- `agentbus publish-batch` — JSONL bulk publish in a single process (Power Ranking T06 harness fix)
+- 60s content dedup for identical topic+producer+payload without `idempotency_key` (T03)
+- Status response aliases: `total_events`, `pending_count` (T04 compat)
+- `.agentbus/workspace` marker on `init --apply`; CLI resolves workspace via `resolve_workspace()` + `AGENTBUS_WORKSPACE` (T07)
+
 ## [0.8.1] - 2026-07-08
 
 ### Fixed

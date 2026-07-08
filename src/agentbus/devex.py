@@ -43,6 +43,11 @@ def resolve_workspace(path: str | Path | None = None) -> Path:
         if (candidate / ".git").exists():
             return candidate
         if (candidate / ".agentbus").exists():
+            marker = candidate / ".agentbus" / "workspace"
+            if marker.exists():
+                text = marker.read_text(encoding="utf-8").strip()
+                if text:
+                    return Path(text).resolve()
             return candidate
     return start
 
@@ -121,6 +126,9 @@ def apply_init(
     clients: list[str] | None = None,
 ) -> InitResult:
     ensure_ephemeral_token(workspace, rotate=False)
+    marker = workspace / ".agentbus" / "workspace"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(str(workspace.resolve()) + "\n", encoding="utf-8")
     entry = agentbus_mcp_entry(workspace, producer_id)
     result = InitResult(
         workspace=workspace,
