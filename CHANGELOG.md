@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [0.8.1] - 2026-07-08
+
+### Fixed
+
+- `agentbus init --apply` no longer crashes on empty (0-byte) IDE MCP config files (`devex.py` `_load_json_config`)
+
 ## [0.8.0] - 2026-07-08
 
 ### Added

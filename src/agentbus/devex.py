@@ -86,7 +86,10 @@ def discover_config_targets(workspace: Path) -> list[ConfigTarget]:
 
 
 def _load_json_config(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return {}
+    return json.loads(content)
 
 
 def _save_json_config(path: Path, data: dict[str, Any]) -> None:

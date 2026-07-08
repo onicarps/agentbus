@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okf-agentbus"
-version = "0.8.0"
-description = "Local MCP event log for multi-agent workspaces"
+version = "0.8.1"
+description = "SQLite-backed MCP event bus and control surface for heterogeneous agent orchestration."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"

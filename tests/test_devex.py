@@ -27,6 +27,19 @@ def test_merge_json_config_idempotent():
     assert changed2 is False
 
 
+def test_init_apply_empty_json_config(tmp_path):
+    mcp_dir = tmp_path / ".cursor"
+    mcp_dir.mkdir()
+    cfg_path = mcp_dir / "mcp.json"
+    cfg_path.write_text("", encoding="utf-8")
+
+    applied = apply_init(tmp_path, producer_id="grok", dry_run=False)
+    assert applied.dry_run is False
+    assert any("updated" in u for u in applied.updated)
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert "agentbus" in data["mcpServers"]
+
+
 def test_init_dry_run_and_apply(tmp_path):
     mcp_dir = tmp_path / ".cursor"
     mcp_dir.mkdir()
