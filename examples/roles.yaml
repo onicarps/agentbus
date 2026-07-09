@@ -18,3 +18,4 @@ producers:
   wiretap: observer
   os-watcher: observer
   swarm-tail: observer
+  coderabbit: architect

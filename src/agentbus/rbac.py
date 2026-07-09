@@ -137,6 +137,7 @@ def default_rbac_config() -> RbacConfig:
             "wiretap": "observer",
             "os-watcher": "observer",
             "swarm-tail": "observer",
+            "coderabbit": "architect",
         },
     )
 
