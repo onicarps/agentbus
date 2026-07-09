@@ -37,6 +37,27 @@ def redact_value(obj: Any) -> Any:
     return obj
 
 
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=]{32,}")
+
+
+def redact_text(text: str, max_len: int = 500) -> str:
+    """Redact free-form text (results/errors) that may embed secrets."""
+    # Prefer structured redaction when payload is JSON
+    try:
+        parsed = json.loads(text)
+        cleaned_obj = redact_value(parsed)
+        cleaned = json.dumps(cleaned_obj, ensure_ascii=False, default=str)
+    except (json.JSONDecodeError, TypeError):
+        cleaned = redact_value(text)
+        if not isinstance(cleaned, str):
+            cleaned = str(cleaned)
+        # Mask long token-like substrings embedded in prose
+        cleaned = _TOKENISH.sub(REDACTED, cleaned)
+    if len(cleaned) > max_len:
+        return cleaned[: max_len - 3] + "..."
+    return cleaned
+
+
 def summarize_result(result: Any, max_len: int = 240) -> str:
     try:
         if isinstance(result, str):
@@ -45,9 +66,7 @@ def summarize_result(result: Any, max_len: int = 240) -> str:
             text = json.dumps(result, ensure_ascii=False, default=str)
     except Exception:
         text = repr(result)
-    if len(text) > max_len:
-        return text[: max_len - 3] + "..."
-    return text
+    return redact_text(text, max_len=max_len)
 
 
 def emit_system_mcp(
@@ -74,14 +93,18 @@ def emit_system_mcp(
     if client:
         payload["client"] = client
     if result_summary is not None:
-        payload["result_summary"] = result_summary
+        payload["result_summary"] = redact_text(str(result_summary), max_len=500)
     if error is not None:
-        payload["error"] = error[:500]
+        payload["error"] = redact_text(str(error), max_len=500)
 
     if wiretap_log is not None:
-        wiretap_log.parent.mkdir(parents=True, exist_ok=True)
-        with open(wiretap_log, "a", encoding="utf-8") as fp:
-            fp.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        try:
+            wiretap_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(wiretap_log, "a", encoding="utf-8") as fp:
+                fp.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            # Never fail the tool call because of observability logging.
+            pass
 
     try:
         event, _ = store.publish(

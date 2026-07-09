@@ -12,8 +12,15 @@ from agentbus.rbac import default_rbac_config, ensure_default_roles
 from agentbus.schemas import SYSTEM_TOPICS, set_validation_workspace, validate_payload
 from agentbus.server import configure_wiretap, init_store
 from agentbus.store import EventStore
-from agentbus.tail import expand_registry, list_agent_logs, parse_line
+from agentbus.tail import (
+    _monologue_idempotency_key,
+    _safe_source_path,
+    expand_registry,
+    list_agent_logs,
+    parse_line,
+)
 from agentbus.tui import detect_dark_agents, fetch_monitor_state
+from agentbus.watch import _cwd_under_workspace
 from agentbus.wiretap import REDACTED, emit_system_mcp, instrument_call, redact_value
 
 
@@ -162,11 +169,66 @@ def test_detect_dark_agents():
             "topic": "okf/handoff",
             "timestamp": (now - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
+        {
+            # okf-only publisher must not false-positive as dark
+            "producer_id": "agy",
+            "topic": "okf/handoff",
+            "timestamp": (now - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
     ]
     dark = detect_dark_agents(events, threshold_minutes=5, now=now)
     pids = {d["producer_id"] for d in dark}
     assert "ghost" in pids
     assert "grok" not in pids
+    assert "agy" not in pids
+
+
+def test_safe_source_path_abbreviates_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    log = home / ".grok" / "logs" / "unified.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text("x\n")
+    assert _safe_source_path(str(log)).startswith("~/")
+
+
+def test_monologue_idempotency_stable():
+    a = _monologue_idempotency_key(
+        agent="grok", source_path="~/x", role="log", text="hi", byte_offset=10
+    )
+    b = _monologue_idempotency_key(
+        agent="grok", source_path="~/x", role="log", text="hi", byte_offset=10
+    )
+    assert a == b
+    assert a.startswith("mono-")
+
+
+def test_cwd_path_containment(tmp_path: Path):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    sibling = tmp_path / "workspace-other"
+    sibling.mkdir()
+    assert _cwd_under_workspace(str(ws / "src"), ws)
+    assert not _cwd_under_workspace(str(sibling), ws)
+
+
+def test_result_summary_redacted(tmp_path: Path):
+    set_validation_workspace(tmp_path)
+    store = EventStore(tmp_path)
+    try:
+        secret = "a" * 40  # long token-like
+        emit_system_mcp(
+            store,
+            tool="agentbus_status",
+            arguments={},
+            latency_ms=1.0,
+            result_summary=f'{{"token": "{secret}"}}',
+        )
+        ev = store.poll("system/mcp")["events"][0]
+        assert secret not in ev["payload"].get("result_summary", "")
+    finally:
+        store.close()
 
 
 def test_fetch_monitor_state_includes_system(tmp_path: Path):

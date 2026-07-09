@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -162,6 +162,35 @@ def parse_line(agent: str, line: str, fmt: str) -> dict[str, Any] | None:
     return {"agent": agent, "role": role, "text": text}
 
 
+def _safe_source_path(source_path: str, workspace: Path | None = None) -> str:
+    """Home-abbreviated or workspace-relative path — never raw absolute home paths."""
+    path = Path(source_path)
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    if workspace is not None:
+        try:
+            return str(resolved.relative_to(workspace.resolve()))
+        except ValueError:
+            pass
+    home = Path.home()
+    try:
+        return "~/" + str(resolved.relative_to(home))
+    except ValueError:
+        # Outside home: keep basename only to avoid leaking dir structure
+        return resolved.name
+
+
+def _monologue_idempotency_key(
+    *, agent: str, source_path: str, role: str, text: str, byte_offset: int | None = None
+) -> str:
+    """Deterministic key so restarts do not re-publish the same backlog lines."""
+    material = f"{agent}|{source_path}|{role}|{byte_offset if byte_offset is not None else ''}|{text}"
+    digest = hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return f"mono-{digest}"
+
+
 def _publish_monologue(
     store: EventStore,
     *,
@@ -169,13 +198,16 @@ def _publish_monologue(
     role: str,
     text: str,
     source_path: str,
+    workspace: Path | None = None,
+    byte_offset: int | None = None,
 ) -> None:
+    safe_path = _safe_source_path(source_path, workspace=workspace)
     payload = redact_value(
         {
             "agent": agent,
             "role": role,
             "text": text,
-            "source_path": source_path,
+            "source_path": safe_path,
             "observer": "swarm-tail",
         }
     )
@@ -185,7 +217,13 @@ def _publish_monologue(
         schema_version="1.0",
         payload=payload,
         skip_rbac=True,
-        idempotency_key=f"mono-{uuid.uuid4().hex[:16]}",
+        idempotency_key=_monologue_idempotency_key(
+            agent=agent,
+            source_path=safe_path,
+            role=role,
+            text=text,
+            byte_offset=byte_offset,
+        ),
     )
 
 
@@ -218,10 +256,17 @@ def follow_sources(
                 # read last N lines
                 try:
                     lines = fp.readlines()
-                    for line in lines[-initial_lines:]:
+                    # approximate offsets for idempotency of backlog lines
+                    total = sum(len(ln.encode("utf-8", errors="replace")) for ln in lines)
+                    start_idx = max(0, len(lines) - initial_lines)
+                    offset = sum(
+                        len(ln.encode("utf-8", errors="replace")) for ln in lines[:start_idx]
+                    )
+                    for line in lines[start_idx:]:
                         parsed = parse_line(src.agent, line, src.format)
                         if parsed:
-                            parsed["source_path"] = str(src.path)
+                            safe = _safe_source_path(str(src.path), workspace=workspace)
+                            parsed["source_path"] = safe
                             if store is not None:
                                 _publish_monologue(
                                     store,
@@ -229,10 +274,14 @@ def follow_sources(
                                     role=parsed["role"],
                                     text=parsed["text"],
                                     source_path=str(src.path),
+                                    workspace=workspace,
+                                    byte_offset=offset,
                                 )
                             yield parsed
+                        offset += len(line.encode("utf-8", errors="replace"))
                     # stay at end
                     fp.seek(0, os.SEEK_END)
+                    _ = total  # silence unused if empty file
                 except Exception:
                     fp.seek(0, os.SEEK_END)
             else:
@@ -245,12 +294,14 @@ def follow_sources(
                 break
             any_data = False
             for src, fp, _ in handles:
+                pos = fp.tell()
                 line = fp.readline()
                 while line:
                     any_data = True
                     parsed = parse_line(src.agent, line, src.format)
                     if parsed:
-                        parsed["source_path"] = str(src.path)
+                        safe = _safe_source_path(str(src.path), workspace=workspace)
+                        parsed["source_path"] = safe
                         if store is not None:
                             _publish_monologue(
                                 store,
@@ -258,8 +309,11 @@ def follow_sources(
                                 role=parsed["role"],
                                 text=parsed["text"],
                                 source_path=str(src.path),
+                                workspace=workspace,
+                                byte_offset=pos,
                             )
                         yield parsed
+                    pos = fp.tell()
                     line = fp.readline()
             if not any_data:
                 time.sleep(poll_interval)

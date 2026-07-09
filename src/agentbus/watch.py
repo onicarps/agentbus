@@ -13,6 +13,7 @@ from typing import Any
 
 from agentbus.schemas import set_validation_workspace
 from agentbus.store import EventStore
+from agentbus.wiretap import redact_value
 
 IGNORED_DIR_NAMES = {
     ".git",
@@ -257,6 +258,17 @@ def _make_fs_handler(
     return FSHandler()
 
 
+def _cwd_under_workspace(cwd: str, workspace: Path) -> bool:
+    """True if cwd is the workspace or a descendant (path containment, not prefix)."""
+    if not cwd:
+        return False
+    try:
+        Path(cwd).resolve().relative_to(workspace)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 class ShellWatcher:
     def __init__(
         self,
@@ -267,7 +279,7 @@ class ShellWatcher:
         psutil: Any,
     ) -> None:
         self.publisher = publisher
-        self.workspace = str(workspace.resolve())
+        self.workspace = workspace.resolve()
         self.interval = interval
         self.psutil = psutil
         self._seen: set[int] = set()
@@ -307,7 +319,7 @@ class ShellWatcher:
                 cwd = info.get("cwd") or ""
                 name = (info.get("name") or "").lower()
                 cmdline = info.get("cmdline") or []
-                under_ws = cwd.startswith(self.workspace) if cwd else False
+                under_ws = _cwd_under_workspace(cwd, self.workspace)
                 interesting_name = any(name == n or name.startswith(n) for n in SHELL_NAMES)
                 if not under_ws and not interesting_name:
                     continue
@@ -328,17 +340,33 @@ class ShellWatcher:
                     ):
                         continue
 
-                payload = {
-                    "event": "process_start",
-                    "pid": pid,
-                    "ppid": info.get("ppid"),
-                    "name": info.get("name"),
-                    "cmdline": (cmdline or [])[:20],
-                    "cwd": cwd,
-                    "username": info.get("username"),
-                    "under_workspace": under_ws,
-                    "observer": "psutil",
-                }
+                # Redact cmdline/cwd secrets before publish (tokens often appear on argv).
+                safe_cwd = cwd
+                try:
+                    if under_ws and cwd:
+                        safe_cwd = str(Path(cwd).resolve().relative_to(self.workspace))
+                    elif cwd:
+                        home = Path.home()
+                        try:
+                            safe_cwd = "~/" + str(Path(cwd).resolve().relative_to(home))
+                        except ValueError:
+                            safe_cwd = Path(cwd).name
+                except (OSError, ValueError):
+                    safe_cwd = Path(cwd).name if cwd else ""
+
+                payload = redact_value(
+                    {
+                        "event": "process_start",
+                        "pid": pid,
+                        "ppid": info.get("ppid"),
+                        "name": info.get("name"),
+                        "cmdline": (cmdline or [])[:20],
+                        "cwd": safe_cwd,
+                        "username": info.get("username"),
+                        "under_workspace": under_ws,
+                        "observer": "psutil",
+                    }
+                )
                 self.publisher.publish("system/shell", payload)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue

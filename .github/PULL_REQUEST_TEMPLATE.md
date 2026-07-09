@@ -8,7 +8,8 @@
 - [ ] **Phase 3** Hermes / Factory Droid QA published on `okf/handoff`
 - [ ] **Phase 4** Agy CPO sign-off on bus
 - [ ] **Layer 4** CodeRabbit review on this PR (security / complexity / test gaps)
-- [ ] Ready for merge → tag → PyPI after Layer 4 is clean (or manual override after 5m timeout)
+- [ ] Ready for merge → tag → PyPI after Layer 4 is clean
+- [ ] Manual override (if any): **explicit owner sign-off** documented in the PR body (no time-based auto-bypass)
 
 ## Test plan
 

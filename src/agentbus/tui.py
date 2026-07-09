@@ -58,31 +58,32 @@ def detect_dark_agents(
             last_system[pid] = max(last_system.get(pid, ts), ts)
 
     warnings: list[dict[str, Any]] = []
-    # Also consider system activity attributed to os-watcher as ambient — dark agents
-    # are non-system producers with system noise or process activity and no okf.
-    for pid, last_ts in last_any.items():
+    # Dark agents: non-system producers with recent system/* activity but no recent okf/*.
+    # Iterate last_system so pure okf publishers are never false-positived.
+    for pid, sys_ts in last_system.items():
         if pid in {"wiretap", "os-watcher", "swarm-tail", "monitor"}:
             continue
+        age_sys = (now - sys_ts).total_seconds() / 60.0
+        if age_sys > threshold_minutes * 2:
+            continue  # stale system noise
         okf_ts = last_okf.get(pid)
-        age_min = (now - last_ts).total_seconds() / 60.0
+        last_ts = last_any.get(pid, sys_ts)
         if okf_ts is None:
-            # Active-ish but never published okf
-            if age_min <= threshold_minutes * 3:
-                warnings.append(
-                    {
-                        "producer_id": pid,
-                        "reason": "no okf/* handoff observed",
-                        "last_seen": last_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "minutes_since_okf": None,
-                    }
-                )
-            continue
-        since_okf = (now - okf_ts).total_seconds() / 60.0
-        if since_okf > threshold_minutes and age_min <= threshold_minutes * 2:
             warnings.append(
                 {
                     "producer_id": pid,
-                    "reason": f"no okf/* for {since_okf:.1f}m (threshold {threshold_minutes}m)",
+                    "reason": "system/* activity with no okf/* handoff",
+                    "last_seen": last_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "minutes_since_okf": None,
+                }
+            )
+            continue
+        since_okf = (now - okf_ts).total_seconds() / 60.0
+        if since_okf > threshold_minutes:
+            warnings.append(
+                {
+                    "producer_id": pid,
+                    "reason": f"system/* without okf/* for {since_okf:.1f}m (threshold {threshold_minutes}m)",
                     "last_seen": last_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "minutes_since_okf": round(since_okf, 1),
                 }
