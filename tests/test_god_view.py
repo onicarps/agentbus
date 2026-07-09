@@ -226,6 +226,12 @@ def test_should_ignore_log_feedback_paths():
     assert _should_ignore(r"C:\proj\log.md")
     assert _should_ignore("/tmp/ws/textual.log")
     assert _should_ignore("notes.app.log")
+    assert _should_ignore("events.db-journal")
+    assert _should_ignore("events.db-wal")
+    assert _should_ignore("events.db-shm")
+    assert _should_ignore("project-log.json")
+    assert _should_ignore("wiretap.jsonl")
+    assert _should_ignore("token")
     assert _should_ignore("src/foo.py") is False
     assert _should_ignore("docs/README.md") is False
 
