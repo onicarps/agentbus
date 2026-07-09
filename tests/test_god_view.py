@@ -227,6 +227,17 @@ def test_result_summary_redacted(tmp_path: Path):
         )
         ev = store.poll("system/mcp")["events"][0]
         assert secret not in ev["payload"].get("result_summary", "")
+
+        # Embedded token in a non-sensitive JSON value must also be masked
+        emit_system_mcp(
+            store,
+            tool="agentbus_status",
+            arguments={},
+            latency_ms=1.0,
+            result_summary=f'{{"message": "received bearer {secret} from tool"}}',
+        )
+        ev2 = store.poll("system/mcp")["events"][-1]
+        assert secret not in ev2["payload"].get("result_summary", "")
     finally:
         store.close()
 

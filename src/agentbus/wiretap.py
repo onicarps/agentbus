@@ -51,8 +51,8 @@ def redact_text(text: str, max_len: int = 500) -> str:
         cleaned = redact_value(text)
         if not isinstance(cleaned, str):
             cleaned = str(cleaned)
-        # Mask long token-like substrings embedded in prose
-        cleaned = _TOKENISH.sub(REDACTED, cleaned)
+    # Always mask long token-like substrings (including JSON string values)
+    cleaned = _TOKENISH.sub(REDACTED, cleaned)
     if len(cleaned) > max_len:
         return cleaned[: max_len - 3] + "..."
     return cleaned
