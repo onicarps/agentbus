@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.10.0] - 2026-07-09
+
+### Added — Orchestration DX
+
+- `agentbus up` / `down` / `ps` / `logs` powered by `.agentbus/swarm.yaml`
+- Cross-OS process groups: POSIX `start_new_session` + `killpg`; Windows `CREATE_NEW_PROCESS_GROUP` + CTRL_BREAK / taskkill
+- Foreground `up` runs `agentbus monitor` then tears down children on exit
+- `--detach` (`-d`) for background-only swarms; `up --init` writes example yaml
+- Per-service logs under `.agentbus/logs/<name>.stdout.log`
+- Example `examples/swarm.yaml`
+
 ## [0.9.1] - 2026-07-09
 
 ### Fixed

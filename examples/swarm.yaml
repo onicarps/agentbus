@@ -1,0 +1,14 @@
+# Example AgentBus swarm (copy to <workspace>/.agentbus/swarm.yaml)
+# Docs: PRD v0.10.0 Orchestration DX
+version: "1.0"
+services:
+  watch:
+    command: "agentbus watch --no-shell"
+  # Optional monologue tailer (God View):
+  # tail:
+  #   command: "agentbus tail --agents grok,hermes --lines 5"
+  # Optional MCP server with wiretap:
+  # mcp:
+  #   command: "agentbus mcp-serve --wiretap"
+  #   env:
+  #     AGENTBUS_PRODUCER_ID: "mcp-local"
