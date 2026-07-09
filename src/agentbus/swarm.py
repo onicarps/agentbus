@@ -129,21 +129,20 @@ def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if not _IS_WINDOWS:
-        # Prefer /proc so zombies (state Z) count as dead for orchestration.
+        # Prefer /proc when present (Linux) so zombies (state Z) count as dead.
+        # Fall back to os.kill(0) on macOS/BSD where /proc is unavailable.
         stat_path = Path(f"/proc/{pid}/stat")
-        if not stat_path.is_file():
-            return False
-        try:
-            raw = stat_path.read_text(encoding="utf-8", errors="replace")
-            # Format: pid (comm) state ...
-            rparen = raw.rfind(")")
-            if rparen != -1 and len(raw) > rparen + 2:
-                state = raw[rparen + 2]
-                if state in {"Z", "X"}:  # zombie / dead
-                    return False
-            return True
-        except OSError:
-            return False
+        if stat_path.is_file():
+            try:
+                raw = stat_path.read_text(encoding="utf-8", errors="replace")
+                rparen = raw.rfind(")")
+                if rparen != -1 and len(raw) > rparen + 2:
+                    state = raw[rparen + 2]
+                    if state in {"Z", "X"}:  # zombie / dead
+                        return False
+                return True
+            except OSError:
+                pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -200,6 +199,13 @@ def start_service(
         cwd = (workspace / spec.cwd).resolve() if not Path(spec.cwd).is_absolute() else Path(spec.cwd)
 
     out_path, err_path = _service_log_paths(workspace, spec.name)
+    for log_path in (out_path, err_path):
+        try:
+            if not log_path.exists():
+                log_path.touch()
+            os.chmod(log_path, 0o600)
+        except OSError:
+            pass
     out_fp = open(out_path, "a", encoding="utf-8")  # noqa: SIM115
     err_fp = open(err_path, "a", encoding="utf-8")  # noqa: SIM115
     try:
@@ -238,9 +244,9 @@ def stop_pid(pid: int, *, timeout: float = 5.0) -> str:
     if not _pid_alive(pid):
         return "already_dead"
 
-    def _sig_tree(sig: int) -> None:
+    def _sig_tree(sig: int | None, *, force: bool = False) -> None:
         if _IS_WINDOWS:
-            if sig in (getattr(signal, "SIGTERM", 15), getattr(signal, "SIGINT", 2)):
+            if not force:
                 try:
                     os.kill(pid, signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
                     return
@@ -252,6 +258,7 @@ def stop_pid(pid: int, *, timeout: float = 5.0) -> str:
                 check=False,
             )
             return
+        assert sig is not None
         try:
             os.killpg(pid, sig)
         except ProcessLookupError:
@@ -260,7 +267,7 @@ def stop_pid(pid: int, *, timeout: float = 5.0) -> str:
             os.kill(pid, sig)
 
     try:
-        _sig_tree(signal.SIGTERM)
+        _sig_tree(signal.SIGTERM, force=False)
     except ProcessLookupError:
         return "already_dead"
 
@@ -271,7 +278,11 @@ def stop_pid(pid: int, *, timeout: float = 5.0) -> str:
         time.sleep(0.05)
 
     try:
-        _sig_tree(signal.SIGKILL)
+        # SIGKILL is POSIX-only; Windows force path uses taskkill /F
+        if _IS_WINDOWS:
+            _sig_tree(None, force=True)
+        else:
+            _sig_tree(signal.SIGKILL, force=True)
     except ProcessLookupError:
         return "terminated"
     # brief wait for reaper

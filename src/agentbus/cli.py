@@ -952,11 +952,17 @@ def up_cmd(
             run_monitor=not detach and not no_monitor,
         )
     except FileNotFoundError as exc:
-        raise click.ClickException(
-            f"{exc}\nHint: agentbus up --init  # write example swarm.yaml"
-        ) from exc
+        msg = str(exc)
+        if "swarm.yaml" in msg or "missing" in msg.lower():
+            raise click.ClickException(
+                f"{msg}\nHint: agentbus up --init  # write example swarm.yaml"
+            ) from exc
+        # Binary not on PATH / command not found
+        raise click.ClickException(f"failed to start service: {msg}") from exc
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(f"failed to start service: {exc}") from exc
     click.echo(json.dumps(result, indent=2 if detach or no_monitor else None))
 
 
@@ -1026,6 +1032,8 @@ def swarm_config_cmd(workspace: str | None) -> None:
         )
     except FileNotFoundError:
         click.echo(json.dumps({"path": str(path), "exists": False}))
+    except ValueError as exc:
+        raise click.ClickException(f"invalid swarm.yaml: {exc}") from exc
 
 
 if __name__ == "__main__":

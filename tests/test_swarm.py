@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -11,16 +11,22 @@ import pytest
 import yaml
 
 from agentbus.swarm import (
-    load_swarm_config,
+    ServiceSpec,
+    _pid_alive,
     list_processes,
+    load_swarm_config,
     start_service,
     stop_all,
     stop_pid,
     swarm_up,
     write_example_swarm,
-    ServiceSpec,
-    _pid_alive,
 )
+
+
+def _py_cmd(*code_parts: str) -> str:
+    """Build a Windows-safe shell command running sys.executable -c ..."""
+    code = "; ".join(code_parts)
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
 def _write_swarm(ws: Path, services: dict) -> Path:
@@ -39,12 +45,14 @@ def test_load_swarm_config(tmp_path: Path):
         tmp_path,
         {
             "watch": {"command": "agentbus watch"},
-            "sleeper": "python -c 'import time; time.sleep(1)'",
+            "sleeper": _py_cmd("import time", "time.sleep(1)"),
         },
     )
     cfg = load_swarm_config(tmp_path)
     assert "watch" in cfg.services
-    assert cfg.services["sleeper"].command.startswith("python")
+    assert "python" in cfg.services["sleeper"].command or sys.executable in cfg.services[
+        "sleeper"
+    ].command
 
 
 def test_load_missing_raises(tmp_path: Path):
@@ -60,8 +68,7 @@ def test_write_example_swarm(tmp_path: Path):
 
 
 def test_start_stop_service_and_ps(tmp_path: Path):
-    # Long-lived python sleep as fake service
-    cmd = f'{sys.executable} -c "import time; time.sleep(60)"'
+    cmd = _py_cmd("import time", "time.sleep(60)")
     _write_swarm(tmp_path, {"sleeper": {"command": cmd}})
     result = swarm_up(tmp_path, detach=True, run_monitor=False)
     assert len(result["started"]) == 1
@@ -72,7 +79,7 @@ def test_start_stop_service_and_ps(tmp_path: Path):
     assert any(r["name"] == "sleeper" and r["pid"] == pid for r in rows)
 
     stopped = stop_all(tmp_path)
-    assert stopped[0]["status"] in {"terminated", "killed", "already_dead"}
+    assert stopped[0]["status"] in {"terminated", "killed"}
     deadline = time.time() + 3.0
     while time.time() < deadline and _pid_alive(pid):
         time.sleep(0.05)
@@ -81,20 +88,21 @@ def test_start_stop_service_and_ps(tmp_path: Path):
 
 
 def test_stop_pid_already_dead():
-    # PID 1 may exist on Linux; use unlikely high pid that is dead
     status = stop_pid(999_999_999)
-    assert status in {"already_dead", "terminated", "killed"}
+    assert status == "already_dead"
 
 
 def test_service_logs_created(tmp_path: Path):
-    cmd = f'{sys.executable} -c "print(\'hello-swarm\'); import time; time.sleep(30)"'
+    # -u for unbuffered so log content is visible
+    cmd = (
+        f"{shlex.quote(sys.executable)} -u -c "
+        f"{shlex.quote('print(\"hello-swarm\"); import time; time.sleep(30)')}"
+    )
     spec = ServiceSpec(name="echoer", command=cmd)
     rec = start_service(tmp_path, spec)
-    time.sleep(0.4)
+    time.sleep(0.5)
     out_log = Path(rec["stdout_log"])
     assert out_log.is_file()
-    # content may be buffered; ensure path exists and process stoppable
     stop_pid(int(rec["pid"]))
     text = out_log.read_text(encoding="utf-8", errors="replace")
-    # Python -u would force unbuffered; accept empty if fully buffered
-    assert out_log.exists()
+    assert "hello-swarm" in text
