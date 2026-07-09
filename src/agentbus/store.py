@@ -646,6 +646,31 @@ class EventStore:
         )
         self._conn.commit()
 
+    def list_active_slas(self) -> dict:
+        self.expire_sla_breaches()
+        rows = self._conn.execute(
+            """
+            SELECT event_id, topic, producer_id, sla_timeout_minutes, sla_deadline
+            FROM events
+            WHERE status = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
+            ORDER BY sla_deadline
+            """,
+            (STATUS_PUBLISHED,),
+        ).fetchall()
+        return {
+            "active": [
+                {
+                    "event_id": row["event_id"],
+                    "topic": row["topic"],
+                    "producer_id": row["producer_id"],
+                    "sla_timeout_minutes": row["sla_timeout_minutes"],
+                    "sla_deadline": row["sla_deadline"],
+                }
+                for row in rows
+            ],
+            "sla_active_count": len(rows),
+        }
+
     def status(self, producer_id: str | None = None) -> dict:
         self.expire_pending()
         self.expire_sla_breaches()

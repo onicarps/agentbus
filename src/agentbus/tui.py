@@ -108,7 +108,7 @@ def run_monitor_tui(
             padding: 0 1;
         }
         #body { height: 1fr; }
-        #stream { width: 1fr; min-width: 36; }
+        #stream { width: 2fr; min-width: 36; }
         #right { width: 1fr; }
         #trace { height: 1fr; border: solid $primary; }
         #hitl { height: 1fr; border: solid $warning; }
@@ -216,8 +216,10 @@ def run_monitor_tui(
                 return
             trace_id = selected.get("trace_id")
             if not trace_id:
+                import json
+                payload_str = json.dumps(selected.get("payload", {}), indent=2)
                 trace_widget.update(
-                    f"Event {selected['event_id']} has no trace_id"
+                    f"Event {selected['event_id']} (No Trace)\n\n[dim]Payload Detail:[/dim]\n{payload_str}"
                 )
                 return
             store = EventStore(ws, retention_days=retention_days)

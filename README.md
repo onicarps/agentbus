@@ -4,170 +4,74 @@
 [![Python](https://img.shields.io/pypi/pyversions/okf-agentbus.svg)](https://pypi.org/project/okf-agentbus/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Local MCP event log and advisory lease coordinator for multi-agent workspaces.**
+**The SQLite-Backed MCP Event Bus & Control Surface for Heterogeneous Agent Swarms.**
 
-When Cursor, Claude Code, Antigravity, Hermes, and other agents share a workspace, they usually coordinate through append-only files (`log.md`, sticky notes, Slack). That works until you need ordering, idempotency, cursors, schema validation, or file-edit mutexes.
+When Cursor, Claude, Antigravity, and Terminal Agents (like Hermes) share a workspace, they usually coordinate through fragile append-only files (`log.md`). That works until you need SLA timeouts, Human-in-the-Loop (HITL) intercepts, strict schema validation, or cryptographic RBAC.
 
-AgentBus is a **localhost sidecar**: a Python MCP server backed by SQLite. Agents publish structured events; peers poll with `since_id` cursors. Advisory lease locks prevent concurrent edits. No orchestrator runtime lock-in.
+AgentBus replaces the "Game of Telephone" with a **localhost sidecar**: a Python MCP server backed by SQLite. No orchestrator runtime lock-in. No heavy cloud dashboard. Just a hyper-fast local pub/sub built for top-tier AI orchestration.
 
-> **v0.2 (July 2026):** Events + advisory lease locks — `publish`, `poll`, `status`, `lock_*`. SSE subscribe and custom topics on the [roadmap](ROADMAP.md).
+> **v0.8.0 (July 2026):** Now includes the `Textual`-based Mission Control TUI, Swarm RBAC, SLA Timeouts, Distributed Artifact Context, and Code-First Pydantic Schemas. 
+> 
+> **Note:** Install as **`okf-agentbus`** (CLI command remains `agentbus`).
 
-> **Note:** PyPI names `agentbus` (NATS) and `agentbus-mcp` (blocked as too similar) are unavailable. Install as **`okf-agentbus`** (CLI command remains `agentbus`).
+## ⚡ The "Ah-Ha" Moment: Zero-Restart Integration
+Already running Aider, OpenHands, or custom agents in tmux panes? **Do not kill your sessions.**
+AgentBus features a dual-interface architecture (MCP + CLI). You don't need to wire up JSON configs to test it today. Just prompt your running agent:
+> *"Use your terminal to run `agentbus publish --topic okf/handoff --payload '{\"from\":\"grok\",\"to\":\"hermes\",\"summary\":\"Write tests\"}'`"*
+
+The SQLite bus instantly captures it, without requiring the MCP server. Once you're convinced by the Mission Control TUI, you can wire up the strongly-typed MCP server for your next boot.
 
 ## Why AgentBus?
 
 | Alternative | Limitation | AgentBus |
 |-------------|------------|----------|
-| `log.md` blackboard | No schema, races, manual cursors | Typed topics, monotonic IDs, poll API |
-| `flock` / git mutex | No agent identity, no TTL | Advisory leases with heartbeat renewal |
-| Redis pub/sub | Extra daemon, no MCP path | stdio MCP — works in existing IDEs |
-| LangGraph / AutoGen | Same-runtime only | Heterogeneous out-of-process clients |
+| `log.md` blackboard | No schema, race conditions | Typed topics, monotonic IDs, advisory locks |
+| LangGraph / CrewAI | Same-runtime lock-in | Heterogeneous out-of-process clients (IDE + CLI) |
+| LangSmith | Cloud-only, backward-looking | Local SQLite, forward-looking Execution TUI |
+| Redis pub/sub | Extra daemon, complex setup | Zero-config SQLite, native stdio MCP |
+
+## Feature Arsenal (v0.3 - v0.8)
+
+*   **Mission Control TUI (v0.8):** A rich, keyboard-driven `Textual` dashboard (`agentbus monitor`). View live trace waterfalls and approve/reject HITL tasks with a single keystroke.
+*   **Pluggable Pydantic Schemas (v0.7):** Code-first `@bus.topic` decorators to enforce strict JSON schemas at the insertion layer.
+*   **Distributed Context (v0.6):** Pass massive context (like git diffs) via `--attach`. Hard 1MB payload limits prevent context window explosion.
+*   **Agentic Observability (v0.5):** Native OpenTelemetry-style `trace_id` and `parent_span_id` lineage.
+*   **SLA Timeouts & Dead-Letter (v0.4):** Prevent phantom deadlocks. If an agent ghosts the swarm, SLA timers route the payload to `okf/dead-letter`.
+*   **Swarm RBAC & Droid Proofs (v0.3):** Cryptographic JWT/UUID tokens ensure only authorized agents can publish to restricted topics.
+*   **HITL Intercepts (v0.3):** Catch dangerous payloads (e.g., `DROP TABLE`) and place them in `PENDING_APPROVAL` for human review via the TUI.
 
 ## Install
 
+**The fastest way (Installs & Auto-wires your IDEs in one step):**
 ```bash
-pip install okf-agentbus
-
-# Or from GitHub
-pip install "okf-agentbus @ git+https://github.com/onicarps/agentbus@v0.2.3"
-
-# Or clone for development
-git clone https://github.com/onicarps/agentbus.git
-cd agentbus
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+curl -sSL https://raw.githubusercontent.com/onicarps/agentbus/main/install.sh | bash
 ```
 
-## Quickstart
+**Or manually via pip:**
+```bash
+pip install -U "okf-agentbus[devex,sdk]"
+agentbus init --apply --producer-id my-agent
+```
+
+## Quickstart & Examples
+
+The best way to understand AgentBus is to read our copy-pasteable examples. 
+
+See the **[`examples/`](examples/)** directory for 7 flawless, isolated Python scripts covering every feature from basic Pub/Sub to Pydantic Schemas and SLA Timeouts.
 
 ```bash
-export AGENTBUS_WORKSPACE=/path/to/workspace
-export AGENTBUS_PRODUCER_ID=my-agent
+# Terminal A — Launch the Mission Control TUI
+agentbus monitor
 
-# Terminal A — MCP server (stdio)
-agentbus serve --workspace "$AGENTBUS_WORKSPACE"
-
-# Terminal B — publish a handoff
+# Terminal B — Publish a handoff
 agentbus publish \
   --topic okf/handoff \
-  --payload '{"from":"my-agent","to":"peer","summary":"Hello bus"}'
-
-# Poll events
-agentbus poll --topic okf/handoff --since-id 0
-
-# Acquire an advisory lease before editing a shared file
-agentbus lock acquire --resource "$AGENTBUS_WORKSPACE/log.md" --owner-id my-agent
-agentbus lock status --resource "$AGENTBUS_WORKSPACE/log.md"
-agentbus lock release --resource "$AGENTBUS_WORKSPACE/log.md" --lease-id <uuid> --owner-id my-agent
+  --payload '{"from":"cursor","to":"hermes","summary":"Write tests"}'
 ```
-
-## MCP setup
-
-Use `scripts/mcp-serve.sh` so the workspace token is injected automatically:
-
-```json
-{
-  "mcpServers": {
-    "agentbus": {
-      "command": "/path/to/agentbus/scripts/mcp-serve.sh",
-      "env": {
-        "AGENTBUS_WORKSPACE": "/path/to/workspace",
-        "AGENTBUS_PRODUCER_ID": "cursor"
-      }
-    }
-  }
-}
-```
-
-Client-specific templates:
-
-| Client | Config |
-|--------|--------|
-| Cursor | [examples/mcp-cursor.json](examples/mcp-cursor.json) |
-| Claude Desktop | [examples/mcp-claude-desktop.json](examples/mcp-claude-desktop.json) |
-| Hermes | [examples/mcp-hermes.json](examples/mcp-hermes.json) |
-
-### MCP tools
-
-| Tool | Auth | Purpose |
-|------|------|---------|
-| `agentbus_publish` | Yes | Append one validated event |
-| `agentbus_poll` | No | Fetch events after `since_id` (at-least-once) |
-| `agentbus_status` | No | Event counts, topics, health |
-| `agentbus_lock_acquire` | Yes | Exclusive advisory lease on a resource path |
-| `agentbus_lock_release` | Yes | Release a held lease |
-| `agentbus_lock_renew` | Yes | Extend TTL (heartbeat) |
-| `agentbus_lock_status` | No | Check lock state without acquiring |
 
 ## Documentation
 
-For full documentation, see the `docs/` directory:
-- [MCP Schema & Event Reference](docs/MCP_SCHEMA.md)
-- [Authentication](docs/AUTH.md)
-- [Lease Locks Architecture](docs/AGENT_LEASE_LOCKS.md)
-- [End-to-End Walkthrough](docs/WALKTHROUGH.md) - Learn how a PM, Engineer, and QA agent coordinate.
-- [Client Capability Matrix](docs/CLIENT_MATRIX.md) - See how Cursor, Claude, and Antigravity compare.
-
-## Authentication
-
-On `serve`, AgentBus writes an ephemeral token to `{workspace}/.agentbus/token` (mode `0600`). Publish and lock mutations require a matching token via:
-
-- `scripts/mcp-serve.sh` (recommended for MCP — reads workspace file, not stale env)
-- `AGENTBUS_TOKEN` environment variable
-- `--token` CLI flag
-- `auth_token` MCP tool argument (optional; omit when using `mcp-serve.sh`)
-
-Poll, status, and lock_status remain open. Set `AGENTBUS_AUTH=off` to disable during local development.
-
-Details: [docs/AUTH.md](docs/AUTH.md)
-
-## Topics (v0.2)
-
-| Topic | Purpose |
-|-------|---------|
-| `okf/handoff` | Structured agent handoff (`from`, `to`, `summary`) |
-| `okf/status/<name>` | Status ping (`idle`, `active`, `blocked`, `complete`) |
-
-Custom topics are planned — [contributions welcome](CONTRIBUTING.md).
-
-## CLI reference
-
-```bash
-agentbus serve [--workspace PATH] [--rotate-token]
-agentbus publish --topic TOPIC --payload JSON [--producer-id ID]
-agentbus poll --topic TOPIC [--since-id N] [--limit N]
-agentbus status [--producer-id ID]
-agentbus token show|ensure|rotate
-agentbus lock acquire|release|renew|status
-agentbus project-log [--log-file log.md]   # optional markdown projection
-```
-
-Set `AGENTBUS_WORKSPACE` to avoid repeating `--workspace`.
-
-## Development
-
-```bash
-.venv/bin/pytest tests/ -q          # 40+ tests
-.venv/bin/pytest tests/ --cov=agentbus --cov-report=term-missing
-```
-
-## Project layout
-
-```
-src/agentbus/     # Python package
-tests/            # pytest suite (40 tests)
-docs/             # MCP schema, auth guide
-examples/         # MCP client configs (Cursor, Claude, Hermes)
-scripts/          # mcp-serve.sh wrapper
-```
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md). v0.2 ships events + advisory locks; v0.3 targets custom topics and HTTP transport.
-
-## Contributing
-
-We want real-world use cases from teams running heterogeneous agent stacks. See [CONTRIBUTING.md](CONTRIBUTING.md).
+For full architectural documentation, see the `docs/` directory.
 
 ## License
 

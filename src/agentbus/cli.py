@@ -30,6 +30,7 @@ from agentbus.schema_registry import import_schema_file, list_schemas, register_
 from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
 from agentbus.store import EventStore
+from agentbus.workspace_config import resolve_retention_days
 
 def _cli_workspace(workspace: str | None) -> Path:
     if workspace:
@@ -50,7 +51,8 @@ def _producer_id(override: str | None) -> str:
 def _open_store(workspace: str | None, retention_days: int) -> EventStore:
     ws = _cli_workspace(workspace)
     set_validation_workspace(ws)
-    return EventStore(ws, retention_days=retention_days)
+    days = resolve_retention_days(ws, retention_days)
+    return EventStore(ws, retention_days=days)
 
 
 def _open_lease_store(workspace: str | None) -> LeaseStore:
@@ -297,6 +299,43 @@ def status(workspace: str, producer_id: str | None, retention_days: int) -> None
     try:
         pid = producer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "")
         click.echo(json.dumps(store.status(producer_id=pid or None)))
+    finally:
+        store.close()
+
+
+@main.group(invoke_without_command=True)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--retention-days", default=7, show_default=True)
+@click.pass_context
+def sla(ctx: click.Context, workspace: str, retention_days: int) -> None:
+    """SLA timeout management."""
+    ctx.obj = {"workspace": workspace, "retention_days": retention_days}
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(sla_list)
+
+
+@sla.command("list")
+@click.pass_context
+def sla_list(ctx: click.Context) -> None:
+    """List active SLA deadlines."""
+    opts = ctx.obj or {}
+    store = _open_store(opts.get("workspace"), opts.get("retention_days", 7))
+    try:
+        click.echo(json.dumps(store.list_active_slas()))
+    finally:
+        store.close()
+
+
+@sla.command("clear")
+@click.pass_context
+@click.argument("event_id", type=int)
+def sla_clear(ctx: click.Context, event_id: int) -> None:
+    """Clear an active SLA deadline."""
+    opts = ctx.obj or {}
+    store = _open_store(opts.get("workspace"), opts.get("retention_days", 7))
+    try:
+        store._clear_sla(event_id)
+        click.echo(json.dumps({"event_id": event_id, "sla_cleared": True}))
     finally:
         store.close()
 

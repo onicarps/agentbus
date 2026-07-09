@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agentbus.auth import ensure_ephemeral_token, token_path
+from agentbus.rbac import ensure_default_roles
 from agentbus.store import EventStore
 
 
@@ -126,6 +127,8 @@ def apply_init(
     clients: list[str] | None = None,
 ) -> InitResult:
     ensure_ephemeral_token(workspace, rotate=False)
+    if not dry_run:
+        ensure_default_roles(workspace)
     marker = workspace / ".agentbus" / "workspace"
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(workspace.resolve()) + "\n", encoding="utf-8")
