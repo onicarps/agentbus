@@ -15,21 +15,51 @@ from agentbus.schemas import set_validation_workspace
 from agentbus.store import EventStore
 from agentbus.wiretap import redact_value
 
-IGNORED_DIR_NAMES = {
-    ".git",
-    ".venv",
-    "venv",
-    "node_modules",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".tox",
-    "dist",
-    "build",
-    ".eggs",
-    ".agentbus",
-}
+# Directory segment names ignored case-insensitively (Windows can surface
+# alternate casing; Path.parts alone is not enough for feedback loops).
+IGNORED_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        "dist",
+        "build",
+        ".eggs",
+        ".agentbus",  # critical: events.db lives here — must never re-enter
+    }
+)
+
+# Exact basenames (lower) that commonly participate in bus/TUI feedback loops.
+IGNORED_BASENAMES = frozenset(
+    {
+        "log.md",
+        "textual.log",
+        "events.db",
+        "events.db-journal",
+        "events.db-wal",
+        "events.db-shm",
+        "project-log.json",
+        "token",
+        "wiretap.jsonl",
+    }
+)
+
+IGNORED_SUFFIXES = (
+    ".log",
+    ".db",
+    ".db-journal",
+    ".db-wal",
+    ".db-shm",
+    ".tmp",
+    ".swp",
+    "~",
+)
 
 SHELL_NAMES = {
     "bash",
@@ -62,9 +92,43 @@ SHELL_NAMES = {
 }
 
 
+def _normalize_path_str(path: str) -> str:
+    """Normalize OS path so Windows ``\\`` and mixed separators compare safely."""
+    if not path:
+        return ""
+    # os.path.normpath handles drive letters / .. ; force forward slashes for parts
+    return os.path.normpath(path).replace("\\", "/")
+
+
 def _should_ignore(path: str) -> bool:
-    parts = Path(path).parts
-    return any(p in IGNORED_DIR_NAMES for p in parts)
+    """Return True if this FS path must not emit system/fs (anti-feedback).
+
+    Handles:
+    - case-insensitive ``.agentbus`` / ``.AGENTBUS`` (Windows)
+    - path separators ``\\`` vs ``/``
+    - ``log.md`` / ``*.log`` projection loops from project-log / TUI
+    - SQLite/db files written by the bus itself
+    """
+    norm = _normalize_path_str(path)
+    if not norm:
+        return True
+
+    # Split on / after normpath so Windows paths never depend on Path.parts alone
+    parts = [p for p in norm.split("/") if p and p != "."]
+    lower_parts = [p.lower() for p in parts]
+
+    if any(p in IGNORED_DIR_NAMES for p in lower_parts):
+        return True
+
+    basename = lower_parts[-1] if lower_parts else ""
+    if basename in IGNORED_BASENAMES:
+        return True
+    if any(basename.endswith(suf) for suf in IGNORED_SUFFIXES):
+        return True
+    # Hidden / swap noise (keep .env.example-style allow-list empty for safety)
+    if basename.startswith(".") and basename not in {".env.example"}:
+        return True
+    return False
 
 
 class BusPublisher:
