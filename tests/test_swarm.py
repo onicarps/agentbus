@@ -116,3 +116,37 @@ def test_reject_path_traversal_service_name(tmp_path: Path):
     with pytest.raises(ValueError, match="path-unsafe"):
         _write_swarm(tmp_path, {"../../etc/passwd": {"command": "true"}})
         load_swarm_config(tmp_path)
+
+
+def test_swarm_up_does_not_install_sigint_handler(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Regression for Agy #188: custom SIGINT steals Ctrl+C from Textual."""
+    import signal
+
+    from agentbus import swarm as swarm_mod
+
+    calls: list[tuple] = []
+    real_signal = signal.signal
+
+    def _spy(sig, handler):
+        calls.append((sig, handler))
+        return real_signal(sig, handler)
+
+    monkeypatch.setattr(signal, "signal", _spy)
+
+    # Avoid real Textual monitor
+    def _fake_monitor(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(
+        "agentbus.devex.run_monitor",
+        _fake_monitor,
+    )
+
+    cmd = _py_cmd("import time", "time.sleep(2)")
+    _write_swarm(tmp_path, {"sleeper": {"command": cmd}})
+    # run_monitor path
+    result = swarm_mod.swarm_up(tmp_path, detach=False, run_monitor=True)
+    assert result.get("shutdown") == "ok"
+    # No SIGINT installation during swarm_up monitor path
+    sigint_installs = [c for c in calls if c[0] == signal.SIGINT]
+    assert sigint_installs == [], f"SIGINT handlers installed: {sigint_installs}"

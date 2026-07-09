@@ -1,3 +1,3 @@
 """AgentBus — local MCP event log and advisory lease locks for multi-agent workspaces."""
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
