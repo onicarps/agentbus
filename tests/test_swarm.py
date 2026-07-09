@@ -94,10 +94,8 @@ def test_stop_pid_already_dead():
 
 def test_service_logs_created(tmp_path: Path):
     # -u for unbuffered so log content is visible
-    cmd = (
-        f"{shlex.quote(sys.executable)} -u -c "
-        f"{shlex.quote('print(\"hello-swarm\"); import time; time.sleep(30)')}"
-    )
+    snippet = 'print("hello-swarm"); import time; time.sleep(30)'
+    cmd = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(snippet)}"
     spec = ServiceSpec(name="echoer", command=cmd)
     rec = start_service(tmp_path, spec)
     time.sleep(0.5)
