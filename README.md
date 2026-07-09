@@ -10,7 +10,7 @@ When Cursor, Claude, Antigravity, and Terminal Agents (like Hermes) share a work
 
 AgentBus replaces the "Game of Telephone" with a **localhost sidecar**: a Python MCP server backed by SQLite. No orchestrator runtime lock-in. No heavy cloud dashboard. Just a hyper-fast local pub/sub built for top-tier AI orchestration.
 
-> **v0.9.0 (July 2026):** **God View** observability mesh — MCP wiretap (`--wiretap`), OS watcher (`agentbus watch`), monologue tail (`agentbus tail`), and a Wiretap pane in the Mission Control TUI. Opt-in, 100% local.
+> **v0.9.1 (July 2026):** **God View** observability mesh — MCP wiretap (`--wiretap`), OS watcher (`agentbus watch`), monologue tail (`agentbus tail`), and a Wiretap pane in the Mission Control TUI. Opt-in, 100% local. Hotfix: Windows-safe ignore rules stop `system/fs` feedback loops.
 >
 > **Note:** Install as **`okf-agentbus`** (CLI command remains `agentbus`). For watchers: `pip install 'okf-agentbus[obs,devex]'`.
 
@@ -69,6 +69,21 @@ agentbus publish \
   --topic okf/handoff \
   --payload '{"from":"cursor","to":"hermes","summary":"Write tests"}'
 ```
+
+**God View Observability (v0.9.0):**
+Track silent agents by wiretapping their operations:
+```bash
+# Intercept MCP tool calls
+mcp-serve --wiretap
+
+# Watch file edits and command executions
+agentbus watch
+
+# Tail internal agent reasoning logs
+agentbus tail
+```
+Events will stream into the TUI's Wiretap pane as `system/mcp`, `system/fs`, `system/shell`, and `system/monologue` topics.
+
 
 ## Documentation
 

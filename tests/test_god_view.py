@@ -20,7 +20,7 @@ from agentbus.tail import (
     parse_line,
 )
 from agentbus.tui import detect_dark_agents, fetch_monitor_state
-from agentbus.watch import _cwd_under_workspace
+from agentbus.watch import _cwd_under_workspace, _should_ignore
 from agentbus.wiretap import REDACTED, emit_system_mcp, instrument_call, redact_value
 
 
@@ -211,6 +211,29 @@ def test_cwd_path_containment(tmp_path: Path):
     sibling.mkdir()
     assert _cwd_under_workspace(str(ws / "src"), ws)
     assert not _cwd_under_workspace(str(sibling), ws)
+
+
+def test_should_ignore_agentbus_case_insensitive():
+    # Windows-style alternate casing + backslashes must still be ignored
+    assert _should_ignore(r"C:\Users\oni\proj\.AGENTBUS\events.db")
+    assert _should_ignore(r"C:\Users\oni\proj\.AgentBus\token")
+    assert _should_ignore("/home/oni/ws/.agentbus/events.db")
+    assert _should_ignore("workspace/.agentbus/wiretap.jsonl")
+
+
+def test_should_ignore_log_feedback_paths():
+    assert _should_ignore("/home/oni/ws/log.md")
+    assert _should_ignore(r"C:\proj\log.md")
+    assert _should_ignore("/tmp/ws/textual.log")
+    assert _should_ignore("notes.app.log")
+    assert _should_ignore("events.db-journal")
+    assert _should_ignore("events.db-wal")
+    assert _should_ignore("events.db-shm")
+    assert _should_ignore("project-log.json")
+    assert _should_ignore("wiretap.jsonl")
+    assert _should_ignore("token")
+    assert _should_ignore("src/foo.py") is False
+    assert _should_ignore("docs/README.md") is False
 
 
 def test_result_summary_redacted(tmp_path: Path):

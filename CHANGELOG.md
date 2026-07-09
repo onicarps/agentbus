@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [0.9.1] - 2026-07-09
+
+### Fixed
+
+- **Critical:** `agentbus watch` infinite `system/fs` feedback loop (esp. Windows)
+  - Case-insensitive ignore for `.agentbus` / `.AGENTBUS`
+  - Windows path separators normalized before segment matching
+  - Ignore `log.md`, `*.log`, SQLite db/journal/wal/shm, and other bus artifacts
+  - Prevents publish→events.db / project-log→log.md re-entry storms
+
 ## [0.9.0] - 2026-07-09
 
 ### Added — God View Observability Mesh
