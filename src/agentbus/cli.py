@@ -33,6 +33,15 @@ from agentbus.store import EventStore
 from agentbus.workspace_config import resolve_retention_days
 from agentbus.tail import run_tail
 from agentbus.watch import run_watch
+from agentbus.swarm import (
+    list_processes,
+    load_swarm_config,
+    stop_all,
+    swarm_up,
+    swarm_yaml_path,
+    tail_service_logs,
+    write_example_swarm,
+)
 
 def _cli_workspace(workspace: str | None) -> Path:
     if workspace:
@@ -904,6 +913,127 @@ def tail_cmd(
         raise click.ClickException(str(exc)) from exc
     if code:
         raise SystemExit(code)
+
+
+@main.command("up")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "-d",
+    "--detach",
+    is_flag=True,
+    help="Run services in background only (no monitor TUI)",
+)
+@click.option(
+    "--init",
+    "do_init",
+    is_flag=True,
+    help="Write example .agentbus/swarm.yaml if missing",
+)
+@click.option(
+    "--no-monitor",
+    is_flag=True,
+    help="Do not launch monitor even without --detach",
+)
+def up_cmd(
+    workspace: str | None,
+    detach: bool,
+    do_init: bool,
+    no_monitor: bool,
+) -> None:
+    """Start swarm services from .agentbus/swarm.yaml (Compose-style)."""
+    ws = _cli_workspace(workspace)
+    if do_init:
+        path = write_example_swarm(ws)
+        click.echo(json.dumps({"wrote": str(path)}))
+    try:
+        result = swarm_up(
+            ws,
+            detach=detach or no_monitor,
+            run_monitor=not detach and not no_monitor,
+        )
+    except FileNotFoundError as exc:
+        msg = str(exc)
+        if "swarm.yaml" in msg or "missing" in msg.lower():
+            raise click.ClickException(
+                f"{msg}\nHint: agentbus up --init  # write example swarm.yaml"
+            ) from exc
+        # Binary not on PATH / command not found
+        raise click.ClickException(f"failed to start service: {msg}") from exc
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except OSError as exc:
+        raise click.ClickException(f"failed to start service: {exc}") from exc
+    click.echo(json.dumps(result, indent=2 if detach or no_monitor else None))
+
+
+@main.command("down")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def down_cmd(workspace: str | None) -> None:
+    """Stop all swarm services managed by agentbus up."""
+    ws = _cli_workspace(workspace)
+    results = stop_all(ws)
+    click.echo(json.dumps({"stopped": results, "workspace": str(ws)}))
+
+
+@main.command("ps")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def ps_cmd(workspace: str | None, as_json: bool) -> None:
+    """List running swarm services (PID + uptime)."""
+    ws = _cli_workspace(workspace)
+    rows = list_processes(ws)
+    if as_json:
+        click.echo(json.dumps({"services": rows, "workspace": str(ws)}))
+        return
+    if not rows:
+        click.echo("No running swarm services.")
+        return
+    click.echo(f"{'NAME':<16} {'PID':<8} {'UPTIME':<10} COMMAND")
+    for r in rows:
+        click.echo(
+            f"{r['name']:<16} {str(r['pid']):<8} {r['uptime']:<10} {r['command']}"
+        )
+
+
+@main.command("logs")
+@click.argument("service_name")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("-f", "--follow", is_flag=True, help="Follow log output")
+@click.option("-n", "--lines", type=int, default=50, show_default=True)
+def logs_cmd(
+    service_name: str,
+    workspace: str | None,
+    follow: bool,
+    lines: int,
+) -> None:
+    """Show stdout/stderr logs for a swarm service."""
+    ws = _cli_workspace(workspace)
+    code = tail_service_logs(ws, service_name, follow=follow, lines=lines)
+    if code:
+        raise SystemExit(code)
+
+
+@main.command("swarm-config")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def swarm_config_cmd(workspace: str | None) -> None:
+    """Show resolved swarm.yaml path and parsed service names."""
+    ws = _cli_workspace(workspace)
+    path = swarm_yaml_path(ws)
+    try:
+        cfg = load_swarm_config(ws)
+        click.echo(
+            json.dumps(
+                {
+                    "path": str(path),
+                    "version": cfg.version,
+                    "services": list(cfg.services.keys()),
+                }
+            )
+        )
+    except FileNotFoundError:
+        click.echo(json.dumps({"path": str(path), "exists": False}))
+    except ValueError as exc:
+        raise click.ClickException(f"invalid swarm.yaml: {exc}") from exc
 
 
 if __name__ == "__main__":
