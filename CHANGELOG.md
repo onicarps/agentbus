@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.10.1] - 2026-07-09
+
+### Fixed
+
+- **Critical:** `agentbus up` no longer steals SIGINT from Textual (Ctrl+C hang).
+  Custom signal handlers removed; `finally: stop_all()` still tears down children.
+
 ## [0.10.0] - 2026-07-09
 
 ### Added — Orchestration DX

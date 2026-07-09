@@ -385,15 +385,10 @@ def swarm_up(
     if detach or not run_monitor:
         return result
 
-    # Foreground monitor; on exit, tear down children
-    children_pids = [int(r["pid"]) for r in started]
-
-    def _shutdown(*_args: Any) -> None:
-        for pid in children_pids:
-            stop_pid(pid)
-
-    prev_int = signal.signal(signal.SIGINT, _shutdown)
-    prev_term = signal.signal(signal.SIGTERM, _shutdown)
+    # Foreground monitor; on exit, tear down children.
+    # Do NOT install custom SIGINT/SIGTERM handlers here — they steal Ctrl+C
+    # from Textual and hang the TUI in raw mode (Agy #188). Textual exits via
+    # KeyboardInterrupt / normal app quit; finally always stop_all().
     try:
         from agentbus.devex import run_monitor as _run_monitor
 
@@ -401,8 +396,6 @@ def swarm_up(
     except KeyboardInterrupt:
         pass
     finally:
-        signal.signal(signal.SIGINT, prev_int)
-        signal.signal(signal.SIGTERM, prev_term)
         stop_all(workspace)
         result["shutdown"] = "ok"
     return result
