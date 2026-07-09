@@ -31,6 +31,8 @@ from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
 from agentbus.store import EventStore
 from agentbus.workspace_config import resolve_retention_days
+from agentbus.tail import run_tail
+from agentbus.watch import run_watch
 
 def _cli_workspace(workspace: str | None) -> Path:
     if workspace:
@@ -84,12 +86,35 @@ def main() -> None:
     is_flag=True,
     help="Regenerate workspace token on startup",
 )
-def mcp_serve(workspace: str | None, retention_days: int, rotate_token: bool) -> None:
+@click.option(
+    "--wiretap",
+    is_flag=True,
+    help="God View: publish system/mcp for every tools/call (opt-in)",
+)
+@click.option(
+    "--wiretap-log",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help="Optional JSONL path for wiretap frames (default: .agentbus/wiretap.jsonl)",
+)
+def mcp_serve(
+    workspace: str | None,
+    retention_days: int,
+    rotate_token: bool,
+    wiretap: bool,
+    wiretap_log: str | None,
+) -> None:
     """MCP entrypoint for IDE configs (ensures token, then serve)."""
     ws = _cli_workspace(workspace)
     ensure_ephemeral_token(ws, rotate=rotate_token)
     os.environ["AGENTBUS_TOKEN"] = read_workspace_token(ws) or ""
-    run_stdio(ws, retention_days=retention_days, rotate_token=False)
+    run_stdio(
+        ws,
+        retention_days=retention_days,
+        rotate_token=False,
+        wiretap=wiretap,
+        wiretap_log=wiretap_log,
+    )
 
 
 @main.command()
@@ -105,9 +130,23 @@ def mcp_serve(workspace: str | None, retention_days: int, rotate_token: bool) ->
     is_flag=True,
     help="Regenerate workspace token on startup",
 )
-def serve(workspace: str | None, retention_days: int, rotate_token: bool) -> None:
+@click.option("--wiretap", is_flag=True, help="God View wiretap (system/mcp events)")
+@click.option("--wiretap-log", type=click.Path(dir_okay=False, path_type=str), default=None)
+def serve(
+    workspace: str | None,
+    retention_days: int,
+    rotate_token: bool,
+    wiretap: bool,
+    wiretap_log: str | None,
+) -> None:
     """Run MCP server on stdio."""
-    run_stdio(_cli_workspace(workspace), retention_days=retention_days, rotate_token=rotate_token)
+    run_stdio(
+        _cli_workspace(workspace),
+        retention_days=retention_days,
+        rotate_token=rotate_token,
+        wiretap=wiretap,
+        wiretap_log=wiretap_log,
+    )
 
 
 @main.command()
@@ -773,6 +812,98 @@ def ping(workspace: str, producer_id: str | None, retention_days: int) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result))
+
+
+@main.command("watch")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--no-fs", is_flag=True, help="Disable filesystem watcher")
+@click.option("--no-shell", is_flag=True, help="Disable process watcher")
+@click.option("--poll-interval", type=float, default=2.0, show_default=True)
+@click.option(
+    "--debounce",
+    "debounce_ms",
+    type=int,
+    default=400,
+    show_default=True,
+    help="FS debounce ms",
+)
+@click.option("--dry-run", is_flag=True, help="Log only; do not publish")
+@click.option("--duration", type=float, default=0, help="Exit after N seconds (0=forever)")
+def watch_cmd(
+    workspace: str | None,
+    no_fs: bool,
+    no_shell: bool,
+    poll_interval: float,
+    debounce_ms: int,
+    dry_run: bool,
+    duration: float,
+) -> None:
+    """God View OS watcher — publish system/fs and system/shell (requires [obs])."""
+    ws = _cli_workspace(workspace)
+    try:
+        count = run_watch(
+            ws,
+            enable_fs=not no_fs,
+            enable_shell=not no_shell,
+            poll_interval=poll_interval,
+            debounce_ms=debounce_ms,
+            dry_run=dry_run,
+            duration=duration,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({"published": count, "workspace": str(ws)}), err=True)
+
+
+@main.command("tail")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--agents",
+    default="all",
+    show_default=True,
+    help="Comma-separated agent ids (hermes,grok,claude,...) or all",
+)
+@click.option("--list", "list_only", is_flag=True, help="Show path map presence and exit")
+@click.option(
+    "--publish",
+    "do_publish",
+    is_flag=True,
+    help="Also publish lines to system/monologue (privacy-sensitive)",
+)
+@click.option("--lines", type=int, default=15, show_default=True, help="Initial tail window")
+@click.option("--duration", type=float, default=0, help="Exit after N seconds (0=forever)")
+def tail_cmd(
+    workspace: str | None,
+    agents: str,
+    list_only: bool,
+    do_publish: bool,
+    lines: int,
+    duration: float,
+) -> None:
+    """God View monologue tailer — multiplex agent session logs."""
+    agent_list = (
+        None
+        if agents.strip().lower() == "all"
+        else [a.strip() for a in agents.split(",") if a.strip()]
+    )
+    ws = None
+    if do_publish or workspace:
+        ws = _cli_workspace(workspace)
+    try:
+        code = run_tail(
+            agents=agent_list,
+            list_only=list_only,
+            publish=do_publish,
+            workspace=ws,
+            lines=lines,
+            duration=duration,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if code:
+        raise SystemExit(code)
 
 
 if __name__ == "__main__":

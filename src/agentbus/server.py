@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,12 +15,16 @@ from agentbus.artifacts import PayloadTooLargeError
 from agentbus.rbac import ForbiddenError
 from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.store import EventStore
+from agentbus.wiretap import instrument_call
 
 mcp = FastMCP("agentbus")
 
 _store: EventStore | None = None
 _lease_store: LeaseStore | None = None
 _workspace: Path | None = None
+_wiretap_enabled: bool = False
+_wiretap_log: Path | None = None
+_wiretap_client: str | None = None
 
 
 def _get_store() -> EventStore:
@@ -43,6 +48,19 @@ def init_store(workspace: Path, retention_days: int = 7) -> EventStore:
     return _store
 
 
+def configure_wiretap(
+    enabled: bool = False,
+    *,
+    log_path: Path | None = None,
+    client: str | None = None,
+) -> None:
+    """Enable/disable God View MCP wiretap (system/mcp events). Default off."""
+    global _wiretap_enabled, _wiretap_log, _wiretap_client
+    _wiretap_enabled = enabled
+    _wiretap_log = log_path
+    _wiretap_client = client or os.environ.get("AGENTBUS_PRODUCER_ID")
+
+
 def _auth_workspace() -> Path | None:
     return _workspace
 
@@ -52,6 +70,19 @@ def _producer_id(override: str | None) -> str:
     if not pid:
         raise ValueError("producer_id required (arg or AGENTBUS_PRODUCER_ID)")
     return pid
+
+
+def _wt(tool: str, arguments: dict[str, Any], fn: Any) -> Any:
+    if not _wiretap_enabled:
+        return fn()
+    return instrument_call(
+        _get_store(),
+        tool,
+        arguments,
+        fn,
+        wiretap_log=_wiretap_log,
+        client=_wiretap_client,
+    )
 
 
 @mcp.tool()
@@ -68,36 +99,55 @@ def agentbus_publish(
     parent_span_id: str | None = None,
 ) -> str:
     """Append one event to the workspace event log."""
-    check_publish_token(_auth_workspace(), auth_token=auth_token)
-    payload = validate_payload(topic, payload)
-    try:
-        event, duplicate = _get_store().publish(
-            topic=topic,
-            producer_id=_producer_id(producer_id),
-            schema_version=schema_version,
-            payload=payload,
-            causation_id=causation_id,
-            idempotency_key=idempotency_key,
-            auth_token=auth_token,
-            sla_timeout_minutes=sla_timeout_minutes,
-            trace_id=trace_id,
-            parent_span_id=parent_span_id,
-        )
-    except ForbiddenError as exc:
-        return json.dumps({"error": str(exc), "code": exc.code})
-    except PayloadTooLargeError as exc:
-        return json.dumps({"error": str(exc), "code": exc.code})
-    out = {
-        "event_id": event.event_id,
-        "topic": event.topic,
-        "timestamp": event.timestamp,
-        "duplicate": duplicate,
-    }
-    if event.span_id:
-        out["span_id"] = event.span_id
-    if event.trace_id:
-        out["trace_id"] = event.trace_id
-    return json.dumps(out)
+
+    def _run() -> str:
+        check_publish_token(_auth_workspace(), auth_token=auth_token)
+        validated = validate_payload(topic, payload)
+        try:
+            event, duplicate = _get_store().publish(
+                topic=topic,
+                producer_id=_producer_id(producer_id),
+                schema_version=schema_version,
+                payload=validated,
+                causation_id=causation_id,
+                idempotency_key=idempotency_key,
+                auth_token=auth_token,
+                sla_timeout_minutes=sla_timeout_minutes,
+                trace_id=trace_id,
+                parent_span_id=parent_span_id,
+            )
+        except ForbiddenError as exc:
+            return json.dumps({"error": str(exc), "code": exc.code})
+        except PayloadTooLargeError as exc:
+            return json.dumps({"error": str(exc), "code": exc.code})
+        out = {
+            "event_id": event.event_id,
+            "topic": event.topic,
+            "timestamp": event.timestamp,
+            "duplicate": duplicate,
+        }
+        if event.span_id:
+            out["span_id"] = event.span_id
+        if event.trace_id:
+            out["trace_id"] = event.trace_id
+        return json.dumps(out)
+
+    return _wt(
+        "agentbus_publish",
+        {
+            "topic": topic,
+            "payload": payload,
+            "schema_version": schema_version,
+            "producer_id": producer_id,
+            "causation_id": causation_id,
+            "idempotency_key": idempotency_key,
+            "auth_token": auth_token,
+            "sla_timeout_minutes": sla_timeout_minutes,
+            "trace_id": trace_id,
+            "parent_span_id": parent_span_id,
+        },
+        _run,
+    )
 
 
 @mcp.tool()
@@ -107,20 +157,36 @@ def agentbus_poll(
     limit: int = 50,
 ) -> str:
     """Fetch events after cursor (at-least-once delivery)."""
-    result = _get_store().poll(topic=topic, since_id=since_id, limit=min(limit, 100))
-    return json.dumps(result)
+
+    def _run() -> str:
+        result = _get_store().poll(topic=topic, since_id=since_id, limit=min(limit, 100))
+        return json.dumps(result)
+
+    return _wt(
+        "agentbus_poll",
+        {"topic": topic, "since_id": since_id, "limit": limit},
+        _run,
+    )
 
 
 @mcp.tool()
 def agentbus_status() -> str:
     """Workspace bus health and topic list."""
-    return json.dumps(_get_store().status())
+
+    def _run() -> str:
+        return json.dumps(_get_store().status())
+
+    return _wt("agentbus_status", {}, _run)
 
 
 @mcp.tool()
 def agentbus_review(topic: str | None = None, limit: int = 50) -> str:
     """List events pending human approval (hidden from standard poll)."""
-    return json.dumps(_get_store().review_pending(topic=topic, limit=min(limit, 100)))
+
+    def _run() -> str:
+        return json.dumps(_get_store().review_pending(topic=topic, limit=min(limit, 100)))
+
+    return _wt("agentbus_review", {"topic": topic, "limit": limit}, _run)
 
 
 @mcp.tool()
@@ -130,15 +196,23 @@ def agentbus_approve(
     auth_token: str | None = None,
 ) -> str:
     """Approve a pending event so agents can see it on poll."""
-    check_publish_token(_auth_workspace(), auth_token=auth_token)
-    rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
-    try:
-        return json.dumps(
-            _get_store().approve_event(event_id, reviewer_id=rid, auth_token=auth_token)
-        )
-    except (ValueError, ForbiddenError) as exc:
-        code = getattr(exc, "code", 400)
-        return json.dumps({"error": str(exc), "code": code})
+
+    def _run() -> str:
+        check_publish_token(_auth_workspace(), auth_token=auth_token)
+        rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
+        try:
+            return json.dumps(
+                _get_store().approve_event(event_id, reviewer_id=rid, auth_token=auth_token)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
+
+    return _wt(
+        "agentbus_approve",
+        {"event_id": event_id, "reviewer_id": reviewer_id, "auth_token": auth_token},
+        _run,
+    )
 
 
 @mcp.tool()
@@ -149,17 +223,30 @@ def agentbus_reject(
     auth_token: str | None = None,
 ) -> str:
     """Reject a pending event and notify the originating agent."""
-    check_publish_token(_auth_workspace(), auth_token=auth_token)
-    rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
-    try:
-        return json.dumps(
-            _get_store().reject_event(
-                event_id, reviewer_id=rid, reason=reason, auth_token=auth_token
+
+    def _run() -> str:
+        check_publish_token(_auth_workspace(), auth_token=auth_token)
+        rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
+        try:
+            return json.dumps(
+                _get_store().reject_event(
+                    event_id, reviewer_id=rid, reason=reason, auth_token=auth_token
+                )
             )
-        )
-    except (ValueError, ForbiddenError) as exc:
-        code = getattr(exc, "code", 400)
-        return json.dumps({"error": str(exc), "code": code})
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
+
+    return _wt(
+        "agentbus_reject",
+        {
+            "event_id": event_id,
+            "reason": reason,
+            "reviewer_id": reviewer_id,
+            "auth_token": auth_token,
+        },
+        _run,
+    )
 
 
 @mcp.tool()
@@ -170,9 +257,22 @@ def agentbus_lock_acquire(
     auth_token: str | None = None,
 ) -> str:
     """Acquire an exclusive advisory lease on a workspace resource."""
-    check_publish_token(_auth_workspace(), auth_token=auth_token)
-    return json.dumps(
-        _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
+
+    def _run() -> str:
+        check_publish_token(_auth_workspace(), auth_token=auth_token)
+        return json.dumps(
+            _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
+        )
+
+    return _wt(
+        "agentbus_lock_acquire",
+        {
+            "resource": resource,
+            "owner_id": owner_id,
+            "ttl_seconds": ttl_seconds,
+            "auth_token": auth_token,
+        },
+        _run,
     )
 
 
@@ -184,9 +284,22 @@ def agentbus_lock_release(
     auth_token: str | None = None,
 ) -> str:
     """Release a held lease (idempotent if already expired)."""
-    check_publish_token(_auth_workspace(), auth_token=auth_token)
-    return json.dumps(
-        _get_lease_store().lock_release(resource, lease_id, owner_id)
+
+    def _run() -> str:
+        check_publish_token(_auth_workspace(), auth_token=auth_token)
+        return json.dumps(
+            _get_lease_store().lock_release(resource, lease_id, owner_id)
+        )
+
+    return _wt(
+        "agentbus_lock_release",
+        {
+            "resource": resource,
+            "lease_id": lease_id,
+            "owner_id": owner_id,
+            "auth_token": auth_token,
+        },
+        _run,
     )
 
 
@@ -199,16 +312,34 @@ def agentbus_lock_renew(
     auth_token: str | None = None,
 ) -> str:
     """Extend TTL on an active lease (heartbeat)."""
-    check_publish_token(_auth_workspace(), auth_token=auth_token)
-    return json.dumps(
-        _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
+
+    def _run() -> str:
+        check_publish_token(_auth_workspace(), auth_token=auth_token)
+        return json.dumps(
+            _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
+        )
+
+    return _wt(
+        "agentbus_lock_renew",
+        {
+            "resource": resource,
+            "lease_id": lease_id,
+            "owner_id": owner_id,
+            "ttl_seconds": ttl_seconds,
+            "auth_token": auth_token,
+        },
+        _run,
     )
 
 
 @mcp.tool()
 def agentbus_lock_status(resource: str) -> str:
     """Check lock state without acquiring (no auth required)."""
-    return json.dumps(_get_lease_store().lock_status(resource))
+
+    def _run() -> str:
+        return json.dumps(_get_lease_store().lock_status(resource))
+
+    return _wt("agentbus_lock_status", {"resource": resource}, _run)
 
 
 def run_stdio(
@@ -216,8 +347,16 @@ def run_stdio(
     retention_days: int = 7,
     *,
     rotate_token: bool = False,
+    wiretap: bool = False,
+    wiretap_log: Path | str | None = None,
 ) -> None:
     ws = workspace.resolve()
     ensure_ephemeral_token(ws, rotate=rotate_token)
     init_store(ws, retention_days)
+    log_path: Path | None = None
+    if wiretap_log:
+        log_path = Path(wiretap_log)
+    elif wiretap:
+        log_path = ws / ".agentbus" / "wiretap.jsonl"
+    configure_wiretap(wiretap, log_path=log_path if wiretap else None)
     mcp.run(transport="stdio")

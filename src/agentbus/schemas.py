@@ -79,7 +79,69 @@ KNOWN_TOPICS: dict[str, dict] = {
             },
         },
     },
+    # God View observability topics (v0.9) — loose schemas for high-volume streams
+    "system/mcp": {
+        "type": "object",
+        "required": ["tool"],
+        "additionalProperties": True,
+        "properties": {
+            "method": {"type": "string"},
+            "tool": {"type": "string", "minLength": 1},
+            "arguments": {"type": "object"},
+            "result_summary": {"type": "string"},
+            "error": {"type": "string"},
+            "latency_ms": {"type": "number"},
+            "client": {"type": "string"},
+            "direction": {"type": "string"},
+            "observer": {"type": "string"},
+        },
+    },
+    "system/fs": {
+        "type": "object",
+        "required": ["event", "path"],
+        "additionalProperties": True,
+        "properties": {
+            "event": {"type": "string"},
+            "path": {"type": "string"},
+            "is_directory": {"type": "boolean"},
+            "dest_path": {"type": "string"},
+            "abs_path": {"type": "string"},
+            "observer": {"type": "string"},
+        },
+    },
+    "system/shell": {
+        "type": "object",
+        "required": ["event", "pid"],
+        "additionalProperties": True,
+        "properties": {
+            "event": {"type": "string"},
+            "pid": {"type": "integer"},
+            "ppid": {"type": ["integer", "null"]},
+            "name": {"type": "string"},
+            "cmdline": {"type": "array", "items": {"type": "string"}},
+            "cwd": {"type": "string"},
+            "username": {"type": "string"},
+            "under_workspace": {"type": "boolean"},
+            "observer": {"type": "string"},
+        },
+    },
+    "system/monologue": {
+        "type": "object",
+        "required": ["agent", "text"],
+        "additionalProperties": True,
+        "properties": {
+            "agent": {"type": "string"},
+            "role": {"type": "string"},
+            "text": {"type": "string"},
+            "source_path": {"type": "string"},
+            "observer": {"type": "string"},
+        },
+    },
 }
+
+SYSTEM_TOPICS = frozenset(
+    {"system/mcp", "system/fs", "system/shell", "system/monologue"}
+)
 
 # okf/status/<initiative> — dynamic suffix
 STATUS_TOPIC_PATTERN = re.compile(r"^okf/status/[a-z][a-z0-9-]*$")

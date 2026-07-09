@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## [0.9.0] - 2026-07-09
+
+### Added — God View Observability Mesh
+
+- Built-in `system/mcp`, `system/fs`, `system/shell`, `system/monologue` topic schemas
+- RBAC `observer` role + system producers (`wiretap`, `os-watcher`, `swarm-tail`)
+- `agentbus mcp-serve --wiretap` / `--wiretap-log` — in-process tools/call instrumentation with secret redaction
+- `agentbus watch` — OS filesystem + process daemon (`pip install 'okf-agentbus[obs]'`)
+- `agentbus tail` — multiplex agent monologue logs; optional `--publish` to `system/monologue`
+- TUI Wiretap pane + Dark Agent warnings in `agentbus monitor`
+- Example `examples/08_god_view.py`
+
+### Notes
+
+- God View is **opt-in** (wiretap flag / `[obs]` extra / monologue `--publish`)
+- 100% local — no cloud telemetry
+
+## [0.8.4] - 2026-07-09
+
+### Fixed
+
+- Power Ranking follow-ups: RBAC roles on `init --apply`, `agentbus sla list|clear`, persisted `retention_days`
+
 ## [0.8.3] - 2026-07-08
 
 ### Added

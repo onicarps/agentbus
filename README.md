@@ -10,9 +10,9 @@ When Cursor, Claude, Antigravity, and Terminal Agents (like Hermes) share a work
 
 AgentBus replaces the "Game of Telephone" with a **localhost sidecar**: a Python MCP server backed by SQLite. No orchestrator runtime lock-in. No heavy cloud dashboard. Just a hyper-fast local pub/sub built for top-tier AI orchestration.
 
-> **v0.8.0 (July 2026):** Now includes the `Textual`-based Mission Control TUI, Swarm RBAC, SLA Timeouts, Distributed Artifact Context, and Code-First Pydantic Schemas. 
-> 
-> **Note:** Install as **`okf-agentbus`** (CLI command remains `agentbus`).
+> **v0.9.0 (July 2026):** **God View** observability mesh — MCP wiretap (`--wiretap`), OS watcher (`agentbus watch`), monologue tail (`agentbus tail`), and a Wiretap pane in the Mission Control TUI. Opt-in, 100% local.
+>
+> **Note:** Install as **`okf-agentbus`** (CLI command remains `agentbus`). For watchers: `pip install 'okf-agentbus[obs,devex]'`.
 
 ## ⚡ The "Ah-Ha" Moment: Zero-Restart Integration
 Already running Aider, OpenHands, or custom agents in tmux panes? **Do not kill your sessions.**
@@ -30,9 +30,10 @@ The SQLite bus instantly captures it, without requiring the MCP server. Once you
 | LangSmith | Cloud-only, backward-looking | Local SQLite, forward-looking Execution TUI |
 | Redis pub/sub | Extra daemon, complex setup | Zero-config SQLite, native stdio MCP |
 
-## Feature Arsenal (v0.3 - v0.8)
+## Feature Arsenal (v0.3 - v0.9)
 
-*   **Mission Control TUI (v0.8):** A rich, keyboard-driven `Textual` dashboard (`agentbus monitor`). View live trace waterfalls and approve/reject HITL tasks with a single keystroke.
+*   **God View Mesh (v0.9):** Passive OS + MCP observability so silent agents still leave bus footprints (`system/mcp`, `system/fs`, `system/shell`, `system/monologue`).
+*   **Mission Control TUI (v0.8+):** A rich, keyboard-driven `Textual` dashboard (`agentbus monitor`). Trace waterfall, HITL, Wiretap pane, Dark Agent warnings.
 *   **Pluggable Pydantic Schemas (v0.7):** Code-first `@bus.topic` decorators to enforce strict JSON schemas at the insertion layer.
 *   **Distributed Context (v0.6):** Pass massive context (like git diffs) via `--attach`. Hard 1MB payload limits prevent context window explosion.
 *   **Agentic Observability (v0.5):** Native OpenTelemetry-style `trace_id` and `parent_span_id` lineage.
