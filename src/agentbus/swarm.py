@@ -77,6 +77,9 @@ def load_swarm_config(workspace: Path) -> SwarmConfig:
     for name, defn in services_raw.items():
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"invalid service name: {name!r}")
+        # Prevent path traversal into log/state paths
+        if any(ch in name for ch in ("/", "\\", "..")) or name in {".", ".."}:
+            raise ValueError(f"invalid service name (path-unsafe): {name!r}")
         if isinstance(defn, str):
             command = defn
             env: dict[str, str] = {}
@@ -156,8 +159,15 @@ def _pid_alive(pid: int) -> bool:
 
 def _parse_command(command: str) -> list[str]:
     if _IS_WINDOWS:
-        # posix=False handles Windows quoting better
-        return shlex.split(command, posix=False)
+        # posix=False keeps outer quotes on tokens — strip them for Popen
+        tokens = shlex.split(command, posix=False)
+        cleaned: list[str] = []
+        for tok in tokens:
+            if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in {'"', "'"}:
+                cleaned.append(tok[1:-1])
+            else:
+                cleaned.append(tok)
+        return cleaned
     return shlex.split(command)
 
 

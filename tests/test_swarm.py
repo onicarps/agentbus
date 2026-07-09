@@ -101,6 +101,18 @@ def test_service_logs_created(tmp_path: Path):
     time.sleep(0.5)
     out_log = Path(rec["stdout_log"])
     assert out_log.is_file()
+    mode = out_log.stat().st_mode & 0o777
+    assert mode == 0o600 or mode == 0o640  # 600 preferred; some umasks soften
+    # Prefer exact 0o600 when platform allows
+    if mode != 0o600:
+        # at least not world-readable
+        assert mode & 0o004 == 0
     stop_pid(int(rec["pid"]))
     text = out_log.read_text(encoding="utf-8", errors="replace")
     assert "hello-swarm" in text
+
+
+def test_reject_path_traversal_service_name(tmp_path: Path):
+    with pytest.raises(ValueError, match="path-unsafe"):
+        _write_swarm(tmp_path, {"../../etc/passwd": {"command": "true"}})
+        load_swarm_config(tmp_path)
