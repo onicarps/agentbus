@@ -1,0 +1,64 @@
+# CodeRabbit — AgentBus Swarm Layer 4 (Hermes #164 + Grok #165)
+# Focus: security, complexity, test coverage gaps. De-noise style nits.
+# Docs: https://docs.coderabbit.ai/getting-started/yaml-configuration
+
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+      - master
+
+  path_filters:
+    - "!dist/**"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+    - "!**/*.egg-info/**"
+    - "!**/.pytest_cache/**"
+    - "!**/*.db"
+    - "!**/*.sqlite"
+    - "!**/*.sqlite3"
+
+  path_instructions:
+    - path: "src/agentbus/**"
+      instructions: |
+        This is the core AgentBus library (SQLite MCP event bus for multi-agent swarms).
+        Prioritize:
+        - Security: secret leakage (auth_token, AGENTBUS_TOKEN, API keys), RBAC bypass,
+          path traversal on workspace/resource URIs, injection into SQL or shell.
+        - Correctness: publish/poll ordering, idempotency, HITL intercepts, SLA deadlines,
+          skip_rbac abuse, schema validation gaps.
+        - Concurrency: SQLite locking, lease TTL races, debounce/feedback loops in watchers.
+        - God View (system/*): redaction completeness, infinite FS feedback on .agentbus/,
+          monologue privacy defaults (publish must stay opt-in).
+        De-emphasize pure style/formatting nits unless they harm readability of public APIs.
+    - path: "tests/**"
+      instructions: |
+        Focus on missing coverage for security-sensitive paths, race conditions, and
+        acceptance criteria. Flag weak asserts and tests that only check happy paths.
+    - path: "examples/**"
+      instructions: |
+        Ensure examples do not hardcode secrets, real tokens, or machine-local absolute paths.
+        Keep examples runnable and aligned with public CLI/MCP APIs.
+    - path: "docs/**"
+      instructions: |
+        Flag incorrect API contracts, missing security notes, and docs that contradict code.
+    - path: ".github/**"
+      instructions: |
+        Review CI for supply-chain risks, overly broad permissions, and missing required checks.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false

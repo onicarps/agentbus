@@ -115,7 +115,7 @@ def default_rbac_config() -> RbacConfig:
     return RbacConfig(
         roles={
             "architect": RoleDef(
-                can_publish_topics=["okf/handoff", "okf/approval"],
+                can_publish_topics=["okf/handoff", "okf/approval", "system/*"],
                 can_approve=True,
             ),
             "engineer": RoleDef(
@@ -126,11 +126,18 @@ def default_rbac_config() -> RbacConfig:
                 can_publish_topics=["okf/handoff"],
                 requires_droid_proof=True,
             ),
+            "observer": RoleDef(
+                can_publish_topics=["system/*"],
+            ),
         },
         producers={
             "grok": "engineer",
             "agy": "architect",
             "hermes": "qa_droid",
+            "wiretap": "observer",
+            "os-watcher": "observer",
+            "swarm-tail": "observer",
+            "coderabbit": "architect",
         },
     )
 
