@@ -277,7 +277,7 @@ def run_monitor_tui(
             stream = self.query_one("#stream", DataTable)
             cursor = stream.cursor_row
             stream.clear()
-            for ev in state["events"]:
+            for ev in reversed(state["events"]):
                 # Stream shows cooperative (okf/*) primarily; system still listed
                 row = format_event_row(ev)
                 status = ev.get("status", "PUBLISHED")
@@ -295,7 +295,7 @@ def run_monitor_tui(
             hitl = self.query_one("#hitl", DataTable)
             hitl_cursor = hitl.cursor_row
             hitl.clear()
-            for ev in state["pending"]:
+            for ev in reversed(state["pending"]):
                 payload = ev.get("payload") or {}
                 hitl.add_row(
                     str(ev["event_id"]),
@@ -310,7 +310,7 @@ def run_monitor_tui(
             wire = self.query_one("#wiretap", DataTable)
             wire_cursor = wire.cursor_row
             wire.clear()
-            for ev in state["system_events"][-80:]:
+            for ev in reversed(state["system_events"][-80:]):
                 eid, ts, topic, detail = _format_system_row(ev)
                 wire.add_row(eid, ts, topic, detail, key=f"sys-{ev['event_id']}")
             if wire.row_count and 0 <= wire_cursor < wire.row_count:

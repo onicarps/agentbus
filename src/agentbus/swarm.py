@@ -204,6 +204,12 @@ def start_service(
     if extra_env:
         env.update(extra_env)
 
+    # Automatically prepend the current venv's bin directory to PATH
+    import sys
+    venv_bin = os.path.join(sys.prefix, "bin")
+    if os.path.isdir(venv_bin):
+        env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"
+
     cwd = workspace.resolve()
     if spec.cwd:
         cwd = (workspace / spec.cwd).resolve() if not Path(spec.cwd).is_absolute() else Path(spec.cwd)

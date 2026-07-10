@@ -8,10 +8,10 @@ WORKSPACE="${AGENTBUS_WORKSPACE:-$(pwd)}"
 # Prefer PATH (pip install), then repo venv, then explicit override.
 if [[ -n "${AGENTBUS_BIN:-}" ]]; then
   :
-elif command -v agentbus >/dev/null 2>&1; then
-  AGENTBUS_BIN="$(command -v agentbus)"
 elif [[ -x "$ROOT/.venv/bin/agentbus" ]]; then
   AGENTBUS_BIN="$ROOT/.venv/bin/agentbus"
+elif command -v agentbus >/dev/null 2>&1; then
+  AGENTBUS_BIN="$(command -v agentbus)"
 else
   echo "agentbus: not found — pip install agentbus-mcp or set AGENTBUS_BIN" >&2
   exit 1
