@@ -134,6 +134,44 @@ describe("AgentBus", () => {
     );
     await bus.disconnect();
   });
+
+  it("disconnect does not close injected MCP clients", async () => {
+    const close = vi.fn(async () => {});
+    const callTool = vi.fn(async () => ({ events: [] }));
+    const bus = new AgentBus({ mcp: { callTool, close } });
+    await bus.disconnect();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("emits error when watcher-triggered poll rejects", async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agentbus-js-"));
+    tmpDirs.push(workspace);
+    fs.mkdirSync(path.join(workspace, ".agentbus"), { recursive: true });
+    let pollCount = 0;
+    const callTool = vi.fn(async () => {
+      pollCount += 1;
+      if (pollCount === 1) return { events: [] }; // connect initial poll
+      throw new Error("mcp down");
+    });
+    const bus = new AgentBus({
+      workspace,
+      mcp: { callTool },
+      fallbackMs: 30,
+    });
+    const errPromise = new Promise<unknown>((resolve) => {
+      bus.on("error", resolve);
+    });
+    await bus.connect();
+    const err = await Promise.race([
+      errPromise,
+      new Promise((_, rej) =>
+        setTimeout(() => rej(new Error("timeout waiting for error")), 2000),
+      ),
+    ]);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/mcp down/);
+    await bus.disconnect();
+  });
 });
 
 describe("normalizePollResult / unwrapToolResult", () => {

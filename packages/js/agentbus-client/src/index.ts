@@ -63,7 +63,9 @@ export class AgentBus extends EventEmitter {
     this.watcher = new DatabaseWatcher(
       dbPath,
       () => {
-        void this.poll();
+        void this.poll().catch((err: unknown) => {
+          this.emit("error", err);
+        });
       },
       this.options.fallbackMs ?? 5000,
     );
@@ -151,12 +153,11 @@ export class AgentBus extends EventEmitter {
       this.watcher = null;
     }
     this.connected = false;
+    // Only close MCP clients we spawned; injected clients are caller-owned.
     if (this.ownsMcp && this.mcp?.close) {
       await this.mcp.close();
       this.mcp = undefined;
       this.ownsMcp = false;
-    } else if (this.options.mcp?.close && this.mcp === this.options.mcp) {
-      await this.options.mcp.close();
     }
   }
 

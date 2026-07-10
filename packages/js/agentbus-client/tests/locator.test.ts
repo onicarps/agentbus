@@ -29,4 +29,19 @@ describe("getDatabasePath", () => {
       "AGENTBUS_WORKSPACE environment variable must be set",
     );
   });
+
+  it("should use the workspace parameter over the env var", () => {
+    process.env.AGENTBUS_WORKSPACE = "/env/workspace";
+    vi.spyOn(fs, "existsSync").mockReturnValue(true);
+    const dbPath = getDatabasePath("/param/workspace");
+    expect(dbPath).toBe(
+      path.join("/param/workspace", ".agentbus", "events.db"),
+    );
+  });
+
+  it("should resolve an explicit workspace when env is unset", () => {
+    vi.spyOn(fs, "existsSync").mockReturnValue(true);
+    const dbPath = getDatabasePath("/only/param");
+    expect(dbPath).toBe(path.join("/only/param", ".agentbus", "events.db"));
+  });
 });

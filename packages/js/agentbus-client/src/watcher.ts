@@ -37,6 +37,18 @@ export class DatabaseWatcher {
         if (this.debounceTimer) clearTimeout(this.debounceTimer);
         this.debounceTimer = setTimeout(() => this.trigger(), this.debounceMs);
       });
+      // Async watch failures (deleted path, etc.) must not crash the process;
+      // fallback timer continues to drive polls.
+      this.watcher.on("error", () => {
+        if (this.watcher) {
+          try {
+            this.watcher.close();
+          } catch {
+            /* ignore */
+          }
+          this.watcher = null;
+        }
+      });
     } catch {
       // Ignore if path is not watchable yet; fallback timer still runs.
     }
