@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.10.2] - 2026-07-10
+
+### Changed
+
+- Mission Control TUI (`agentbus monitor`): event stream, HITL, and Wiretap panes render **newest-first** (descending `event_id`).
+
+### Fixed
+
+- `agentbus up`: prepend active venv `bin` to service `PATH` so swarm children resolve the same `agentbus` install.
+- `scripts/mcp-serve.sh`: prefer repo `.venv/bin/agentbus` over a stale PATH install.
+
 ## [0.10.1] - 2026-07-09
 
 ### Fixed
