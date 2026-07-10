@@ -130,9 +130,12 @@ export class AgentBus extends EventEmitter {
       const merged: BusEvent[] = [];
       const seen = new Set<number>();
 
+      // Commit + emit per topic after that topic drains. If a later topic fails,
+      // earlier topics keep their events and cursors (no silent drops).
       for (const topic of topics) {
         let since = this.topicCursors.get(topic) ?? this.initialSince;
         let hasMore = true;
+        const topicEvents: BusEvent[] = [];
 
         while (hasMore) {
           const raw = await mcp.callTool("agentbus_poll", {
@@ -149,7 +152,7 @@ export class AgentBus extends EventEmitter {
             }
             if (seen.has(ev.event_id)) continue;
             seen.add(ev.event_id);
-            merged.push(ev);
+            topicEvents.push(ev);
           }
 
           // Safety: empty page ends the loop even if has_more is stale.
@@ -159,13 +162,12 @@ export class AgentBus extends EventEmitter {
         }
 
         this.topicCursors.set(topic, since);
-      }
-
-      merged.sort((a, b) => a.event_id - b.event_id);
-
-      for (const ev of merged) {
-        this.emit("event", ev);
-        this.emit(ev.topic, ev.payload, ev);
+        // Preserve arrival order within a topic (server returns ASC by event_id).
+        for (const ev of topicEvents) {
+          this.emit("event", ev);
+          this.emit(ev.topic, ev.payload, ev);
+        }
+        merged.push(...topicEvents);
       }
 
       // Global cursor = min of topic cursors (never claims past unfetched pages).

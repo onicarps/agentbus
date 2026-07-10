@@ -111,8 +111,9 @@ describe("AgentBus", () => {
     const order: number[] = [];
     bus.on("event", (ev: { event_id: number }) => order.push(ev.event_id));
     const events = await bus.poll();
-    expect(events.map((e) => e.event_id)).toEqual([1, 2, 3]);
-    expect(order).toEqual([1, 2, 3]);
+    // Emitted in topic order (handoff then status), not global event_id order.
+    expect(events.map((e) => e.event_id)).toEqual([2, 1, 3]);
+    expect(order).toEqual([2, 1, 3]);
     // Global cursor is min of per-topic (handoff=2, status=3 → 2)
     expect(bus.cursor).toBe(2);
     expect(bus.getTopicCursor("okf/handoff")).toBe(2);
@@ -258,6 +259,41 @@ describe("AgentBus", () => {
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/mcp down/);
     await bus.disconnect();
+  });
+
+  it("keeps topic A events if topic B poll fails mid-cycle", async () => {
+    let bCalls = 0;
+    const callTool = vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name !== "agentbus_poll") return {};
+      const topic = args.topic as string;
+      if (topic === "A") {
+        return {
+          events: [
+            { event_id: 1, topic: "A", payload: { ok: true } },
+            { event_id: 2, topic: "A", payload: { ok: true } },
+          ],
+          has_more: false,
+        };
+      }
+      if (topic === "B") {
+        bCalls += 1;
+        throw new Error("B failed");
+      }
+      return { events: [], has_more: false };
+    });
+    const bus = new AgentBus({
+      mcp: { callTool },
+      topics: ["A", "B"],
+      sinceId: 0,
+    });
+    const aPayloads: unknown[] = [];
+    bus.on("A", (p) => aPayloads.push(p));
+    await expect(bus.poll()).rejects.toThrow(/B failed/);
+    expect(aPayloads).toHaveLength(2);
+    expect(bus.getTopicCursor("A")).toBe(2);
+    // B never advanced
+    expect(bus.getTopicCursor("B")).toBe(0);
+    expect(bCalls).toBe(1);
   });
 
   it("does not throw when poll fails and no error listener is registered", async () => {
