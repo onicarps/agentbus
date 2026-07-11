@@ -83,8 +83,26 @@ class EventStore:
         self.db_path = db_dir / "events.db"
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._configure_pragmas()
         self._init_schema()
         self.prune_expired()
+
+    def _configure_pragmas(self) -> None:
+        """OS-aware SQLite PRAGMAs (Windows avoids WAL under concurrent AV locks).
+
+        Windows uses ``journal_mode=MEMORY`` as a *best-effort* concurrency
+        fallback for corporate EDR/AV scanners that break WAL. Tradeoff:
+        an unclean process kill can lose the in-memory journal (durability
+        weaker than WAL/DELETE). Single-writer MCP remains the preferred
+        architecture; this only reduces lock storms.
+        """
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        if os.name == "nt":
+            self._conn.execute("PRAGMA journal_mode = MEMORY")
+            self._conn.execute("PRAGMA busy_timeout = 10000")
+        else:
+            self._conn.execute("PRAGMA journal_mode = WAL")
+            self._conn.execute("PRAGMA busy_timeout = 5000")
 
     def _init_schema(self) -> None:
         self._conn.executescript(
