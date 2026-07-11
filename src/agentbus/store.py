@@ -90,19 +90,33 @@ class EventStore:
     def _configure_pragmas(self) -> None:
         """OS-aware SQLite PRAGMAs (Windows avoids WAL under concurrent AV locks).
 
-        Windows uses ``journal_mode=MEMORY`` as a *best-effort* concurrency
-        fallback for corporate EDR/AV scanners that break WAL. Tradeoff:
-        an unclean process kill can lose the in-memory journal (durability
-        weaker than WAL/DELETE). Single-writer MCP remains the preferred
-        architecture; this only reduces lock storms.
+        Defaults:
+        - POSIX: ``WAL`` + ``busy_timeout=5000``
+        - Windows: ``MEMORY`` + ``busy_timeout=10000`` (best-effort under EDR/AV;
+          weaker durability than DELETE/WAL on hard crash)
+
+        Override with ``AGENTBUS_SQLITE_JOURNAL`` = ``WAL`` | ``MEMORY`` | ``DELETE``
+        and optional ``AGENTBUS_SQLITE_BUSY_TIMEOUT`` (milliseconds).
+        Prefer a single MCP writer process; PRAGMAs only reduce lock storms.
         """
         self._conn.execute("PRAGMA synchronous = NORMAL")
-        if os.name == "nt":
-            self._conn.execute("PRAGMA journal_mode = MEMORY")
-            self._conn.execute("PRAGMA busy_timeout = 10000")
+        override = (os.environ.get("AGENTBUS_SQLITE_JOURNAL") or "").strip().upper()
+        if override in {"WAL", "MEMORY", "DELETE", "TRUNCATE", "PERSIST", "OFF"}:
+            journal = override
+        elif os.name == "nt":
+            journal = "MEMORY"
         else:
-            self._conn.execute("PRAGMA journal_mode = WAL")
-            self._conn.execute("PRAGMA busy_timeout = 5000")
+            journal = "WAL"
+        try:
+            busy = int(os.environ.get("AGENTBUS_SQLITE_BUSY_TIMEOUT") or "0")
+        except ValueError:
+            busy = 0
+        if busy <= 0:
+            busy = 10000 if os.name == "nt" else 5000
+        self._conn.execute(f"PRAGMA journal_mode = {journal}")
+        self._conn.execute(f"PRAGMA busy_timeout = {busy}")
+        self._journal_mode = journal
+        self._busy_timeout_ms = busy
 
     def _init_schema(self) -> None:
         self._conn.executescript(
@@ -711,6 +725,15 @@ class EventStore:
                 "SELECT DISTINCT topic FROM events ORDER BY topic"
             ).fetchall()
         ]
+        # Live PRAGMA read when available (more accurate than remembered override).
+        try:
+            live_journal = self._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        except Exception:  # pragma: no cover
+            live_journal = getattr(self, "_journal_mode", None)
+        try:
+            live_busy = int(self._conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        except Exception:  # pragma: no cover
+            live_busy = getattr(self, "_busy_timeout_ms", None)
         return {
             "workspace": str(self.workspace),
             "event_count": count,
@@ -723,6 +746,8 @@ class EventStore:
             "topics": topics,
             "retention_days": self.retention_days,
             "producer_id": producer_id or os.environ.get("AGENTBUS_PRODUCER_ID", ""),
+            "sqlite_journal_mode": str(live_journal).upper() if live_journal else None,
+            "sqlite_busy_timeout_ms": live_busy,
         }
 
     @staticmethod

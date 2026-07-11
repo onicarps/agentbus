@@ -225,6 +225,7 @@ def run_monitor_tui(
             super().__init__()
             self._selected_event: dict[str, Any] | None = None
             self._focused_pending_id: int | None = None
+            self._cached_events: list[dict[str, Any]] = []
 
         def compose(self) -> ComposeResult:
             yield Static("", id="header-bar")
@@ -257,7 +258,9 @@ def run_monitor_tui(
 
         def refresh_data(self) -> None:
             state = fetch_monitor_state(ws, retention_days=retention_days)
+            self._cached_events = state["events"]
             header = self.query_one("#header-bar", Static)
+
             header.update(
                 f"Workspace: {ws}  |  MCP configs: {state['mcp_configs']}  |  "
                 f"Active producers: {state['active_producers']}  |  "
@@ -334,6 +337,15 @@ def run_monitor_tui(
             table = event.data_table
             if table.id == "hitl" and event.row_key is not None:
                 self._focused_pending_id = int(event.row_key.value)
+            elif table.id == "stream" and event.row_key is not None:
+                event_id = int(event.row_key.value)
+                selected = next(
+                    (e for e in self._cached_events if e["event_id"] == event_id),
+                    None,
+                )
+                if selected:
+                    self._selected_event = selected
+                    self._update_trace(selected)
 
         def _update_trace(self, selected: dict[str, Any] | None) -> None:
             trace_widget = self.query_one("#trace-content", Static)
