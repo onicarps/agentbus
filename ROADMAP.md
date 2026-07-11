@@ -1,47 +1,30 @@
 # AgentBus Roadmap
 
-**Status:** v0.2 — events + advisory lease locks (July 2026)
+**Status:** v0.11.0 on main (July 2026) — Phase 1 DX expansion
 
-## Shipped (v0.1)
+## Shipped (summary)
 
-- [x] MCP stdio server: `publish`, `poll`, `status`
-- [x] SQLite durable event log with monotonic `event_id`
-- [x] Topic JSON Schema validation
-- [x] Idempotency keys + 7-day retention
-- [x] Workspace ephemeral token auth
-- [x] CLI for non-MCP clients
-- [x] `project-log` — optional markdown projection for handoff topics
+- [x] MCP stdio + SQLite event log, auth, leases, HITL, SLA, RBAC, schemas, TUI, God View, swarm `up/down`
+- [x] PyPI `okf-agentbus` (CLI: `agentbus`)
+- [x] **v0.11** TypeScript client package (`packages/js/agentbus-client`)
+- [x] **v0.11** Jupyter `AsyncAgentBus` + `%agentbus` magics
 
-## Shipped (v0.2)
+## Next
 
-- [x] Advisory lease locks in `events.db` (`leases` table)
-- [x] MCP: `agentbus_lock_acquire`, `agentbus_lock_release`, `agentbus_lock_renew`, `agentbus_lock_status`
-- [x] CLI: `agentbus lock acquire|release|renew|status`
-- [x] 40 tests including lease store + MCP stdio round-trip
-- [x] PyPI package name `okf-agentbus` (`agentbus`/`agentbus-mcp` blocked on PyPI)
+### Phase 1–2 DX (active)
 
-## Next (community-driven)
+- [ ] Windows SQLite locking (single-writer + PRAGMA)
+- [ ] CI / headless `--quiet` MCP stdio logging
+- [ ] Tag + PyPI publish **0.11.0**
+- [ ] Optional npm publish `@okf/agentbus-client`
 
-### v0.2.x — Distribution & onboarding
+### Later (gated)
 
-- [x] PyPI publish as `okf-agentbus`
-- [ ] GitHub Release assets (wheel/sdist) on tag
-- [ ] End-to-end multi-agent handoff walkthrough in docs
-- [ ] Client capability matrix with tested configs per IDE
+- [ ] Strangler Bus Go `serve` sidecar spike (`--engine go`, pytest parity) — only after Phase 1–2 DX
+- [ ] GitHub Release assets on tag
+- [ ] Framework adapters / optional web UI (deferred)
 
-### v0.3 — Developer experience
-
-- [ ] Pluggable topic registry (user-defined schemas)
-- [ ] Generic `workspace/handoff` topic alongside reference `okf/handoff`
-- [ ] Poll ergonomics helpers (backoff, cursor management)
-
-### v0.4 — Operations
-
-- [ ] HTTP transport (optional, localhost-only)
-- [ ] Topic ACLs
-- [ ] Export / backup commands
-
-### v1.0 — Stable API
+### v1.0
 
 - [ ] SSE subscribe where MCP clients support it
 - [ ] Stable 1.0 API guarantee

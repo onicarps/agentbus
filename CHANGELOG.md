@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [0.11.0] - 2026-07-11
+
+### Added — Phase 1 DX expansion
+
+- **Jupyter / IPython** (`agentbus.jupyter`):
+  - `AsyncAgentBus` — non-blocking poll loop for notebook event loops (`asyncio.sleep` yield, optional inject `poll_fn`, EventStore default)
+  - `%load_ext agentbus.jupyter` + `%agentbus start|stop|status` line magics
+  - Optional extra: `pip install 'okf-agentbus[jupyter]'` (IPython); `ipython` also in `[dev]` for CI
+- **TypeScript client** (repo package, not npm-published yet):
+  - `packages/js/agentbus-client` (`@okf/agentbus-client`) — EventEmitter + `fs.watch` + fallback poll
+  - `createStdioMcpClient` auto-spawns `agentbus mcp-serve`; multi-topic cursors; per-topic emit safety
+
+### Docs / process
+
+- Implementation plans under `docs/superpowers/plans/` (TS SDK, Jupyter)
+- Swarm gate: CodeRabbit + CI (Hermes QA path retired; Hermes → DevOps)
+
 ## [0.10.2] - 2026-07-10
 
 ### Changed
