@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
+import math
 import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -109,8 +109,8 @@ class AsyncAgentBus:
 
     async def start_background(self, interval: float = 1.0) -> None:
         """Spawn a background poll task on the running event loop."""
-        if interval <= 0:
-            raise ValueError(f"interval must be > 0, got {interval!r}")
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError(f"interval must be a finite number > 0, got {interval!r}")
         if self._running:
             return
         self._running = True
@@ -123,8 +123,14 @@ class AsyncAgentBus:
         task = self._task
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await task
+            except asyncio.CancelledError:
+                # Re-raise if *this* task is being cancelled (caller cancel),
+                # not when we intentionally cancelled the background poll task.
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():
+                    raise
             # Don't clobber a replacement task installed by a concurrent start.
             if self._task is task:
                 self._task = None

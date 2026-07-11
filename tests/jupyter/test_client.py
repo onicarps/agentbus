@@ -34,12 +34,69 @@ async def test_background_polling_yields():
 
 @pytest.mark.asyncio
 async def test_start_background_rejects_non_positive_interval():
+    import math
+
     bus = AsyncAgentBus(poll_fn=lambda: [])
     with pytest.raises(ValueError, match="interval"):
         await bus.start_background(interval=0)
     with pytest.raises(ValueError, match="interval"):
         await bus.start_background(interval=-1.0)
+    with pytest.raises(ValueError, match="interval"):
+        await bus.start_background(interval=math.nan)
+    with pytest.raises(ValueError, match="interval"):
+        await bus.start_background(interval=math.inf)
     assert bus.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_stop_preserves_replacement_task():
+    """Concurrent start_background during stop must keep the new task."""
+    enter_poll = asyncio.Event()
+    release_poll = asyncio.Event()
+
+    async def blocking_poll():
+        enter_poll.set()
+        await release_poll.wait()
+        return []
+
+    bus = AsyncAgentBus(poll_fn=blocking_poll)
+    await bus.start_background(interval=0.05)
+    await asyncio.wait_for(enter_poll.wait(), timeout=2.0)
+    first = bus._task
+
+    async def stop_then_release():
+        # Let stop cancel first task; release after cancel is in flight
+        stop_task = asyncio.create_task(bus.stop())
+        await asyncio.sleep(0)  # yield so cancel is delivered
+        # Start replacement while stop still awaiting cancelled task
+        enter_poll.clear()
+        release_poll.set()  # unblock first so cancel can finish
+        await bus.start_background(interval=0.05)
+        second = bus._task
+        assert second is not None
+        assert second is not first
+        await stop_task
+        # Replacement must survive stop cleanup
+        assert bus._task is second
+        assert bus.is_running is True
+        await bus.stop()
+
+    await stop_then_release()
+
+
+@pytest.mark.asyncio
+async def test_stop_reraises_when_caller_cancelled():
+    bus = AsyncAgentBus(poll_fn=lambda: [])
+    await bus.start_background(interval=0.05)
+
+    async def stop_wrapper():
+        await bus.stop()
+
+    t = asyncio.create_task(stop_wrapper())
+    await asyncio.sleep(0)
+    t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t
 
 
 @pytest.mark.asyncio
