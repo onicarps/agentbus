@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [0.11.2] - 2026-07-11
+
+### Fixed / Improved — CR hardening pass
+
+- SQLite: `AGENTBUS_SQLITE_JOURNAL` / `AGENTBUS_SQLITE_BUSY_TIMEOUT` overrides; `status` exposes live `sqlite_journal_mode` + `sqlite_busy_timeout_ms`
+- TUI: init `_cached_events` for stream highlight → trace sync (ownership of hover path)
+- Release workflow: optional OIDC PyPI publish job (Trusted Publisher)
+
 ## [0.11.1] - 2026-07-11
 
 ### Fixed / Added — Phase 2 ops DX

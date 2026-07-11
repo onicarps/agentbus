@@ -29,8 +29,24 @@ def test_posix_pragma_wal(tmp_path):
             assert mode.upper() == "WAL"
             timeout = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
             assert int(timeout) == 5000
+            st = store.status()
+            assert st["sqlite_journal_mode"] == "WAL"
+            assert st["sqlite_busy_timeout_ms"] == 5000
         finally:
             store.close()
+
+
+def test_journal_override_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTBUS_SQLITE_JOURNAL", "DELETE")
+    monkeypatch.setenv("AGENTBUS_SQLITE_BUSY_TIMEOUT", "1234")
+    store = EventStore(tmp_path)
+    try:
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.upper() == "DELETE"
+        timeout = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        assert int(timeout) == 1234
+    finally:
+        store.close()
 
 
 def test_windows_busy_timeout_allows_concurrent_writers(tmp_path):
