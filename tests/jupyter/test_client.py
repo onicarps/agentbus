@@ -96,3 +96,29 @@ async def test_async_callback_is_awaited():
     bus.on_event(async_cb)
     await bus.poll_async()
     assert seen == [3]
+
+
+@pytest.mark.asyncio
+async def test_sync_poll_fn_does_not_block_event_loop():
+    """Slow synchronous poll_fn must run off-loop so Jupyter stays responsive."""
+    import time
+
+    def slow_sync_poll():
+        time.sleep(0.2)
+        return [{"event_id": 9, "topic": "okf/handoff", "payload": {}}]
+
+    bus = AsyncAgentBus(poll_fn=slow_sync_poll, since_id=0)
+    tick = 0
+
+    async def ticker():
+        nonlocal tick
+        for _ in range(4):
+            await asyncio.sleep(0.05)
+            tick += 1
+
+    t = asyncio.create_task(ticker())
+    events = await bus.poll_async()
+    await t
+    assert events[0]["event_id"] == 9
+    # If poll blocked the loop, ticker would stall near 0–1.
+    assert tick >= 3

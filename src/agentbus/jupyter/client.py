@@ -58,11 +58,14 @@ class AsyncAgentBus:
     async def poll_async(self) -> list[dict[str, Any]]:
         """Fetch events after ``since_id`` without blocking the event loop forever."""
         if self._poll_fn is not None:
-            result = self._poll_fn()
-            if asyncio.iscoroutine(result):
-                events = await result
+            # If poll_fn is an async def, await it; if sync, never call it on the
+            # event-loop thread (would freeze Jupyter).
+            if asyncio.iscoroutinefunction(self._poll_fn):
+                events = await self._poll_fn()  # type: ignore[misc]
             else:
-                events = await asyncio.to_thread(lambda r=result: list(r))  # type: ignore[arg-type]
+                events = await asyncio.to_thread(self._poll_fn)  # type: ignore[arg-type]
+            if not isinstance(events, list):
+                events = list(events)  # type: ignore[arg-type]
         else:
             events = await asyncio.to_thread(self._poll_store)
 
