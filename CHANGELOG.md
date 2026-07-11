@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [0.11.1] - 2026-07-11
+
+### Fixed / Added — Phase 2 ops DX
+
+- **Windows SQLite locking:** on `os.name == "nt"`, use `PRAGMA journal_mode=MEMORY` + `busy_timeout=10000` (POSIX keeps WAL + 5000).
+- **CLI `--quiet` / `-q`:** global flag forces root logger to `CRITICAL` on stderr so MCP/CI stdout stays clean.
+
 ## [0.11.0] - 2026-07-11
 
 ### Added — Phase 1 DX expansion

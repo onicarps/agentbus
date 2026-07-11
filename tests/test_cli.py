@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from click.testing import CliRunner
 
 from agentbus.cli import main
+
+
+def test_quiet_flag_raises_root_log_level():
+    runner = CliRunner()
+    # status needs a workspace; use tmp via empty status without store? use --help under quiet
+    result = runner.invoke(main, ["--quiet", "status", "--help"])
+    assert result.exit_code == 0, result.output
+    assert logging.getLogger().level >= logging.CRITICAL
 
 
 def test_cli_publish_poll_status(tmp_path):

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 from pathlib import Path
 
 import click
@@ -77,9 +79,32 @@ def _auth(ws: Path, token: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _configure_cli_logging(*, quiet: bool) -> None:
+    """Keep MCP stdout clean: logs always go to stderr; quiet raises threshold."""
+    level = logging.CRITICAL if quiet else logging.WARNING
+    root = logging.getLogger()
+    root.handlers.clear()
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    root.addHandler(handler)
+    root.setLevel(level)
+    if quiet:
+        os.environ["AGENTBUS_QUIET"] = "1"
+
+
 @click.group()
-def main() -> None:
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    help="Suppress non-critical logs (MCP/CI-safe; logs stay on stderr).",
+)
+@click.pass_context
+def main(ctx: click.Context, quiet: bool) -> None:
     """Local MCP event log for multi-agent workspaces."""
+    ctx.ensure_object(dict)
+    ctx.obj["quiet"] = quiet
+    _configure_cli_logging(quiet=quiet)
 
 
 @main.command("mcp-serve")
