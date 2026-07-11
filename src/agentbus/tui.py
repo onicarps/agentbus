@@ -343,9 +343,8 @@ def run_monitor_tui(
                     (e for e in self._cached_events if e["event_id"] == event_id),
                     None,
                 )
-                if selected:
-                    self._selected_event = selected
-                    self._update_trace(selected)
+                self._selected_event = selected
+                self._update_trace(selected)
 
         def _update_trace(self, selected: dict[str, Any] | None) -> None:
             trace_widget = self.query_one("#trace-content", Static)

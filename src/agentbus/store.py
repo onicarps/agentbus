@@ -95,13 +95,18 @@ class EventStore:
         - Windows: ``MEMORY`` + ``busy_timeout=10000`` (best-effort under EDR/AV;
           weaker durability than DELETE/WAL on hard crash)
 
-        Override with ``AGENTBUS_SQLITE_JOURNAL`` = ``WAL`` | ``MEMORY`` | ``DELETE``
-        and optional ``AGENTBUS_SQLITE_BUSY_TIMEOUT`` (milliseconds).
+        Override with ``AGENTBUS_SQLITE_JOURNAL`` (case-insensitive) to one of:
+        ``WAL``, ``MEMORY``, ``DELETE``, ``TRUNCATE``, ``PERSIST``, ``OFF``.
+        Optional ``AGENTBUS_SQLITE_BUSY_TIMEOUT`` (milliseconds).
         Prefer a single MCP writer process; PRAGMAs only reduce lock storms.
         """
         self._conn.execute("PRAGMA synchronous = NORMAL")
+        # Whitelist must match the docstring above.
+        _JOURNAL_MODES = frozenset(
+            {"WAL", "MEMORY", "DELETE", "TRUNCATE", "PERSIST", "OFF"}
+        )
         override = (os.environ.get("AGENTBUS_SQLITE_JOURNAL") or "").strip().upper()
-        if override in {"WAL", "MEMORY", "DELETE", "TRUNCATE", "PERSIST", "OFF"}:
+        if override in _JOURNAL_MODES:
             journal = override
         elif os.name == "nt":
             journal = "MEMORY"
