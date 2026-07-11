@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections.abc import Awaitable, Callable
@@ -45,6 +46,11 @@ class AsyncAgentBus:
         self._task: asyncio.Task[None] | None = None
         self.callbacks: list[EventCallback] = []
 
+    @property
+    def is_running(self) -> bool:
+        """Whether the background poll loop is active."""
+        return self._running
+
     def on_event(self, callback: EventCallback) -> None:
         """Register a callback invoked for each polled event."""
         self.callbacks.append(callback)
@@ -53,10 +59,10 @@ class AsyncAgentBus:
         """Fetch events after ``since_id`` without blocking the event loop forever."""
         if self._poll_fn is not None:
             result = self._poll_fn()
-            if asyncio.iscoroutine(result) or isinstance(result, Awaitable):
-                events = await result  # type: ignore[misc]
+            if asyncio.iscoroutine(result):
+                events = await result
             else:
-                events = await asyncio.to_thread(lambda: list(result))  # type: ignore[arg-type]
+                events = await asyncio.to_thread(lambda r=result: list(r))  # type: ignore[arg-type]
         else:
             events = await asyncio.to_thread(self._poll_store)
 
@@ -95,7 +101,7 @@ class AsyncAgentBus:
             try:
                 await self.poll_async()
             except Exception as exc:
-                logger.error("AgentBus poll error: %s", exc)
+                logger.exception("AgentBus poll error: %s", exc)
             await asyncio.sleep(interval)  # yield to Jupyter
 
     async def start_background(self, interval: float = 1.0) -> None:
@@ -111,8 +117,6 @@ class AsyncAgentBus:
         self._running = False
         if self._task is not None:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
             self._task = None
