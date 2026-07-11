@@ -109,6 +109,8 @@ class AsyncAgentBus:
 
     async def start_background(self, interval: float = 1.0) -> None:
         """Spawn a background poll task on the running event loop."""
+        if interval <= 0:
+            raise ValueError(f"interval must be > 0, got {interval!r}")
         if self._running:
             return
         self._running = True
@@ -118,8 +120,11 @@ class AsyncAgentBus:
     async def stop(self) -> None:
         """Stop background polling and cancel the task."""
         self._running = False
-        if self._task is not None:
-            self._task.cancel()
+        task = self._task
+        if task is not None:
+            task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
+                await task
+            # Don't clobber a replacement task installed by a concurrent start.
+            if self._task is task:
+                self._task = None

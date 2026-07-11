@@ -16,14 +16,29 @@ async def test_async_bus_initialization():
 
 @pytest.mark.asyncio
 async def test_background_polling_yields():
-    bus = AsyncAgentBus()
+    polled = asyncio.Event()
+
+    async def fake_poll():
+        polled.set()
+        return []
+
+    bus = AsyncAgentBus(poll_fn=fake_poll)
     await bus.start_background(interval=0.05)
 
-    # Prove the event loop is not blocked
-    await asyncio.sleep(0.15)
+    await asyncio.wait_for(polled.wait(), timeout=2.0)
     assert bus.is_running is True
 
     await bus.stop()
+    assert bus.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_start_background_rejects_non_positive_interval():
+    bus = AsyncAgentBus(poll_fn=lambda: [])
+    with pytest.raises(ValueError, match="interval"):
+        await bus.start_background(interval=0)
+    with pytest.raises(ValueError, match="interval"):
+        await bus.start_background(interval=-1.0)
     assert bus.is_running is False
 
 
