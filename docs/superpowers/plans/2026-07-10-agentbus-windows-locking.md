@@ -41,7 +41,7 @@ def test_windows_pragma_degradation(tmp_path):
         store = EventStore(str(tmp_path / "win.db"))
         cursor = store.conn.execute("PRAGMA journal_mode;")
         mode = cursor.fetchone()[0].upper()
-        assert mode == "DELETE"
+        assert mode == "MEMORY"
 
 def test_posix_pragma_wal(tmp_path):
     with mock.patch('os.name', 'posix'):
@@ -86,5 +86,5 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 ```bash
 git add src/agentbus/store.py tests/test_store_windows.py
-git commit -m "fix(core): degrade to journal_mode=DELETE on windows to prevent locking"
+git commit -m "fix(core): use journal_mode=MEMORY on Windows to reduce lock storms"
 ```

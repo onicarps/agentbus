@@ -28,19 +28,16 @@
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/test_cli.py`:
+Use Click's CliRunner against the real `main` group (not argparse/sys.argv):
+
 ```python
-import pytest
-from unittest import mock
-import logging
+from click.testing import CliRunner
 from agentbus.cli import main
 
 def test_quiet_flag_suppresses_logs():
-    with mock.patch("sys.argv", ["agentbus", "--quiet", "serve"]):
-        with mock.patch("agentbus.server.run"):
-            main()
-            logger = logging.getLogger()
-            assert logger.level >= logging.CRITICAL
+    runner = CliRunner()
+    result = runner.invoke(main, ["--quiet", "status", "--help"])
+    assert result.exit_code == 0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

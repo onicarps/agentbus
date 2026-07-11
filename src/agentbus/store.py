@@ -88,11 +88,16 @@ class EventStore:
         self.prune_expired()
 
     def _configure_pragmas(self) -> None:
-        """OS-aware SQLite PRAGMAs (Windows avoids WAL under concurrent AV locks)."""
+        """OS-aware SQLite PRAGMAs (Windows avoids WAL under concurrent AV locks).
+
+        Windows uses ``journal_mode=MEMORY`` as a *best-effort* concurrency
+        fallback for corporate EDR/AV scanners that break WAL. Tradeoff:
+        an unclean process kill can lose the in-memory journal (durability
+        weaker than WAL/DELETE). Single-writer MCP remains the preferred
+        architecture; this only reduces lock storms.
+        """
         self._conn.execute("PRAGMA synchronous = NORMAL")
         if os.name == "nt":
-            # WAL is flaky on Windows under multi-process + EDR/AV file scanning.
-            # MEMORY keeps the journal out of the filesystem hot path.
             self._conn.execute("PRAGMA journal_mode = MEMORY")
             self._conn.execute("PRAGMA busy_timeout = 10000")
         else:

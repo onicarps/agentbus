@@ -85,11 +85,10 @@ def _configure_cli_logging(*, quiet: bool) -> None:
     root = logging.getLogger()
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(level)
     handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
     root.addHandler(handler)
     root.setLevel(level)
-    if quiet:
-        os.environ["AGENTBUS_QUIET"] = "1"
 
 
 @click.group()
@@ -104,7 +103,27 @@ def main(ctx: click.Context, quiet: bool) -> None:
     """Local MCP event log for multi-agent workspaces."""
     ctx.ensure_object(dict)
     ctx.obj["quiet"] = quiet
+
+    prev_env = os.environ.get("AGENTBUS_QUIET")
+    prev_level = logging.getLogger().level
+    prev_handlers = list(logging.getLogger().handlers)
+
+    if quiet:
+        os.environ["AGENTBUS_QUIET"] = "1"
     _configure_cli_logging(quiet=quiet)
+
+    def _restore_logging() -> None:
+        if prev_env is None:
+            os.environ.pop("AGENTBUS_QUIET", None)
+        else:
+            os.environ["AGENTBUS_QUIET"] = prev_env
+        root = logging.getLogger()
+        root.handlers.clear()
+        for h in prev_handlers:
+            root.addHandler(h)
+        root.setLevel(prev_level)
+
+    ctx.call_on_close(_restore_logging)
 
 
 @main.command("mcp-serve")
