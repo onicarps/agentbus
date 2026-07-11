@@ -1,0 +1,22 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-10-agentbus-jupyter.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 0: Project Setup and Async Client Skeleton",
+      "status": "completed"
+    },
+    {
+      "id": 1,
+      "subject": "Task 1: Non-Blocking Async Polling Loop",
+      "status": "completed"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: IPython %agentbus Magic Command",
+      "status": "completed"
+    }
+  ],
+  "lastUpdated": "2026-07-11T11:30:00Z",
+  "verify": "pytest tests/jupyter/ -v → 4 passed"
+}
