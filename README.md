@@ -57,9 +57,11 @@ agentbus init --apply --producer-id my-agent
 ```
 
 **Jupyter notebooks:**
+
 ```bash
 pip install -U "okf-agentbus[jupyter]"
 ```
+
 ```python
 %load_ext agentbus.jupyter
 %agentbus start
@@ -71,6 +73,7 @@ await bus.start_background(interval=1.0)
 ```
 
 **TypeScript (from monorepo checkout):**
+
 ```bash
 cd packages/js/agentbus-client && npm install && npm test
 # set AGENTBUS_WORKSPACE + agentbus on PATH, then use createStdioMcpClient / AgentBus
@@ -93,7 +96,9 @@ agentbus publish \
 ```
 
 **God View Observability (v0.9.0):**
+
 Track silent agents by wiretapping their operations:
+
 ```bash
 # Intercept MCP tool calls
 mcp-serve --wiretap
