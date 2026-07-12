@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [0.11.3] - 2026-07-12
+
+### Added — Release hygiene + mcpsafe
+
+- **mcpsafe middleware:** `PolicyEnforcer` from `.mcpsafe.lock`; `--enable-mcpsafe` / `AGENTBUS_ENABLE_MCPSAFE` on `serve`, `mcp-serve`, and CLI `publish`; tool + payload gates (`tool` / `tool_name` / `mcp_tool`)
+- **npm package:** `@agentbus/agentbus-client` publish-ready (dist-only, provenance); OIDC `publish-npm` job on `v*` tags
+- **Release docs:** `docs/RELEASE.md` Trusted Publisher field tables for PyPI + npm
+- **Swarm listen:** `scripts/bus_listen_agy.py` cursor-based Agy→Grok handoff poller
+
+### Fixed
+
+- Auth before mcpsafe on MCP publish; RBAC before mcpsafe in store
+- Release workflow: SHA-pinned npm job actions; pinned `npm@11.18.0`
+
 ## [0.11.2] - 2026-07-11
 
 ### Fixed / Improved — CR hardening pass
