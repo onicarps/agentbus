@@ -61,6 +61,22 @@ KNOWN_TOPICS: dict[str, dict] = {
             },
             "initiative": {"type": "string"},
             "droid_proof": {"type": "string", "minLength": 8, "maxLength": 256},
+            "tool": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Optional MCP/tool name for mcpsafe policy checks",
+            },
+            "tool_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+            },
+            "mcp_tool": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+            },
             "artifacts": {
                 "type": "array",
                 "maxItems": 10,

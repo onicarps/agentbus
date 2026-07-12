@@ -38,6 +38,7 @@ jobs:
           path: dist/
 
   # Requires PyPI Trusted Publisher for onicarps/agentbus (OIDC).
+  # Exact fields: docs/RELEASE.md
   # https://docs.pypi.org/trusted-publishers/
   publish-pypi:
     name: Publish to PyPI
@@ -57,3 +58,47 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+
+  # Requires npm Trusted Publisher for @agentbus/agentbus-client (OIDC).
+  # Exact fields: docs/RELEASE.md
+  # https://docs.npmjs.com/trusted-publishers/
+  publish-npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@agentbus/agentbus-client
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/js/agentbus-client
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: packages/js/agentbus-client/package-lock.json
+
+      - name: Install npm (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@11.18.0
+
+      - name: Align package version with git tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          npm version "$TAG" --no-git-tag-version --allow-same-version
+
+      - name: Install, test, build
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - name: Publish package to npm
+        run: npm publish --access public --provenance

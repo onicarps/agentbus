@@ -26,7 +26,7 @@ All notable changes to this project are documented here.
   - `%load_ext agentbus.jupyter` + `%agentbus start|stop|status` line magics
   - Optional extra: `pip install 'okf-agentbus[jupyter]'` (IPython); `ipython` also in `[dev]` for CI
 - **TypeScript client** (repo package, not npm-published yet):
-  - `packages/js/agentbus-client` (`@okf/agentbus-client`) — EventEmitter + `fs.watch` + fallback poll
+  - `packages/js/agentbus-client` (`@agentbus/agentbus-client`) — EventEmitter + `fs.watch` + fallback poll
   - `createStdioMcpClient` auto-spawns `agentbus mcp-serve`; multi-topic cursors; per-topic emit safety
 
 ### Docs / process

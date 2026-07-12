@@ -25,6 +25,7 @@ from agentbus.devex import (
 )
 from agentbus.intercepts import InterceptRule, add_rule, load_config
 from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
+from agentbus.mcpsafe import AccessDeniedError
 from agentbus.rbac import ForbiddenError, assign_producer_role, ensure_default_roles, mint_droid_proof
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
@@ -150,12 +151,27 @@ def main(ctx: click.Context, quiet: bool) -> None:
     default=None,
     help="Optional JSONL path for wiretap frames (default: .agentbus/wiretap.jsonl)",
 )
+@click.option(
+    "--enable-mcpsafe",
+    is_flag=True,
+    default=False,
+    help="Enforce .mcpsafe.lock tool policy on MCP tools/publish payloads",
+)
+@click.option(
+    "--mcpsafe-lock",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    envvar="AGENTBUS_MCPSAFE_LOCK",
+    help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
+)
 def mcp_serve(
     workspace: str | None,
     retention_days: int,
     rotate_token: bool,
     wiretap: bool,
     wiretap_log: str | None,
+    enable_mcpsafe: bool,
+    mcpsafe_lock: str | None,
 ) -> None:
     """MCP entrypoint for IDE configs (ensures token, then serve)."""
     ws = _cli_workspace(workspace)
@@ -167,6 +183,8 @@ def mcp_serve(
         rotate_token=False,
         wiretap=wiretap,
         wiretap_log=wiretap_log,
+        enable_mcpsafe=enable_mcpsafe or None,
+        mcpsafe_lock=mcpsafe_lock,
     )
 
 
@@ -185,12 +203,27 @@ def mcp_serve(
 )
 @click.option("--wiretap", is_flag=True, help="God View wiretap (system/mcp events)")
 @click.option("--wiretap-log", type=click.Path(dir_okay=False, path_type=str), default=None)
+@click.option(
+    "--enable-mcpsafe",
+    is_flag=True,
+    default=False,
+    help="Enforce .mcpsafe.lock tool policy on MCP tools/publish payloads",
+)
+@click.option(
+    "--mcpsafe-lock",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    envvar="AGENTBUS_MCPSAFE_LOCK",
+    help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
+)
 def serve(
     workspace: str | None,
     retention_days: int,
     rotate_token: bool,
     wiretap: bool,
     wiretap_log: str | None,
+    enable_mcpsafe: bool,
+    mcpsafe_lock: str | None,
 ) -> None:
     """Run MCP server on stdio."""
     run_stdio(
@@ -199,6 +232,8 @@ def serve(
         rotate_token=rotate_token,
         wiretap=wiretap,
         wiretap_log=wiretap_log,
+        enable_mcpsafe=enable_mcpsafe or None,
+        mcpsafe_lock=mcpsafe_lock,
     )
 
 
@@ -227,6 +262,19 @@ def serve(
 @click.option("--parent-span-id", default=None, help="Parent span for trace waterfall")
 @click.option("--token", default=None, help="Publish auth token (default: workspace file)")
 @click.option("--retention-days", default=7, show_default=True)
+@click.option(
+    "--enable-mcpsafe",
+    is_flag=True,
+    default=False,
+    help="Enforce .mcpsafe.lock payload policy on this publish",
+)
+@click.option(
+    "--mcpsafe-lock",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    envvar="AGENTBUS_MCPSAFE_LOCK",
+    help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
+)
 def publish(
     workspace: str,
     topic: str,
@@ -242,8 +290,12 @@ def publish(
     parent_span_id: str | None,
     token: str | None,
     retention_days: int,
+    enable_mcpsafe: bool,
+    mcpsafe_lock: str | None,
 ) -> None:
     """Append one event (CLI fallback for non-MCP clients like Agy)."""
+    from agentbus.mcpsafe import load_enforcer, mcpsafe_enabled_from_env
+
     if payload_file:
         payload = json.loads(Path(payload_file).read_text(encoding="utf-8"))
     elif payload_json:
@@ -264,6 +316,13 @@ def publish(
         raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
     try:
+        enforcer = load_enforcer(
+            ws,
+            enabled=enable_mcpsafe or mcpsafe_enabled_from_env(),
+            lockfile=mcpsafe_lock,
+        )
+        if enforcer is not None:
+            store.set_mcpsafe(enforcer)
         try:
             event, duplicate = store.publish(
                 topic=topic,
@@ -277,7 +336,7 @@ def publish(
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
             )
-        except (ForbiddenError, PayloadTooLargeError) as exc:
+        except (ForbiddenError, PayloadTooLargeError, AccessDeniedError) as exc:
             raise click.ClickException(str(exc)) from exc
         out = {
             "event_id": event.event_id,

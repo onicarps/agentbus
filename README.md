@@ -33,7 +33,7 @@ The SQLite bus instantly captures it, without requiring the MCP server. Once you
 ## Feature Arsenal (v0.3 - v0.11)
 
 *   **Jupyter async client (v0.11):** `from agentbus.jupyter import AsyncAgentBus` + `%agentbus start` — non-blocking polls that yield to the notebook event loop.
-*   **TypeScript client (v0.11):** `packages/js/agentbus-client` — Node EventEmitter + MCP stdio spawn (`@okf/agentbus-client`, path install for now).
+*   **TypeScript client (v0.11):** `packages/js/agentbus-client` — Node EventEmitter + MCP stdio spawn (`@agentbus/agentbus-client`, path install for now).
 *   **God View Mesh (v0.9):** Passive OS + MCP observability so silent agents still leave bus footprints (`system/mcp`, `system/fs`, `system/shell`, `system/monologue`).
 *   **Mission Control TUI (v0.8+):** A rich, keyboard-driven `Textual` dashboard (`agentbus monitor`). Trace waterfall, HITL, Wiretap pane, Dark Agent warnings.
 *   **Pluggable Pydantic Schemas (v0.7):** Code-first `@bus.topic` decorators to enforce strict JSON schemas at the insertion layer.

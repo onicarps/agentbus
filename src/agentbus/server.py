@@ -12,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
 from agentbus.leases import LeaseStore
 from agentbus.artifacts import PayloadTooLargeError
+from agentbus.mcpsafe import AccessDeniedError, PolicyEnforcer, load_enforcer
 from agentbus.rbac import ForbiddenError
 from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.store import EventStore
@@ -25,6 +26,7 @@ _workspace: Path | None = None
 _wiretap_enabled: bool = False
 _wiretap_log: Path | None = None
 _wiretap_client: str | None = None
+_mcpsafe: PolicyEnforcer | None = None
 
 
 def _get_store() -> EventStore:
@@ -44,6 +46,8 @@ def init_store(workspace: Path, retention_days: int = 7) -> EventStore:
     _workspace = workspace.resolve()
     set_validation_workspace(_workspace)
     _store = EventStore(_workspace, retention_days=retention_days)
+    if _mcpsafe is not None:
+        _store.set_mcpsafe(_mcpsafe)
     _lease_store = LeaseStore(_workspace)
     return _store
 
@@ -61,6 +65,24 @@ def configure_wiretap(
     _wiretap_client = client or os.environ.get("AGENTBUS_PRODUCER_ID")
 
 
+def configure_mcpsafe(
+    enabled: bool = False,
+    *,
+    lockfile: Path | str | None = None,
+    workspace: Path | None = None,
+) -> PolicyEnforcer | None:
+    """Enable/disable mcpsafe PolicyEnforcer (default off)."""
+    global _mcpsafe
+    _mcpsafe = load_enforcer(
+        workspace if workspace is not None else _workspace,
+        enabled=enabled,
+        lockfile=lockfile,
+    )
+    if _store is not None:
+        _store.set_mcpsafe(_mcpsafe)
+    return _mcpsafe
+
+
 def _auth_workspace() -> Path | None:
     return _workspace
 
@@ -72,14 +94,51 @@ def _producer_id(override: str | None) -> str:
     return pid
 
 
-def _wt(tool: str, arguments: dict[str, Any], fn: Any) -> Any:
-    if not _wiretap_enabled:
+def _check_mcpsafe_tool(tool: str) -> str | None:
+    """Return JSON error if tool blocked; else None."""
+    if _mcpsafe is None:
+        return None
+    try:
+        _mcpsafe.require(tool)
+    except AccessDeniedError as exc:
+        return json.dumps({"error": str(exc), "code": exc.code})
+    return None
+
+
+def _wt(
+    tool: str,
+    arguments: dict[str, Any],
+    fn: Any,
+    *,
+    skip_mcpsafe: bool = False,
+) -> Any:
+    """Run tool body with optional wiretap; mcpsafe tool gate unless skip_mcpsafe."""
+    if not skip_mcpsafe:
+        denied = _check_mcpsafe_tool(tool)
+        if denied is not None:
+            return denied
+
+    def _guarded() -> Any:
+        if (
+            not skip_mcpsafe
+            and _mcpsafe is not None
+            and tool == "agentbus_publish"
+        ):
+            payload = arguments.get("payload")
+            if isinstance(payload, dict):
+                try:
+                    _mcpsafe.require_payload(payload)
+                except AccessDeniedError as exc:
+                    return json.dumps({"error": str(exc), "code": exc.code})
         return fn()
+
+    if not _wiretap_enabled:
+        return _guarded()
     return instrument_call(
         _get_store(),
         tool,
         arguments,
-        fn,
+        _guarded,
         wiretap_log=_wiretap_log,
         client=_wiretap_client,
     )
@@ -100,8 +159,13 @@ def agentbus_publish(
 ) -> str:
     """Append one event to the workspace event log."""
 
-    def _run() -> str:
+    # Auth before mcpsafe so unauthenticated callers never see policy details.
+    try:
         check_publish_token(_auth_workspace(), auth_token=auth_token)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc), "code": 401})
+
+    def _run() -> str:
         validated = validate_payload(topic, payload)
         try:
             event, duplicate = _get_store().publish(
@@ -117,6 +181,8 @@ def agentbus_publish(
                 parent_span_id=parent_span_id,
             )
         except ForbiddenError as exc:
+            return json.dumps({"error": str(exc), "code": exc.code})
+        except AccessDeniedError as exc:
             return json.dumps({"error": str(exc), "code": exc.code})
         except PayloadTooLargeError as exc:
             return json.dumps({"error": str(exc), "code": exc.code})
@@ -349,9 +415,16 @@ def run_stdio(
     rotate_token: bool = False,
     wiretap: bool = False,
     wiretap_log: Path | str | None = None,
+    enable_mcpsafe: bool | None = None,
+    mcpsafe_lock: Path | str | None = None,
 ) -> None:
     ws = workspace.resolve()
     ensure_ephemeral_token(ws, rotate=rotate_token)
+    if enable_mcpsafe is None:
+        from agentbus.mcpsafe import mcpsafe_enabled_from_env
+
+        enable_mcpsafe = mcpsafe_enabled_from_env()
+    configure_mcpsafe(enable_mcpsafe, lockfile=mcpsafe_lock, workspace=ws)
     init_store(ws, retention_days)
     log_path: Path | None = None
     if wiretap_log:

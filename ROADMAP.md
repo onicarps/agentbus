@@ -16,7 +16,7 @@
 - [ ] Windows SQLite locking (single-writer + PRAGMA)
 - [ ] CI / headless `--quiet` MCP stdio logging
 - [ ] Tag + PyPI publish **0.11.0**
-- [ ] Optional npm publish `@okf/agentbus-client`
+- [ ] Optional npm publish `@agentbus/agentbus-client`
 
 ### Later (gated)
 

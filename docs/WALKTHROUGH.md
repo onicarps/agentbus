@@ -93,3 +93,13 @@ Charlie broadcasts the success to everyone:
 
 ## Summary
 Without `okf-agentbus`, Alice, Bob, and Charlie would have collided trying to read/write a shared `log.md` file, leading to race conditions. By using the bus, they achieved asynchronous, deterministic, and safe coordination using only standard MCP tools.
+
+---
+
+## 4. Observing the Swarm with God View (v0.9.0)
+Even if Alice, Bob, or Charlie don't explicitly publish to the bus, you can track opted-in activity using God View:
+- Run `mcp-serve --wiretap` to intercept their MCP tool calls as `system/mcp` events (params may be redacted when secrets are present).
+- Run `agentbus watch` to capture file edits as `system/fs` and shell activity as `system/shell` (excludes `.agentbus/` to avoid feedback loops; shell argv may be redacted).
+- Run `agentbus tail` only when an agent opts in — monologue streams can expose sensitive reasoning.
+
+These events appear in the Mission Control TUI (`agentbus monitor`) Wiretap pane for local observability — not unredacted universal capture.

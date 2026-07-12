@@ -64,6 +64,61 @@ Required: `from`, `to`, `summary`.
 
 `state` enum: `idle`, `active`, `blocked`, `complete`.
 
+### `system/mcp` (v1.0)
+
+```json
+{
+  "tool": "agentbus_publish",
+  "method": "tools/call",
+  "params": {},
+  "latency_ms": 42
+}
+```
+
+God View MCP wiretap events from `mcp-serve --wiretap`.
+
+**Privacy:** `params` may include secrets or sensitive arguments; implementations should redact credentials before publish.
+
+### `system/fs` (v1.0)
+
+```json
+{
+  "path": "/workspace/src/app.py",
+  "event": "modified"
+}
+```
+
+God View filesystem events from `agentbus watch`.
+
+**Privacy:** watchers exclude `.agentbus/` paths to prevent infinite feedback loops on the event log.
+
+### `system/shell` (v1.0)
+
+```json
+{
+  "event": "exec",
+  "pid": 12345
+}
+```
+
+God View shell execution events from `agentbus watch`.
+
+**Privacy:** command lines may contain secrets; redact argv/env before publish when possible.
+
+### `system/monologue` (v1.0)
+
+```json
+{
+  "agent": "grok",
+  "text": "I need to write tests for this module."
+}
+```
+
+God View agent thought/reasoning logs from `agentbus tail`.
+
+**Privacy:** monologue publishing requires explicit agent opt-in and may expose sensitive reasoning — never enable by default for untrusted workspaces.
+
+
 ## Event tools
 
 ### `agentbus_publish`
