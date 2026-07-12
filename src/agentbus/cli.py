@@ -151,7 +151,8 @@ def _run_go_worker(workspace: Path, *args: str) -> None:
     env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
     cmd = [str(binary), "--workspace", str(workspace.resolve()), *args]
     # long-running "up" replaces process
-    if args and args[0] == "--cmd" and "up" in args:
+    is_up = any(a == "up" for a in args)
+    if is_up:
         os.execve(str(binary), cmd, env)
     proc = subprocess.run(cmd, env=env)
     raise SystemExit(proc.returncode)
@@ -1238,6 +1239,78 @@ def swarm_config_cmd(workspace: str | None) -> None:
         click.echo(json.dumps({"path": str(path), "exists": False}))
     except ValueError as exc:
         raise click.ClickException(f"invalid swarm.yaml: {exc}") from exc
+
+
+
+
+@main.group()
+def worker() -> None:
+    """Wake plane — classical non-LLM worker (Go binary; PRD v0.12)."""
+
+
+@worker.command("up")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--config", "config_path", default=None, help="Path to worker.yaml")
+@click.option("--to", default="grok", help="Preset target if config missing")
+def worker_up(workspace: str | None, config_path: str | None, to: str) -> None:
+    """Start wake worker (exec's agentbus-go-worker; never loads an LLM)."""
+    ws = _cli_workspace(workspace)
+    args = ["--cmd", "up", "--to", to]
+    if config_path:
+        args.extend(["--config", config_path])
+    _run_go_worker(ws, *args)
+
+
+@worker.command("once")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--config", "config_path", default=None)
+@click.option("--to", default="grok")
+def worker_once(workspace: str | None, config_path: str | None, to: str) -> None:
+    """Single drain of matching handoffs (CI/debug)."""
+    ws = _cli_workspace(workspace)
+    args = ["--cmd", "once", "--to", to]
+    if config_path:
+        args.extend(["--config", config_path])
+    _run_go_worker(ws, *args)
+
+
+@worker.command("sleep")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def worker_sleep(workspace: str | None) -> None:
+    """Pause dispatch (stand-down); holds cursor."""
+    _run_go_worker(_cli_workspace(workspace), "--cmd", "sleep")
+
+
+@worker.command("wake")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--skip-backlog/--drain",
+    default=True,
+    help="Fast-forward cursor (default) or process backlog",
+)
+def worker_wake(workspace: str | None, skip_backlog: bool) -> None:
+    """Resume dispatch after sleep."""
+    args = ["--cmd", "wake"]
+    if skip_backlog:
+        args.append("--skip-backlog")
+    else:
+        args.append("--drain")
+    _run_go_worker(_cli_workspace(workspace), *args)
+
+
+@worker.command("status")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def worker_status(workspace: str | None) -> None:
+    """JSON worker status (cursor, sleeping, counters)."""
+    _run_go_worker(_cli_workspace(workspace), "--cmd", "status")
+
+
+@worker.command("init")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--to", default="grok", help="Implementer identity for preset filters")
+def worker_init(workspace: str | None, to: str) -> None:
+    """Write .agentbus/worker.yaml implementer preset."""
+    _run_go_worker(_cli_workspace(workspace), "--cmd", "init", "--to", to)
 
 
 if __name__ == "__main__":
