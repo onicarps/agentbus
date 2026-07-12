@@ -116,6 +116,47 @@ def _exec_go_serve(workspace: Path) -> None:
     os.execve(str(binary), [str(binary)], env)
 
 
+def _resolve_go_worker_binary() -> Path:
+    """Locate agentbus-go-worker (wake plane PRD v0.12)."""
+    env = os.environ.get("AGENTBUS_GO_WORKER")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_file():
+            return p
+        raise click.ClickException(f"AGENTBUS_GO_WORKER not found: {env}")
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2] / "go-core" / "bin" / "agentbus-go-worker",
+        Path.cwd() / "go-core" / "bin" / "agentbus-go-worker",
+        Path.cwd() / "bin" / "agentbus-go-worker",
+    ]
+    for part in os.environ.get("PATH", "").split(os.pathsep):
+        if part:
+            candidates.append(Path(part) / "agentbus-go-worker")
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return c
+    raise click.ClickException(
+        "Go worker binary not found. Build with: "
+        "(cd go-core && make build) or set AGENTBUS_GO_WORKER"
+    )
+
+
+def _run_go_worker(workspace: Path, *args: str) -> None:
+    """Run agentbus-go-worker as subprocess (inherit stdio) or exec for long-run."""
+    import subprocess
+
+    binary = _resolve_go_worker_binary()
+    env = os.environ.copy()
+    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
+    cmd = [str(binary), "--workspace", str(workspace.resolve()), *args]
+    # long-running "up" replaces process
+    if args and args[0] == "--cmd" and "up" in args:
+        os.execve(str(binary), cmd, env)
+    proc = subprocess.run(cmd, env=env)
+    raise SystemExit(proc.returncode)
+
+
 def _configure_cli_logging(*, quiet: bool) -> None:
     """Keep MCP stdout clean: logs always go to stderr; quiet raises threshold."""
     level = logging.CRITICAL if quiet else logging.WARNING

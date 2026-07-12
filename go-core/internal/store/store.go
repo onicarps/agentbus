@@ -336,11 +336,26 @@ func (s *EventStore) Status() (map[string]any, error) {
 	var count, maxID int64
 	_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(event_id), 0) FROM events`).Scan(&count, &maxID)
 	return map[string]any{
-		"event_count":      count,
-		"latest_event_id":  maxID,
-		"db_path":          s.dbPath,
-		"engine":           "go",
+		"event_count":     count,
+		"latest_event_id": maxID,
+		"db_path":         s.dbPath,
+		"engine":          "go",
 	}, nil
+}
+
+// MaxEventID returns the highest event_id (0 if empty).
+func (s *EventStore) MaxEventID() (int64, error) {
+	var maxID int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(event_id), 0) FROM events`).Scan(&maxID)
+	return maxID, err
+}
+
+// DB exposes the underlying connection for lease helpers (same events.db).
+func (s *EventStore) DB() *sql.DB { return s.db }
+
+// Workspace returns the workspace root inferred from db path.
+func (s *EventStore) Workspace() string {
+	return filepath.Dir(filepath.Dir(s.dbPath))
 }
 
 // Close stops the writer and closes the DB.

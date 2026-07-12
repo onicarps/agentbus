@@ -11,27 +11,36 @@ export PATH="$HOME/.local/go/bin:$PATH"   # if installed to user prefix
 cd go-core
 make tidy test build
 # → bin/agentbus-go-serve
+# → bin/agentbus-go-worker
 ```
 
-## Use from Python CLI
+## MCP serve (`--engine go`)
 
 ```bash
 export AGENTBUS_WORKSPACE=/path/to/workspace
 # optional: export AGENTBUS_GO_SERVE=$PWD/go-core/bin/agentbus-go-serve
 agentbus serve --engine go
-# or
-agentbus mcp-serve --engine go
-# or
-AGENTBUS_ENGINE=go agentbus serve
 ```
 
-## Scope (spike)
+## Wake worker (PRD v0.12 — non-LLM)
+
+```bash
+export AGENTBUS_GO_WORKER=$PWD/go-core/bin/agentbus-go-worker
+agentbus worker init --to grok
+agentbus worker once          # → .agentbus/WAKE.json
+agentbus worker up            # long-running fsnotify+poll
+agentbus worker sleep|wake|status
+```
+
+See [docs/WAKE.md](../docs/WAKE.md).
+
+## Scope
 
 | Implemented | Not yet |
 |-------------|---------|
-| `Publish` / `Poll` / `Status` | HITL, SLA, RBAC, mcpsafe |
+| EventStore Publish/Poll/Status | HITL, SLA, RBAC, mcpsafe on Go serve |
 | Single-writer goroutine | Full MCP tool surface |
-| Content-Length JSON-RPC stdio | Wiretap / God View |
-| Idempotency key | Parity pytest suite |
+| **agentbus-go-worker** filter/cursor/WAKE/sleep/leases | MCP session notifications |
+| Content-Length JSON-RPC stdio | Full pytest parity suite |
 
 Module: `github.com/onicarps/agentbus-go`

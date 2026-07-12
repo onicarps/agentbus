@@ -11,3 +11,4 @@ test:
 build:
 	mkdir -p bin
 	go build -o bin/agentbus-go-serve ./cmd/agentbus-go-serve
+	go build -o bin/agentbus-go-worker ./cmd/agentbus-go-worker
