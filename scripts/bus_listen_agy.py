@@ -9,16 +9,25 @@ import sys
 import time
 from pathlib import Path
 
-WS = Path(os.environ.get("AGENTBUS_WORKSPACE", "/home/oni/okf_agent_workspace/projects/agentbus"))
+WS = Path(
+    os.environ.get("AGENTBUS_WORKSPACE")
+    or os.getcwd()
+).resolve()
 CURSOR = WS / ".agentbus" / "grok_listen.cursor"
 POLL_SEC = float(os.environ.get("GROK_BUS_POLL_SEC", "20"))
+AGENTBUS_TIMEOUT_SEC = float(os.environ.get("GROK_BUS_CMD_TIMEOUT_SEC", "30"))
 
 
 def run_agentbus(*args: str) -> str:
     env = os.environ.copy()
     env["AGENTBUS_WORKSPACE"] = str(WS)
     env.setdefault("AGENTBUS_PRODUCER_ID", "grok")
-    return subprocess.check_output(["agentbus", *args], env=env, text=True)
+    return subprocess.check_output(
+        ["agentbus", *args],
+        env=env,
+        text=True,
+        timeout=AGENTBUS_TIMEOUT_SEC,
+    )
 
 
 def load_cursor() -> int:

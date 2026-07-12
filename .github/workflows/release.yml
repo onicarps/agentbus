@@ -75,9 +75,11 @@ jobs:
       run:
         working-directory: packages/js/agentbus-client
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
@@ -85,7 +87,7 @@ jobs:
           cache-dependency-path: packages/js/agentbus-client/package-lock.json
 
       - name: Install npm (trusted publishing needs >= 11.5.1)
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.18.0
 
       - name: Align package version with git tag
         run: |

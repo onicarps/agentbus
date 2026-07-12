@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 
 import pytest
+from click.testing import CliRunner
 
+from agentbus.cli import main as cli_main
 from agentbus.mcpsafe import AccessDeniedError, PolicyEnforcer, load_enforcer
 from agentbus.schemas import validate_payload
+from agentbus.server import configure_mcpsafe, init_store
 from agentbus.store import EventStore
 
 
@@ -48,12 +51,21 @@ def test_missing_lockfile_allows_all(tmp_path):
     assert enf.evaluate("anything") is True
 
 
-def test_require_raises(tmp_path):
+def test_invalid_lockfile_allows_all(tmp_path):
+    lock = tmp_path / ".mcpsafe.lock"
+    lock.write_text("{not-json", encoding="utf-8")
+    enf = PolicyEnforcer(lock)
+    assert enf.evaluate("anything") is True
+
+
+def test_require_raises_without_path_leak(tmp_path):
     lock = tmp_path / ".mcpsafe.lock"
     _write_lock(lock, blocked=["bad_tool"])
     enf = PolicyEnforcer(lock)
-    with pytest.raises(AccessDeniedError, match="AccessDenied"):
+    with pytest.raises(AccessDeniedError, match="AccessDenied") as ei:
         enf.require("bad_tool")
+    assert str(tmp_path) not in str(ei.value)
+    assert ".mcpsafe.lock" not in str(ei.value)
 
 
 def test_payload_tool_fields(tmp_path):
@@ -63,6 +75,7 @@ def test_payload_tool_fields(tmp_path):
     assert enf.evaluate_payload({"summary": "ok"}) is True
     assert enf.evaluate_payload({"tool": "dangerous"}) is False
     assert enf.evaluate_payload({"tool_name": "safe"}) is True
+    assert enf.evaluate_payload({"mcp_tool": "dangerous"}) is False
 
 
 def test_store_publish_blocked_payload_tool(tmp_path):
@@ -114,3 +127,48 @@ def test_load_enforcer_off_by_default(tmp_path, monkeypatch):
     enf = load_enforcer(tmp_path)
     assert enf is not None
     assert enf.lockfile_path == (tmp_path / ".mcpsafe.lock").resolve()
+
+
+def test_configure_mcpsafe_attaches_to_store(tmp_path):
+    lock = tmp_path / ".mcpsafe.lock"
+    _write_lock(lock, blocked=["x"])
+    configure_mcpsafe(True, lockfile=lock, workspace=tmp_path)
+    store = init_store(tmp_path)
+    assert store._mcpsafe is not None
+    assert store._mcpsafe.evaluate("x") is False
+    store.close()
+    configure_mcpsafe(False)
+
+
+def test_cli_publish_enable_mcpsafe_blocks(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTBUS_AUTH", "off")
+    monkeypatch.delenv("AGENTBUS_ENABLE_MCPSAFE", raising=False)
+    lock = tmp_path / ".mcpsafe.lock"
+    _write_lock(lock, blocked=["file_delete"])
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        [
+            "publish",
+            "--workspace",
+            str(tmp_path),
+            "--topic",
+            "okf/handoff",
+            "--payload",
+            json.dumps(
+                {
+                    "from": "grok",
+                    "to": "swarm",
+                    "summary": "blocked tool",
+                    "tool": "file_delete",
+                }
+            ),
+            "--producer-id",
+            "grok",
+            "--enable-mcpsafe",
+            "--mcpsafe-lock",
+            str(lock),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "AccessDenied" in (result.output or "") + (str(result.exception) or "")

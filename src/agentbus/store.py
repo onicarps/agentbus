@@ -367,9 +367,6 @@ class EventStore:
             if recent:
                 return self._hydrate_event(self._row_to_event(recent)), True
 
-        if self._mcpsafe is not None:
-            self._mcpsafe.require_payload(stored_payload)
-
         if not skip_rbac:
             check_publish_rbac(
                 self.workspace,
@@ -378,6 +375,10 @@ class EventStore:
                 payload=stored_payload,
                 auth_token=auth_token,
             )
+
+        # After RBAC so unauthorized callers never see mcpsafe policy details.
+        if self._mcpsafe is not None:
+            self._mcpsafe.require_payload(stored_payload)
 
         if causation_id is not None:
             self._clear_sla(causation_id)

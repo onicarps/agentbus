@@ -30,12 +30,16 @@ class PolicyEnforcer:
         self.load_policy()
 
     def load_policy(self) -> None:
+        """Load allow/block sets from lockfile; empty sets on missing/invalid file."""
         self.allowed_tools = set()
         self.blocked_tools = set()
         if not self.lockfile_path.exists():
             return
-        with open(self.lockfile_path, encoding="utf-8") as f:
-            policy = json.load(f)
+        try:
+            with open(self.lockfile_path, encoding="utf-8") as f:
+                policy = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return
         if not isinstance(policy, dict):
             return
         self.allowed_tools = {str(t) for t in (policy.get("allowed_tools") or [])}
@@ -59,10 +63,10 @@ class PolicyEnforcer:
         return name in self.allowed_tools
 
     def require(self, tool_name: str) -> None:
+        """Raise AccessDeniedError if tool is not permitted."""
         if not self.evaluate(tool_name):
             raise AccessDeniedError(
-                f"AccessDenied: tool {tool_name!r} blocked by mcpsafe policy "
-                f"({self.lockfile_path})"
+                f"AccessDenied: tool {tool_name!r} blocked by mcpsafe policy"
             )
 
     def evaluate_payload(self, payload: dict[str, Any] | None) -> bool:
@@ -77,6 +81,7 @@ class PolicyEnforcer:
         return True
 
     def require_payload(self, payload: dict[str, Any] | None) -> None:
+        """Raise AccessDeniedError if payload names a blocked tool."""
         if not self.evaluate_payload(payload):
             tool = None
             if isinstance(payload, dict):
@@ -85,12 +90,12 @@ class PolicyEnforcer:
                         tool = payload.get(key)
                         break
             raise AccessDeniedError(
-                f"AccessDenied: payload tool {tool!r} blocked by mcpsafe policy "
-                f"({self.lockfile_path})"
+                f"AccessDenied: payload tool {tool!r} blocked by mcpsafe policy"
             )
 
 
 def resolve_lockfile(workspace: Path | None, lockfile: str | Path | None = None) -> Path:
+    """Resolve lockfile path from explicit arg, env, or workspace default."""
     if lockfile:
         return Path(lockfile).expanduser().resolve()
     env = os.environ.get(ENV_LOCK)
@@ -102,6 +107,7 @@ def resolve_lockfile(workspace: Path | None, lockfile: str | Path | None = None)
 
 
 def mcpsafe_enabled_from_env() -> bool:
+    """True when AGENTBUS_ENABLE_MCPSAFE is a truthy string."""
     raw = (os.environ.get(ENV_ENABLE) or "").strip().lower()
     return raw in ("1", "true", "yes", "on")
 

@@ -105,13 +105,25 @@ def _check_mcpsafe_tool(tool: str) -> str | None:
     return None
 
 
-def _wt(tool: str, arguments: dict[str, Any], fn: Any) -> Any:
-    denied = _check_mcpsafe_tool(tool)
-    if denied is not None:
-        return denied
+def _wt(
+    tool: str,
+    arguments: dict[str, Any],
+    fn: Any,
+    *,
+    skip_mcpsafe: bool = False,
+) -> Any:
+    """Run tool body with optional wiretap; mcpsafe tool gate unless skip_mcpsafe."""
+    if not skip_mcpsafe:
+        denied = _check_mcpsafe_tool(tool)
+        if denied is not None:
+            return denied
 
     def _guarded() -> Any:
-        if _mcpsafe is not None and tool == "agentbus_publish":
+        if (
+            not skip_mcpsafe
+            and _mcpsafe is not None
+            and tool == "agentbus_publish"
+        ):
             payload = arguments.get("payload")
             if isinstance(payload, dict):
                 try:
@@ -147,8 +159,13 @@ def agentbus_publish(
 ) -> str:
     """Append one event to the workspace event log."""
 
-    def _run() -> str:
+    # Auth before mcpsafe so unauthenticated callers never see policy details.
+    try:
         check_publish_token(_auth_workspace(), auth_token=auth_token)
+    except ValueError as exc:
+        return json.dumps({"error": str(exc), "code": 401})
+
+    def _run() -> str:
         validated = validate_payload(topic, payload)
         try:
             event, duplicate = _get_store().publish(
