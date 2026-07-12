@@ -61,7 +61,7 @@ export async function createStdioMcpClient(
   });
 
   const client = new Client({
-    name: options.clientName ?? "@okf/agentbus-client",
+    name: options.clientName ?? "@agentbus/agentbus-client",
     version: options.clientVersion ?? "0.1.0",
   });
 

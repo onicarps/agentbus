@@ -1,4 +1,4 @@
-# @okf/agentbus-client
+# @agentbus/agentbus-client
 
 TypeScript / Node.js EventEmitter client for [AgentBus](https://github.com/onicarps/agentbus).
 
@@ -38,7 +38,7 @@ npm test
 ### Auto stdio (recommended)
 
 ```ts
-import { AgentBus } from "@okf/agentbus-client";
+import { AgentBus } from "@agentbus/agentbus-client";
 
 const bus = new AgentBus({
   workspace: process.env.AGENTBUS_WORKSPACE,
@@ -63,7 +63,7 @@ await bus.disconnect();
 ### Injected MCP client (tests / custom transports)
 
 ```ts
-import { AgentBus, createStdioMcpClient } from "@okf/agentbus-client";
+import { AgentBus, createStdioMcpClient } from "@agentbus/agentbus-client";
 
 const mcp = await createStdioMcpClient({
   workspace: process.env.AGENTBUS_WORKSPACE!,

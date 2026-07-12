@@ -8,7 +8,7 @@ Tag-driven releases via `.github/workflows/release.yml` (`push` tags `v*`).
 |-----|----------|------|
 | `build` | sdist + wheel + GitHub Release assets | `contents: write` |
 | `publish-pypi` | `okf-agentbus` → PyPI | OIDC Trusted Publisher (`environment: pypi`) |
-| `publish-npm` | `@okf/agentbus-client` → npm | OIDC Trusted Publisher (`environment: npm`) |
+| `publish-npm` | `@agentbus/agentbus-client` → npm | OIDC Trusted Publisher (`environment: npm`) |
 
 ## One-time: PyPI Trusted Publisher
 
@@ -40,9 +40,9 @@ environment: pypi
 
 ## One-time: npm Trusted Publisher + scope
 
-1. Ensure npm org/user can own scope `@okf` (create org `okf` if needed).
+1. Ensure npm org/user can own scope `@agentbus` (create org `agentbus` if needed).
 2. Create empty package **or** register trusted publisher for pending name
-   `@okf/agentbus-client` (npm Trusted Publishers UI).
+   `@agentbus/agentbus-client` (npm Trusted Publishers UI).
 3. GitHub Actions publisher fields:
 
 | Field | Value |
@@ -54,13 +54,13 @@ environment: pypi
 
 4. Confirm GitHub environment **`npm`** exists (workflow references it). Create if missing:
    Settings → Environments → New → `npm`.
-5. First publish requires npm CLI ≥ 11.5.1 in CI (workflow installs `npm@latest`) and
+5. First publish requires npm CLI ≥ 11.5.1 in CI (workflow pins `npm@11.18.0`) and
    `id-token: write` + `npm publish --provenance --access public`.
 
 ## Version alignment
 
 - Python: `pyproject.toml` → `okf-agentbus==X.Y.Z`
-- TypeScript: `packages/js/agentbus-client/package.json` → `@okf/agentbus-client@X.Y.Z`
+- TypeScript: `packages/js/agentbus-client/package.json` → `@agentbus/agentbus-client@X.Y.Z`
 - CI sets npm version from the git tag (`vX.Y.Z` → `X.Y.Z`) so tag is source of truth.
 
 Keep both package versions equal when cutting a release.

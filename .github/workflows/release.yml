@@ -59,7 +59,7 @@ jobs:
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
-  # Requires npm Trusted Publisher for @okf/agentbus-client (OIDC).
+  # Requires npm Trusted Publisher for @agentbus/agentbus-client (OIDC).
   # Exact fields: docs/RELEASE.md
   # https://docs.npmjs.com/trusted-publishers/
   publish-npm:
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: npm
-      url: https://www.npmjs.com/package/@okf/agentbus-client
+      url: https://www.npmjs.com/package/@agentbus/agentbus-client
     permissions:
       id-token: write
       contents: read
