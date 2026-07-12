@@ -80,6 +80,83 @@ def _auth(ws: Path, token: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _resolve_go_serve_binary() -> Path:
+    """Locate agentbus-go-serve for --engine go (Strangler spike)."""
+    env = os.environ.get("AGENTBUS_GO_SERVE")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_file():
+            return p
+        raise click.ClickException(f"AGENTBUS_GO_SERVE not found: {env}")
+    # Repo layout: <repo>/go-core/bin/agentbus-go-serve
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2] / "go-core" / "bin" / "agentbus-go-serve",
+        Path.cwd() / "go-core" / "bin" / "agentbus-go-serve",
+        Path.cwd() / "bin" / "agentbus-go-serve",
+    ]
+    which = os.environ.get("PATH", "")
+    for part in which.split(os.pathsep):
+        if part:
+            candidates.append(Path(part) / "agentbus-go-serve")
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return c
+    raise click.ClickException(
+        "Go engine binary not found. Build with: "
+        "(cd go-core && make build) or set AGENTBUS_GO_SERVE"
+    )
+
+
+def _exec_go_serve(workspace: Path) -> None:
+    """Replace process with Go MCP stdio server for workspace."""
+    binary = _resolve_go_serve_binary()
+    env = os.environ.copy()
+    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
+    os.execve(str(binary), [str(binary)], env)
+
+
+def _resolve_go_worker_binary() -> Path:
+    """Locate agentbus-go-worker (wake plane PRD v0.12)."""
+    env = os.environ.get("AGENTBUS_GO_WORKER")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_file():
+            return p
+        raise click.ClickException(f"AGENTBUS_GO_WORKER not found: {env}")
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[2] / "go-core" / "bin" / "agentbus-go-worker",
+        Path.cwd() / "go-core" / "bin" / "agentbus-go-worker",
+        Path.cwd() / "bin" / "agentbus-go-worker",
+    ]
+    for part in os.environ.get("PATH", "").split(os.pathsep):
+        if part:
+            candidates.append(Path(part) / "agentbus-go-worker")
+    for c in candidates:
+        if c.is_file() and os.access(c, os.X_OK):
+            return c
+    raise click.ClickException(
+        "Go worker binary not found. Build with: "
+        "(cd go-core && make build) or set AGENTBUS_GO_WORKER"
+    )
+
+
+def _run_go_worker(workspace: Path, *args: str) -> None:
+    """Run agentbus-go-worker as subprocess (inherit stdio) or exec for long-run."""
+    import subprocess
+
+    binary = _resolve_go_worker_binary()
+    env = os.environ.copy()
+    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
+    cmd = [str(binary), "--workspace", str(workspace.resolve()), *args]
+    # long-running "up" replaces process
+    if args and args[0] == "--cmd" and "up" in args:
+        os.execve(str(binary), cmd, env)
+    proc = subprocess.run(cmd, env=env)
+    raise SystemExit(proc.returncode)
+
+
 def _configure_cli_logging(*, quiet: bool) -> None:
     """Keep MCP stdout clean: logs always go to stderr; quiet raises threshold."""
     level = logging.CRITICAL if quiet else logging.WARNING
@@ -164,6 +241,13 @@ def main(ctx: click.Context, quiet: bool) -> None:
     envvar="AGENTBUS_MCPSAFE_LOCK",
     help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
 )
+@click.option(
+    "--engine",
+    type=click.Choice(["python", "go"], case_sensitive=False),
+    default=None,
+    envvar="AGENTBUS_ENGINE",
+    help="Serve engine: python (default) or go (Strangler sidecar spike)",
+)
 def mcp_serve(
     workspace: str | None,
     retention_days: int,
@@ -172,11 +256,15 @@ def mcp_serve(
     wiretap_log: str | None,
     enable_mcpsafe: bool,
     mcpsafe_lock: str | None,
+    engine: str | None,
 ) -> None:
     """MCP entrypoint for IDE configs (ensures token, then serve)."""
     ws = _cli_workspace(workspace)
     ensure_ephemeral_token(ws, rotate=rotate_token)
     os.environ["AGENTBUS_TOKEN"] = read_workspace_token(ws) or ""
+    if (engine or "python").lower() == "go":
+        _exec_go_serve(ws)
+        return
     run_stdio(
         ws,
         retention_days=retention_days,
@@ -216,6 +304,13 @@ def mcp_serve(
     envvar="AGENTBUS_MCPSAFE_LOCK",
     help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
 )
+@click.option(
+    "--engine",
+    type=click.Choice(["python", "go"], case_sensitive=False),
+    default=None,
+    envvar="AGENTBUS_ENGINE",
+    help="Serve engine: python (default) or go (Strangler sidecar spike)",
+)
 def serve(
     workspace: str | None,
     retention_days: int,
@@ -224,10 +319,16 @@ def serve(
     wiretap_log: str | None,
     enable_mcpsafe: bool,
     mcpsafe_lock: str | None,
+    engine: str | None,
 ) -> None:
     """Run MCP server on stdio."""
+    ws = _cli_workspace(workspace)
+    if (engine or "python").lower() == "go":
+        ensure_ephemeral_token(ws, rotate=rotate_token)
+        _exec_go_serve(ws)
+        return
     run_stdio(
-        _cli_workspace(workspace),
+        ws,
         retention_days=retention_days,
         rotate_token=rotate_token,
         wiretap=wiretap,

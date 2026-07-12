@@ -6,3 +6,4 @@ __pycache__/
 htmlcov/
 .agentbus/
 dist/
+go-core/bin/
