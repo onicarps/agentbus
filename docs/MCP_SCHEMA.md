@@ -64,6 +64,52 @@ Required: `from`, `to`, `summary`.
 
 `state` enum: `idle`, `active`, `blocked`, `complete`.
 
+### `system/mcp` (v1.0)
+
+```json
+{
+  "method": "tools/call",
+  "params": {},
+  "wiretap_latency_ms": 42
+}
+```
+
+God View MCP wiretap events from `mcp-serve --wiretap`.
+
+### `system/fs` (v1.0)
+
+```json
+{
+  "path": "/workspace/src/app.py",
+  "event_type": "modified"
+}
+```
+
+God View filesystem events from `agentbus watch`.
+
+### `system/shell` (v1.0)
+
+```json
+{
+  "command": "pytest",
+  "pid": 12345
+}
+```
+
+God View shell execution events from `agentbus watch`.
+
+### `system/monologue` (v1.0)
+
+```json
+{
+  "agent_id": "grok",
+  "thought": "I need to write tests for this module."
+}
+```
+
+God View agent thought/reasoning logs from `agentbus tail`.
+
+
 ## Event tools
 
 ### `agentbus_publish`

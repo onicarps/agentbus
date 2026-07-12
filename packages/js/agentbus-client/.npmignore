@@ -1,0 +1,7 @@
+src
+tests
+node_modules
+*.tsbuildinfo
+vitest.config.ts
+tsconfig.json
+*.tgz

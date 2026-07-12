@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agentbus.artifacts import extract_artifacts
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
+from agentbus.mcpsafe import AccessDeniedError, PolicyEnforcer
 from agentbus.rbac import ForbiddenError, check_approve_rbac, check_publish_rbac
 from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
 from agentbus.tracing import generate_span_id, normalize_parent_span_id, normalize_trace_id
@@ -78,6 +79,7 @@ class EventStore:
     def __init__(self, workspace: Path, retention_days: int = 7) -> None:
         self.workspace = workspace.resolve()
         self.retention_days = retention_days
+        self._mcpsafe: PolicyEnforcer | None = None
         db_dir = self.workspace / ".agentbus"
         db_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = db_dir / "events.db"
@@ -86,6 +88,10 @@ class EventStore:
         self._configure_pragmas()
         self._init_schema()
         self.prune_expired()
+
+    def set_mcpsafe(self, enforcer: PolicyEnforcer | None) -> None:
+        """Attach or clear optional mcpsafe PolicyEnforcer."""
+        self._mcpsafe = enforcer
 
     def _configure_pragmas(self) -> None:
         """OS-aware SQLite PRAGMAs (Windows avoids WAL under concurrent AV locks).
@@ -360,6 +366,9 @@ class EventStore:
             )
             if recent:
                 return self._hydrate_event(self._row_to_event(recent)), True
+
+        if self._mcpsafe is not None:
+            self._mcpsafe.require_payload(stored_payload)
 
         if not skip_rbac:
             check_publish_rbac(
