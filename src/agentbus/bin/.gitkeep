@@ -1,0 +1,2 @@
+# Platform wheels place binaries under bin/<platform>/ (see bin_resolve.py).
+# Do not commit large platform binaries; CI injects them at wheel build time.

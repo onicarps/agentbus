@@ -81,31 +81,22 @@ def _auth(ws: Path, token: str | None) -> None:
 
 
 def _resolve_go_serve_binary() -> Path:
-    """Locate agentbus-go-serve for --engine go (Strangler spike)."""
-    env = os.environ.get("AGENTBUS_GO_SERVE")
-    if env:
-        p = Path(env).expanduser()
-        if p.is_file():
-            return p
-        raise click.ClickException(f"AGENTBUS_GO_SERVE not found: {env}")
-    # Repo layout: <repo>/go-core/bin/agentbus-go-serve
+    """Locate agentbus-go-serve: env → wheel bundle → go-core/dev → PATH."""
+    from agentbus.bin_resolve import resolve_go_binary
+
     here = Path(__file__).resolve()
-    candidates = [
-        here.parents[2] / "go-core" / "bin" / "agentbus-go-serve",
-        Path.cwd() / "go-core" / "bin" / "agentbus-go-serve",
-        Path.cwd() / "bin" / "agentbus-go-serve",
-    ]
-    which = os.environ.get("PATH", "")
-    for part in which.split(os.pathsep):
-        if part:
-            candidates.append(Path(part) / "agentbus-go-serve")
-    for c in candidates:
-        if c.is_file() and os.access(c, os.X_OK):
-            return c
-    raise click.ClickException(
-        "Go engine binary not found. Build with: "
-        "(cd go-core && make build) or set AGENTBUS_GO_SERVE"
-    )
+    try:
+        return resolve_go_binary(
+            "agentbus-go-serve",
+            env_var="AGENTBUS_GO_SERVE",
+            dev_candidates=[
+                here.parents[2] / "go-core" / "bin" / "agentbus-go-serve",
+                Path.cwd() / "go-core" / "bin" / "agentbus-go-serve",
+                Path.cwd() / "bin" / "agentbus-go-serve",
+            ],
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _exec_go_serve(workspace: Path) -> None:
@@ -117,29 +108,22 @@ def _exec_go_serve(workspace: Path) -> None:
 
 
 def _resolve_go_worker_binary() -> Path:
-    """Locate agentbus-go-worker (wake plane PRD v0.12)."""
-    env = os.environ.get("AGENTBUS_GO_WORKER")
-    if env:
-        p = Path(env).expanduser()
-        if p.is_file():
-            return p
-        raise click.ClickException(f"AGENTBUS_GO_WORKER not found: {env}")
+    """Locate agentbus-go-worker: env → wheel bundle → go-core/dev → PATH."""
+    from agentbus.bin_resolve import resolve_go_binary
+
     here = Path(__file__).resolve()
-    candidates = [
-        here.parents[2] / "go-core" / "bin" / "agentbus-go-worker",
-        Path.cwd() / "go-core" / "bin" / "agentbus-go-worker",
-        Path.cwd() / "bin" / "agentbus-go-worker",
-    ]
-    for part in os.environ.get("PATH", "").split(os.pathsep):
-        if part:
-            candidates.append(Path(part) / "agentbus-go-worker")
-    for c in candidates:
-        if c.is_file() and os.access(c, os.X_OK):
-            return c
-    raise click.ClickException(
-        "Go worker binary not found. Build with: "
-        "(cd go-core && make build) or set AGENTBUS_GO_WORKER"
-    )
+    try:
+        return resolve_go_binary(
+            "agentbus-go-worker",
+            env_var="AGENTBUS_GO_WORKER",
+            dev_candidates=[
+                here.parents[2] / "go-core" / "bin" / "agentbus-go-worker",
+                Path.cwd() / "go-core" / "bin" / "agentbus-go-worker",
+                Path.cwd() / "bin" / "agentbus-go-worker",
+            ],
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _run_go_worker(workspace: Path, *args: str) -> None:

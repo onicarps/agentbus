@@ -8,9 +8,82 @@ on:
 permissions:
   contents: write
 
+# Platform matrix for Go helpers (Ruff-style: binaries inside platform wheels;
+# esbuild-style: separate npm optionalDependency packages). NO runtime downloads.
+env:
+  GO_VERSION: "1.22.12"
+
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # Cross-compile Go binaries (CGO-free) for each target platform
+  # ---------------------------------------------------------------------------
+  build-go:
+    name: Go binaries (${{ matrix.plat }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux-x64
+            goos: linux
+            goarch: amd64
+          - plat: linux-arm64
+            goos: linux
+            goarch: arm64
+          - plat: darwin-x64
+            goos: darwin
+            goarch: amd64
+          - plat: darwin-arm64
+            goos: darwin
+            goarch: arm64
+          - plat: win32-x64
+            goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go-core/go.sum
+
+      - name: Cross-compile worker + serve
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          chmod +x scripts/embed_go_binaries.sh
+          ./scripts/embed_go_binaries.sh "$GOOS" "$GOARCH" "${{ matrix.plat }}"
+
+      - name: Upload Go binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: go-bin-${{ matrix.plat }}
+          path: src/agentbus/bin/${{ matrix.plat }}/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Python: one sdist (source) + platform wheels with embedded Go binaries
+  # ---------------------------------------------------------------------------
+  build-python:
+    name: Python wheel (${{ matrix.plat }})
+    needs: build-go
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux-x64
+            wheel_tag: manylinux2014_x86_64
+          - plat: linux-arm64
+            wheel_tag: manylinux2014_aarch64
+          - plat: darwin-x64
+            wheel_tag: macosx_11_0_x86_64
+          - plat: darwin-arm64
+            wheel_tag: macosx_11_0_arm64
+          - plat: win32-x64
+            wheel_tag: win_amd64
     steps:
       - uses: actions/checkout@v4
 
@@ -18,31 +91,82 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build tools
-        run: pip install build
-
-      - name: Build wheel and sdist
-        run: python -m build
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+      - name: Download Go binaries for platform
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          files: |
-            dist/*
-          generate_release_notes: true
+          name: go-bin-${{ matrix.plat }}
+          path: src/agentbus/bin/${{ matrix.plat }}/
 
-      - name: Upload dist artifact
+      - name: Ensure binaries executable
+        run: chmod +x src/agentbus/bin/${{ matrix.plat }}/* || true
+
+      - name: Install build tools
+        run: pip install build wheel
+
+      - name: Build wheel (embeds bin/${{ matrix.plat }})
+        run: python -m build --wheel
+
+      - name: Retag wheel with platform tag
+        run: |
+          whl=$(ls dist/*.whl | head -1)
+          python scripts/retag_wheel.py "$whl" --platform-tag "${{ matrix.wheel_tag }}" --out-dir dist/platform
+          rm -f "$whl"
+          ls -la dist/platform/
+
+      - name: Upload platform wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: python-package-distributions
-          path: dist/
+          name: python-wheel-${{ matrix.plat }}
+          path: dist/platform/*.whl
+          if-no-files-found: error
 
-  # Requires PyPI Trusted Publisher for onicarps/agentbus (OIDC).
-  # Exact fields: docs/RELEASE.md
-  # https://docs.pypi.org/trusted-publishers/
+  build-sdist:
+    name: Python sdist (source only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - name: Build sdist without platform binaries
+        run: |
+          # Ensure no leftover bins from developer machines
+          find src/agentbus/bin -type f ! -name '.gitkeep' -delete 2>/dev/null || true
+          python -m build --sdist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-sdist
+          path: dist/*.tar.gz
+
+  collect-python:
+    name: Collect Python distributions
+    needs: [build-python, build-sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          pattern: python-*
+          merge-multiple: false
+      - name: Flatten dist/
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} dist/ \;
+          ls -la dist/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-package-distributions
+          path: dist/*
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
   publish-pypi:
     name: Publish to PyPI
-    needs: build
+    needs: collect-python
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -50,20 +174,82 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - name: Download dist artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: python-package-distributions
           path: dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
-      - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+  # ---------------------------------------------------------------------------
+  # npm: main package + platform optionalDependencies (esbuild style)
+  # ---------------------------------------------------------------------------
+  publish-npm-platforms:
+    name: npm platform pkg (${{ matrix.plat }})
+    needs: build-go
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@agentbus/agentbus-client
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux-x64
+            pkg: "@agentbus/go-worker-linux-x64"
+          - plat: linux-arm64
+            pkg: "@agentbus/go-worker-linux-arm64"
+          - plat: darwin-x64
+            pkg: "@agentbus/go-worker-darwin-x64"
+          - plat: darwin-arm64
+            pkg: "@agentbus/go-worker-darwin-arm64"
+          - plat: win32-x64
+            pkg: "@agentbus/go-worker-win32-x64"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
-  # Requires npm Trusted Publisher for @agentbus/agentbus-client (OIDC).
-  # Exact fields: docs/RELEASE.md
-  # https://docs.npmjs.com/trusted-publishers/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: go-bin-${{ matrix.plat }}
+          path: packages/js/go-worker-${{ matrix.plat }}/bin/
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install npm (trusted publishing)
+        run: npm install -g npm@11.18.0
+
+      - name: Prepare platform package
+        working-directory: packages/js/go-worker-${{ matrix.plat }}
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          node -e "
+            const fs=require('fs');
+            const p=JSON.parse(fs.readFileSync('package.json','utf8'));
+            p.version=process.env.TAG;
+            fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
+          "
+          chmod +x bin/* || true
+          ls -la bin/
+        env:
+          TAG: ${{ github.ref_name }}
+
+      - name: Publish platform package
+        working-directory: packages/js/go-worker-${{ matrix.plat }}
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          npm version "$TAG" --no-git-tag-version --allow-same-version
+          npm publish --access public --provenance
+
   publish-npm:
-    name: Publish to npm
+    name: Publish @agentbus/agentbus-client
+    needs: publish-npm-platforms
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -93,6 +279,20 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           npm version "$TAG" --no-git-tag-version --allow-same-version
+          # optionalDependencies versions track the same tag
+          node -e "
+            const fs=require('fs');
+            const p=JSON.parse(fs.readFileSync('package.json','utf8'));
+            const v=process.env.TAG.replace(/^v/,'');
+            if (p.optionalDependencies) {
+              for (const k of Object.keys(p.optionalDependencies)) {
+                p.optionalDependencies[k]=v;
+              }
+            }
+            fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
+          "
+        env:
+          TAG: ${{ github.ref_name }}
 
       - name: Install, test, build
         run: |

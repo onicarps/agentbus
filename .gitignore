@@ -7,3 +7,8 @@ htmlcov/
 .agentbus/
 dist/
 go-core/bin/
+# Platform Go binaries (injected by CI for wheels; never commit)
+src/agentbus/bin/**
+!src/agentbus/bin/.gitkeep
+packages/js/go-worker-*/bin/**
+!packages/js/go-worker-*/bin/.gitkeep

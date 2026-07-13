@@ -1,0 +1,24 @@
+{
+  "name": "@agentbus/go-worker-linux-arm64",
+  "version": "0.11.3",
+  "description": "Prebuilt agentbus-go-worker + agentbus-go-serve for linux-arm64 (optionalDependency of @agentbus/agentbus-client)",
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/**"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/onicarps/agentbus.git",
+    "directory": "packages/js/go-worker-linux-arm64"
+  }
+}
