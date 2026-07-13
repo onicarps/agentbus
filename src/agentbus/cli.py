@@ -1269,11 +1269,11 @@ def worker_sleep(workspace: str | None) -> None:
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option(
     "--skip-backlog/--drain",
-    default=True,
-    help="Fast-forward cursor (default) or process backlog",
+    default=False,
+    help="Fast-forward cursor vs process backlog (default: drain — process backlog)",
 )
 def worker_wake(workspace: str | None, skip_backlog: bool) -> None:
-    """Resume dispatch after sleep."""
+    """Resume dispatch after sleep (default: drain backlog; max_event_age drops stale)."""
     args = ["--cmd", "wake"]
     if skip_backlog:
         args.append("--skip-backlog")
