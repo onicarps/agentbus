@@ -372,9 +372,10 @@ func (s *Service) Run() error {
 			already := s.state.Sleeping
 			s.mu.Unlock()
 			if !already {
-				log.Printf("idle sleep after %dm", *s.cfg.Budget.IdleSleepAfterMinutes)
-				maxID, _ := s.store.MaxEventID()
-				_ = SaveCursor(s.cursorPath(), maxID)
+				// Do NOT fast-forward cursor on auto-sleep: events may still
+				// arrive after sleep starts; wake --drain must see them.
+				// Stale protection is max_event_age on Match().
+				log.Printf("idle sleep after %dm (cursor held)", *s.cfg.Budget.IdleSleepAfterMinutes)
 				_ = s.Sleep()
 			}
 			resetIdle()

@@ -14,8 +14,9 @@ func main() {
 	ws := flag.String("workspace", envOr("AGENTBUS_WORKSPACE", ""), "workspace root")
 	config := flag.String("config", "", "path to worker.yaml (default: <ws>/.agentbus/worker.yaml)")
 	cmd := flag.String("cmd", "up", "up|once|sleep|wake|status|init")
-	skipBacklog := flag.Bool("skip-backlog", true, "on wake: fast-forward cursor (default true)")
-	drain := flag.Bool("drain", false, "on wake: process backlog (sets skip-backlog=false)")
+	// Default: process backlog on wake (max_event_age drops stale).
+	// --skip-backlog fast-forwards (was dropping in-sleep Agy handoffs when default).
+	skipBacklog := flag.Bool("skip-backlog", false, "on wake: fast-forward cursor (skip backlog)")
 	to := flag.String("to", "grok", "init preset --to target")
 	flag.Parse()
 
@@ -86,14 +87,10 @@ func main() {
 		}
 		fmt.Println(`{"sleeping":true}`)
 	case "wake":
-		skip := *skipBacklog
-		if *drain {
-			skip = false
-		}
-		if err := svc.Wake(skip); err != nil {
+		if err := svc.Wake(*skipBacklog); err != nil {
 			fail(err)
 		}
-		fmt.Printf("{\"sleeping\":false,\"skip_backlog\":%v}\n", skip)
+		fmt.Printf("{\"sleeping\":false,\"skip_backlog\":%v}\n", *skipBacklog)
 	case "status":
 		b, err := svc.StatusJSON()
 		if err != nil {

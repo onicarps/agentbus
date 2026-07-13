@@ -79,9 +79,13 @@ type State struct {
 	Dispatches   int64     `json:"dispatches_total"`
 }
 
-// DefaultConfig returns implementer-oriented defaults (PRD §14.1).
+// DefaultConfig returns implementer-oriented defaults.
+//
+// idle_sleep_after_minutes is null by default: auto-sleep after 30m caused
+// dogfood failure (Agy handoffs #802/#803 while worker slept; Grok never
+// saw push). Stale work is gated by max_event_age, not auto-sleep.
+// Set idle_sleep_after_minutes: 30 in worker.yaml if you want stand-down hygiene.
 func DefaultConfig() *Config {
-	idle := 30
 	return &Config{
 		Version:    "1.0",
 		WorkerID:   "implementer-1",
@@ -109,7 +113,7 @@ func DefaultConfig() *Config {
 		Budget: BudgetConfig{
 			MaxDispatchesPerHour:  60,
 			MaxConcurrentExec:     1,
-			IdleSleepAfterMinutes: &idle,
+			IdleSleepAfterMinutes: nil, // stay awake for handoffs; use max_event_age for stale
 			RequireWakeAfterSleep: true,
 		},
 		Dispatch: DispatchConfig{
