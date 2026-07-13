@@ -31,9 +31,13 @@ CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at);
 	return ls, err
 }
 
-func (ls *LeaseStore) resourcePath(topic string, eventID int64) string {
-	// Path under workspace so it mirrors Python normalize_resource semantics.
-	return filepath.Join(ls.workspace, ".agentbus", "wake-locks", topic, fmt.Sprintf("%d", eventID))
+func (ls *LeaseStore) resourcePath(topic string, eventID int64, role string) string {
+	// Include role so broadcast handoffs can be consumed by multiple roles
+	// without one worker swallowing the event for others (factory-droid CR).
+	if role == "" {
+		role = "default"
+	}
+	return filepath.Join(ls.workspace, ".agentbus", "wake-locks", topic, fmt.Sprintf("%d", eventID), role)
 }
 
 func fmtUTC(t time.Time) string {
@@ -44,14 +48,14 @@ func (ls *LeaseStore) purge(now time.Time) {
 	_, _ = ls.db.Exec(`DELETE FROM leases WHERE expires_at <= ?`, fmtUTC(now))
 }
 
-// TryAcquire returns true if this owner holds the lease for the event.
-func (ls *LeaseStore) TryAcquire(topic string, eventID int64, owner string, ttlSec int) (bool, string, error) {
+// TryAcquire returns true if this owner holds the lease for the event+role.
+func (ls *LeaseStore) TryAcquire(topic string, eventID int64, owner, role string, ttlSec int) (bool, string, error) {
 	if ttlSec <= 0 {
 		ttlSec = 300
 	}
 	now := time.Now().UTC()
 	ls.purge(now)
-	res := ls.resourcePath(topic, eventID)
+	res := ls.resourcePath(topic, eventID, role)
 	var curOwner, leaseID, exp string
 	err := ls.db.QueryRow(
 		`SELECT owner_id, lease_id, expires_at FROM leases WHERE resource = ?`, res,
@@ -72,14 +76,16 @@ func (ls *LeaseStore) TryAcquire(topic string, eventID int64, owner string, ttlS
 		id, res, owner, fmtUTC(now), fmtUTC(expires),
 	)
 	if err != nil {
-		// race: another worker won
+		// race: another worker of same role won
 		return false, "", nil
 	}
 	return true, id, nil
 }
 
-func (ls *LeaseStore) Release(topic string, eventID int64, owner, leaseID string) {
-	res := ls.resourcePath(topic, eventID)
+// Release is optional; on success we prefer letting TTL expire as a tombstone
+// against crash-between-dispatch-and-cursor (factory-droid CR).
+func (ls *LeaseStore) Release(topic string, eventID int64, owner, role, leaseID string) {
+	res := ls.resourcePath(topic, eventID, role)
 	_, _ = ls.db.Exec(
 		`DELETE FROM leases WHERE resource = ? AND lease_id = ? AND owner_id = ?`,
 		res, leaseID, owner,

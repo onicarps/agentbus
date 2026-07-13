@@ -205,22 +205,36 @@ func (s *Service) drain() (int, error) {
 				s.state.LastMatchAt = &t
 				s.mu.Unlock()
 
-				ok, leaseID, err := s.leases.TryAcquire(ev.Topic, ev.EventID, s.cfg.WorkerID, s.cfg.LeaseTTLSec)
+				role := s.cfg.Role
+				if role == "" {
+					role = s.cfg.WorkerID
+				}
+				ok, leaseID, err := s.leases.TryAcquire(ev.Topic, ev.EventID, s.cfg.WorkerID, role, s.cfg.LeaseTTLSec)
 				if err != nil {
 					return matched, err
 				}
 				if !ok {
+					// Same-role peer owns it — advance so we do not stall.
 					if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
 						return matched, err
 					}
 					continue
 				}
 
+				// Dispatch failures are non-fatal by default (PRD on_task):
+				// log, advance cursor, keep lease as short tombstone (no early release
+				// on success — factory-droid CR #1 poison-pill + #3 crash window).
 				if err := Dispatch(s.cfg, s.workspace, ev); err != nil {
-					s.leases.Release(ev.Topic, ev.EventID, s.cfg.WorkerID, leaseID)
-					return matched, err
+					log.Printf("dispatch event_id=%d: %v (advancing cursor)", ev.EventID, err)
+					if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
+						return matched, err
+					}
+					// Do not Release on failure either if we advanced — optional release
+					// only wastes a tombstone; leave TTL to expire.
+					_ = leaseID
+					continue
 				}
-				s.leases.Release(ev.Topic, ev.EventID, s.cfg.WorkerID, leaseID)
+				// Success: do NOT Release — lease TTL is dedupe tombstone until expiry.
 				if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
 					return matched, err
 				}
