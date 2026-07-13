@@ -24,6 +24,8 @@ type Config struct {
 	Dispatch    DispatchConfig `yaml:"dispatch"`
 	Dedupe      DedupeConfig   `yaml:"dedupe"`
 	LeaseTTLSec int            `yaml:"lease_ttl_seconds"`
+	WakeMode    string         `yaml:"wake_mode"`
+	WebhookUrl  string         `yaml:"webhook_url"`
 }
 
 type SubscribeRule struct {
@@ -124,6 +126,7 @@ func DefaultConfig() *Config {
 			ByEventID:        true,
 		},
 		LeaseTTLSec: 300,
+		WakeMode:    "file",
 	}
 }
 
@@ -150,6 +153,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.LeaseTTLSec <= 0 {
 		cfg.LeaseTTLSec = 300
+	}
+	if cfg.WakeMode == "" {
+		cfg.WakeMode = "file"
+	}
+	if cfg.WakeMode == "webhook" && cfg.WebhookUrl == "" {
+		return nil, fmt.Errorf("webhook_url required when wake_mode is webhook")
 	}
 	return cfg, nil
 }

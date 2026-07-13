@@ -1,9 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +31,14 @@ type WakeFile struct {
 func Dispatch(cfg *Config, workspace string, ev store.Event) error {
 	for _, action := range cfg.OnTask {
 		if action.Write != nil {
-			if err := writeWake(cfg, workspace, action.Write.Path, ev); err != nil {
-				return err
+			if cfg.WakeMode == "webhook" {
+				if err := postWebhook(cfg, ev); err != nil {
+					log.Printf("webhook failed: %v", err)
+				}
+			} else {
+				if err := writeWake(cfg, workspace, action.Write.Path, ev); err != nil {
+					return err
+				}
 			}
 		}
 		if action.Exec != nil && len(action.Exec.Command) > 0 {
@@ -41,12 +50,8 @@ func Dispatch(cfg *Config, workspace string, ev store.Event) error {
 	return nil
 }
 
-func writeWake(cfg *Config, workspace, rel string, ev store.Event) error {
-	path := ResolvePath(workspace, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	wf := WakeFile{
+func makeWakeFile(cfg *Config, ev store.Event) WakeFile {
+	return WakeFile{
 		SchemaVersion: "1.0",
 		WokenAt:       time.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		WorkerID:      cfg.WorkerID,
@@ -60,6 +65,40 @@ func writeWake(cfg *Config, workspace, rel string, ev store.Event) error {
 			"do_not":                         "full-system-prompt-replay-for-idle-check",
 		},
 	}
+}
+
+func postWebhook(cfg *Config, ev store.Event) error {
+	wf := makeWakeFile(cfg, ev)
+	b, err := json.Marshal(wf)
+	if err != nil {
+		return err
+	}
+	
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("POST", cfg.WebhookUrl, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func writeWake(cfg *Config, workspace, rel string, ev store.Event) error {
+	path := ResolvePath(workspace, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	wf := makeWakeFile(cfg, ev)
 	b, err := json.MarshalIndent(wf, "", "  ")
 	if err != nil {
 		return err

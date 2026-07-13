@@ -1,0 +1,12 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-10-agentbus-headless.md",
+  "tasks": [
+    {
+      "id": 0,
+      "subject": "Task 0: Implement `--quiet` CLI Flag",
+      "status": "pending",
+      "description": "**Goal:** Parse `--quiet` in the CLI and configure logging accordingly.\n\n**Files:**\n- Modify: `src/agentbus/cli.py`\n- Create: `tests/test_cli.py`\n\n```json:metadata\n{\"files\": [\"src/agentbus/cli.py\", \"tests/test_cli.py\"], \"verifyCommand\": \"pytest tests/test_cli.py -v\", \"acceptanceCriteria\": [\"CLI accepts -q or --quiet\", \"When active, logging level is set to CRITICAL\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-07-10T19:39:00Z"
+}

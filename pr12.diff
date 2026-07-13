@@ -1,0 +1,2426 @@
+diff --git a/.gitignore b/.gitignore
+index 28d7450..4425626 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,4 +5,5 @@ __pycache__/
+ .coverage
+ htmlcov/
+ .agentbus/
+-dist/
+\ No newline at end of file
++dist/
++go-core/bin/
+\ No newline at end of file
+diff --git a/docs/WAKE.md b/docs/WAKE.md
+new file mode 100644
+index 0000000..8bf3d10
+--- /dev/null
++++ b/docs/WAKE.md
+@@ -0,0 +1,36 @@
++# Wake plane — `agentbus worker`
++
++Classical **non-LLM** process that turns the event log into attention.  
++Spec: [PRD v0.12.0](../../initiatives/agentbus/PRD_v0.12.0_Wake_Plane_Worker.md) (OKF bundle).
++
++## Day-0
++
++```bash
++cd go-core && make build
++export AGENTBUS_WORKSPACE=/path/to/project
++export PATH="$PWD/go-core/bin:$PATH"   # or AGENTBUS_GO_WORKER=...
++
++agentbus worker init --to grok
++agentbus worker once          # drain matching handoffs → .agentbus/WAKE.json
++# or long-running:
++agentbus worker up            # fsnotify + poll; never loads a model
++
++agentbus worker sleep         # stand-down
++agentbus worker wake          # default --skip-backlog (fast-forward stale)
++agentbus worker wake --drain  # process backlog instead
++agentbus worker status
++```
++
++## Anti-pattern
++
++Do **not** cron a full coding agent to `poll` an empty bus. Watch `WAKE.json` or start the agent only when that file changes.
++
++## Defaults (Agy §14 + Grok §14.1)
++
++| Setting | Value |
++|---------|--------|
++| Engine | Go (`agentbus-go-worker`) |
++| Idle auto-sleep | 30 minutes (fast-forwards cursor) |
++| Wake skip-backlog | default true |
++| max_event_age | 24h (worker-side; optional payload `expires_at`) |
++| Multi-worker | local lease `wake-locks/{topic}/{event_id}` |
+diff --git a/go-core/Makefile b/go-core/Makefile
+new file mode 100644
+index 0000000..5e3416d
+--- /dev/null
++++ b/go-core/Makefile
+@@ -0,0 +1,14 @@
++.PHONY: test build tidy
++
++export PATH := $(HOME)/.local/go/bin:$(PATH)
++
++tidy:
++	go mod tidy
++
++test:
++	go test ./...
++
++build:
++	mkdir -p bin
++	go build -o bin/agentbus-go-serve ./cmd/agentbus-go-serve
++	go build -o bin/agentbus-go-worker ./cmd/agentbus-go-worker
+diff --git a/go-core/README.md b/go-core/README.md
+new file mode 100644
+index 0000000..853ebf7
+--- /dev/null
++++ b/go-core/README.md
+@@ -0,0 +1,46 @@
++# AgentBus Go Core (Strangler Bus spike)
++
++Optional high-performance control plane: SQLite event store + MCP stdio serve.
++
++## Build
++
++Requires Go 1.22+:
++
++```bash
++export PATH="$HOME/.local/go/bin:$PATH"   # if installed to user prefix
++cd go-core
++make tidy test build
++# → bin/agentbus-go-serve
++# → bin/agentbus-go-worker
++```
++
++## MCP serve (`--engine go`)
++
++```bash
++export AGENTBUS_WORKSPACE=/path/to/workspace
++# optional: export AGENTBUS_GO_SERVE=$PWD/go-core/bin/agentbus-go-serve
++agentbus serve --engine go
++```
++
++## Wake worker (PRD v0.12 — non-LLM)
++
++```bash
++export AGENTBUS_GO_WORKER=$PWD/go-core/bin/agentbus-go-worker
++agentbus worker init --to grok
++agentbus worker once          # → .agentbus/WAKE.json
++agentbus worker up            # long-running fsnotify+poll
++agentbus worker sleep|wake|status
++```
++
++See [docs/WAKE.md](../docs/WAKE.md).
++
++## Scope
++
++| Implemented | Not yet |
++|-------------|---------|
++| EventStore Publish/Poll/Status | HITL, SLA, RBAC, mcpsafe on Go serve |
++| Single-writer goroutine | Full MCP tool surface |
++| **agentbus-go-worker** filter/cursor/WAKE/sleep/leases | MCP session notifications |
++| Content-Length JSON-RPC stdio | Full pytest parity suite |
++
++Module: `github.com/onicarps/agentbus-go`
+diff --git a/go-core/cmd/agentbus-go-serve/main.go b/go-core/cmd/agentbus-go-serve/main.go
+new file mode 100644
+index 0000000..8c14207
+--- /dev/null
++++ b/go-core/cmd/agentbus-go-serve/main.go
+@@ -0,0 +1,330 @@
++// agentbus-go-serve — minimal stdio MCP server for publish/poll/status (Strangler spike).
++package main
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++
++	"github.com/onicarps/agentbus-go/internal/store"
++)
++
++type rpcRequest struct {
++	JSONRPC string          `json:"jsonrpc"`
++	ID      json.RawMessage `json:"id"`
++	Method  string          `json:"method"`
++	Params  json.RawMessage `json:"params"`
++}
++
++type rpcResponse struct {
++	JSONRPC string          `json:"jsonrpc"`
++	ID      json.RawMessage `json:"id"`
++	Result  any             `json:"result,omitempty"`
++	Error   *rpcError       `json:"error,omitempty"`
++}
++
++type rpcError struct {
++	Code    int    `json:"code"`
++	Message string `json:"message"`
++}
++
++func main() {
++	ws := os.Getenv("AGENTBUS_WORKSPACE")
++	if ws == "" {
++		cwd, _ := os.Getwd()
++		ws = cwd
++	}
++	ws, _ = filepath.Abs(ws)
++
++	es, err := store.Open(ws)
++	if err != nil {
++		fmt.Fprintf(os.Stderr, "store open: %v\n", err)
++		os.Exit(1)
++	}
++	defer es.Close()
++
++	// Content-Length framed JSON-RPC over stdio (MCP transport subset).
++	in := bufio.NewReader(os.Stdin)
++	var nextID atomic.Int64
++	_ = nextID
++
++	for {
++		req, err := readMessage(in)
++		if err == io.EOF {
++			return
++		}
++		if err != nil {
++			fmt.Fprintf(os.Stderr, "read: %v\n", err)
++			return
++		}
++		resp := handle(es, req)
++		if resp == nil {
++			continue // notification
++		}
++		if err := writeMessage(os.Stdout, resp); err != nil {
++			fmt.Fprintf(os.Stderr, "write: %v\n", err)
++			return
++		}
++	}
++}
++
++func handle(es *store.EventStore, req *rpcRequest) *rpcResponse {
++	switch req.Method {
++	case "initialize":
++		return &rpcResponse{
++			JSONRPC: "2.0",
++			ID:      req.ID,
++			Result: map[string]any{
++				"protocolVersion": "2024-11-05",
++				"capabilities": map[string]any{
++					"tools": map[string]any{},
++				},
++				"serverInfo": map[string]any{
++					"name":    "agentbus-go",
++					"version": "0.0.1-spike",
++				},
++			},
++		}
++	case "notifications/initialized", "notifications/cancelled":
++		return nil
++	case "tools/list":
++		return &rpcResponse{
++			JSONRPC: "2.0",
++			ID:      req.ID,
++			Result: map[string]any{
++				"tools": []map[string]any{
++					{
++						"name":        "agentbus_publish",
++						"description": "Append one event to the workspace event log (Go engine).",
++						"inputSchema": map[string]any{
++							"type": "object",
++							"properties": map[string]any{
++								"topic":           map[string]any{"type": "string"},
++								"payload":         map[string]any{"type": "object"},
++								"schema_version":  map[string]any{"type": "string"},
++								"producer_id":     map[string]any{"type": "string"},
++								"causation_id":    map[string]any{"type": "integer"},
++								"idempotency_key": map[string]any{"type": "string"},
++							},
++							"required": []string{"topic", "payload"},
++						},
++					},
++					{
++						"name":        "agentbus_poll",
++						"description": "Fetch events after cursor (Go engine).",
++						"inputSchema": map[string]any{
++							"type": "object",
++							"properties": map[string]any{
++								"topic":    map[string]any{"type": "string"},
++								"since_id": map[string]any{"type": "integer"},
++								"limit":    map[string]any{"type": "integer"},
++							},
++							"required": []string{"topic"},
++						},
++					},
++					{
++						"name":        "agentbus_status",
++						"description": "Workspace bus health (Go engine).",
++						"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
++					},
++				},
++			},
++		}
++	case "tools/call":
++		return handleToolCall(es, req)
++	case "ping":
++		return &rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}
++	default:
++		return &rpcResponse{
++			JSONRPC: "2.0",
++			ID:      req.ID,
++			Error:   &rpcError{Code: -32601, Message: "method not found: " + req.Method},
++		}
++	}
++}
++
++func handleToolCall(es *store.EventStore, req *rpcRequest) *rpcResponse {
++	var params struct {
++		Name      string         `json:"name"`
++		Arguments map[string]any `json:"arguments"`
++	}
++	if err := json.Unmarshal(req.Params, &params); err != nil {
++		return errResp(req.ID, -32602, err.Error())
++	}
++	args := params.Arguments
++	if args == nil {
++		args = map[string]any{}
++	}
++
++	var text string
++	var isErr bool
++	switch params.Name {
++	case "agentbus_publish":
++		topic, _ := args["topic"].(string)
++		payload, _ := args["payload"].(map[string]any)
++		if payload == nil {
++			payload = map[string]any{}
++		}
++		pid, _ := args["producer_id"].(string)
++		if pid == "" {
++			pid = os.Getenv("AGENTBUS_PRODUCER_ID")
++		}
++		if pid == "" {
++			pid = "go-serve"
++		}
++		sv, _ := args["schema_version"].(string)
++		var causation *int64
++		if v, ok := asInt64(args["causation_id"]); ok {
++			causation = &v
++		}
++		var idem *string
++		if v, ok := args["idempotency_key"].(string); ok && v != "" {
++			idem = &v
++		}
++		ev, dup, err := es.Publish(context.Background(), store.PublishRequest{
++			Topic:          topic,
++			ProducerID:     pid,
++			SchemaVersion:  sv,
++			Payload:        payload,
++			CausationID:    causation,
++			IdempotencyKey: idem,
++		})
++		if err != nil {
++			isErr = true
++			text = mustJSON(map[string]any{"error": err.Error(), "code": 500})
++		} else {
++			text = mustJSON(map[string]any{
++				"event_id":  ev.EventID,
++				"topic":     ev.Topic,
++				"timestamp": ev.Timestamp,
++				"duplicate": dup,
++				"span_id":   ev.SpanID,
++			})
++		}
++	case "agentbus_poll":
++		topic, _ := args["topic"].(string)
++		since, _ := asInt64(args["since_id"])
++		limit, _ := asInt64(args["limit"])
++		if limit == 0 {
++			limit = 50
++		}
++		res, err := es.Poll(topic, since, int(limit))
++		if err != nil {
++			isErr = true
++			text = mustJSON(map[string]any{"error": err.Error()})
++		} else {
++			text = mustJSON(res)
++		}
++	case "agentbus_status":
++		st, err := es.Status()
++		if err != nil {
++			isErr = true
++			text = mustJSON(map[string]any{"error": err.Error()})
++		} else {
++			text = mustJSON(st)
++		}
++	default:
++		isErr = true
++		text = mustJSON(map[string]any{"error": "unknown tool " + params.Name})
++	}
++
++	return &rpcResponse{
++		JSONRPC: "2.0",
++		ID:      req.ID,
++		Result: map[string]any{
++			"content": []map[string]any{
++				{"type": "text", "text": text},
++			},
++			"isError": isErr,
++		},
++	}
++}
++
++func asInt64(v any) (int64, bool) {
++	switch t := v.(type) {
++	case float64:
++		return int64(t), true
++	case int64:
++		return t, true
++	case int:
++		return int64(t), true
++	case json.Number:
++		i, err := t.Int64()
++		return i, err == nil
++	default:
++		return 0, false
++	}
++}
++
++func mustJSON(v any) string {
++	b, _ := json.Marshal(v)
++	return string(b)
++}
++
++func errResp(id json.RawMessage, code int, msg string) *rpcResponse {
++	return &rpcResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}}
++}
++
++func readMessage(r *bufio.Reader) (*rpcRequest, error) {
++	// Support Content-Length framing OR newline-delimited JSON for tests.
++	peek, err := r.Peek(1)
++	if err != nil {
++		return nil, err
++	}
++	if peek[0] == '{' {
++		line, err := r.ReadBytes('\n')
++		if err != nil && len(line) == 0 {
++			return nil, err
++		}
++		var req rpcRequest
++		if err := json.Unmarshal(line, &req); err != nil {
++			return nil, err
++		}
++		return &req, nil
++	}
++	// headers
++	var contentLength int
++	for {
++		line, err := r.ReadString('\n')
++		if err != nil {
++			return nil, err
++		}
++		if line == "\r\n" || line == "\n" {
++			break
++		}
++		var n int
++		if _, err := fmt.Sscanf(line, "Content-Length: %d", &n); err == nil {
++			contentLength = n
++		}
++	}
++	if contentLength <= 0 {
++		return nil, fmt.Errorf("missing Content-Length")
++	}
++	body := make([]byte, contentLength)
++	if _, err := io.ReadFull(r, body); err != nil {
++		return nil, err
++	}
++	var req rpcRequest
++	if err := json.Unmarshal(body, &req); err != nil {
++		return nil, err
++	}
++	return &req, nil
++}
++
++func writeMessage(w io.Writer, resp *rpcResponse) error {
++	body, err := json.Marshal(resp)
++	if err != nil {
++		return err
++	}
++	header := fmt.Sprintf("Content-Length: %d\r\n\r\n", len(body))
++	if _, err := io.WriteString(w, header); err != nil {
++		return err
++	}
++	_, err = w.Write(body)
++	return err
++}
+diff --git a/go-core/cmd/agentbus-go-worker/main.go b/go-core/cmd/agentbus-go-worker/main.go
+new file mode 100644
+index 0000000..3f99653
+--- /dev/null
++++ b/go-core/cmd/agentbus-go-worker/main.go
+@@ -0,0 +1,118 @@
++// agentbus-go-worker — classical non-LLM wake plane (PRD v0.12.0).
++package main
++
++import (
++	"flag"
++	"fmt"
++	"os"
++	"path/filepath"
++
++	"github.com/onicarps/agentbus-go/internal/worker"
++)
++
++func main() {
++	ws := flag.String("workspace", envOr("AGENTBUS_WORKSPACE", ""), "workspace root")
++	config := flag.String("config", "", "path to worker.yaml (default: <ws>/.agentbus/worker.yaml)")
++	cmd := flag.String("cmd", "up", "up|once|sleep|wake|status|init")
++	skipBacklog := flag.Bool("skip-backlog", true, "on wake: fast-forward cursor (default true)")
++	drain := flag.Bool("drain", false, "on wake: process backlog (sets skip-backlog=false)")
++	to := flag.String("to", "grok", "init preset --to target")
++	flag.Parse()
++
++	if *ws == "" {
++		cwd, _ := os.Getwd()
++		*ws = cwd
++	}
++	abs, err := filepath.Abs(*ws)
++	if err != nil {
++		fail(err)
++	}
++	*ws = abs
++
++	if *cmd == "init" {
++		path, err := worker.WritePresetImplementer(*ws, *to)
++		if err != nil {
++			fail(err)
++		}
++		fmt.Println(path)
++		return
++	}
++
++	cfgPath := *config
++	if cfgPath == "" {
++		cfgPath = filepath.Join(*ws, ".agentbus", "worker.yaml")
++	}
++	if _, err := os.Stat(cfgPath); os.IsNotExist(err) && *cmd != "status" {
++		// auto-init implementer preset
++		if _, err := worker.WritePresetImplementer(*ws, *to); err != nil {
++			fail(err)
++		}
++	}
++	cfg, err := worker.LoadConfig(cfgPath)
++	if err != nil {
++		// last resort defaults in memory + write
++		cfg = worker.DefaultConfig()
++		if *cmd != "status" {
++			_, _ = worker.WritePresetImplementer(*ws, cfg.ProducerID)
++			cfg, err = worker.LoadConfig(cfgPath)
++			if err != nil {
++				fail(err)
++			}
++		}
++	}
++
++	svc, err := worker.NewService(*ws, cfg)
++	if err != nil {
++		fail(err)
++	}
++	defer svc.Close()
++
++	switch *cmd {
++	case "up":
++		_, _ = worker.EnsurePID(*ws, cfg.WorkerID)
++		fmt.Fprintf(os.Stderr, "agentbus-go-worker up workspace=%s worker_id=%s\n", *ws, cfg.WorkerID)
++		if err := svc.Run(); err != nil {
++			fail(err)
++		}
++	case "once":
++		n, err := svc.Once()
++		if err != nil {
++			fail(err)
++		}
++		fmt.Printf("{\"matched\":%d}\n", n)
++	case "sleep":
++		if err := svc.Sleep(); err != nil {
++			fail(err)
++		}
++		fmt.Println(`{"sleeping":true}`)
++	case "wake":
++		skip := *skipBacklog
++		if *drain {
++			skip = false
++		}
++		if err := svc.Wake(skip); err != nil {
++			fail(err)
++		}
++		fmt.Printf("{\"sleeping\":false,\"skip_backlog\":%v}\n", skip)
++	case "status":
++		b, err := svc.StatusJSON()
++		if err != nil {
++			fail(err)
++		}
++		fmt.Println(string(b))
++	default:
++		fail(fmt.Errorf("unknown cmd %q", *cmd))
++	}
++}
++
++func envOr(k, def string) string {
++	if v := os.Getenv(k); v != "" {
++		return v
++	}
++	return def
++}
++
++func fail(err error) {
++	fmt.Fprintf(os.Stderr, "error: %v\n", err)
++	os.Exit(1)
++}
+diff --git a/go-core/go.mod b/go-core/go.mod
+new file mode 100644
+index 0000000..8053f47
+--- /dev/null
++++ b/go-core/go.mod
+@@ -0,0 +1,21 @@
++module github.com/onicarps/agentbus-go
++
++go 1.22.12
++
++require (
++	github.com/fsnotify/fsnotify v1.7.0
++	github.com/google/uuid v1.6.0
++	gopkg.in/yaml.v3 v3.0.1
++	modernc.org/sqlite v1.34.5
++)
++
++require (
++	github.com/dustin/go-humanize v1.0.1 // indirect
++	github.com/mattn/go-isatty v0.0.20 // indirect
++	github.com/ncruces/go-strftime v0.1.9 // indirect
++	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
++	golang.org/x/sys v0.22.0 // indirect
++	modernc.org/libc v1.55.3 // indirect
++	modernc.org/mathutil v1.6.0 // indirect
++	modernc.org/memory v1.8.0 // indirect
++)
+diff --git a/go-core/go.sum b/go-core/go.sum
+new file mode 100644
+index 0000000..a022523
+--- /dev/null
++++ b/go-core/go.sum
+@@ -0,0 +1,49 @@
++github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
++github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
++github.com/fsnotify/fsnotify v1.7.0 h1:8JEhPFa5W2WU7YfeZzPNqzMP6Lwt7L2715Ggo0nosvA=
++github.com/fsnotify/fsnotify v1.7.0/go.mod h1:40Bi/Hjc2AVfZrqy+aj+yEI+/bRxZnMJyTJwOpGvigM=
++github.com/google/pprof v0.0.0-20240409012703-83162a5b38cd h1:gbpYu9NMq8jhDVbvlGkMFWCjLFlqqEZjEmObmhUy6Vo=
++github.com/google/pprof v0.0.0-20240409012703-83162a5b38cd/go.mod h1:kf6iHlnVGwgKolg33glAes7Yg/8iWP8ukqeldJSO7jw=
++github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
++github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
++github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
++github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
++github.com/ncruces/go-strftime v0.1.9 h1:bY0MQC28UADQmHmaF5dgpLmImcShSi2kHU9XLdhx/f4=
++github.com/ncruces/go-strftime v0.1.9/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
++github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
++github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
++golang.org/x/mod v0.16.0 h1:QX4fJ0Rr5cPQCF7O9lh9Se4pmwfwskqZfq5moyldzic=
++golang.org/x/mod v0.16.0/go.mod h1:hTbmBsO62+eylJbnUtE2MGJUyE7QWk4xUqPFrRgJ+7c=
++golang.org/x/sys v0.6.0/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
++golang.org/x/sys v0.22.0 h1:RI27ohtqKCnwULzJLqkv897zojh5/DwS/ENaMzUOaWI=
++golang.org/x/sys v0.22.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
++golang.org/x/tools v0.19.0 h1:tfGCXNR1OsFG+sVdLAitlpjAvD/I6dHDKnYrpEZUHkw=
++golang.org/x/tools v0.19.0/go.mod h1:qoJWxmGSIBmAeriMx19ogtrEPrGtDbPK634QFIcLAhc=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++modernc.org/cc/v4 v4.21.4 h1:3Be/Rdo1fpr8GrQ7IVw9OHtplU4gWbb+wNgeoBMmGLQ=
++modernc.org/cc/v4 v4.21.4/go.mod h1:HM7VJTZbUCR3rV8EYBi9wxnJ0ZBRiGE5OeGXNA0IsLQ=
++modernc.org/ccgo/v4 v4.19.2 h1:lwQZgvboKD0jBwdaeVCTouxhxAyN6iawF3STraAal8Y=
++modernc.org/ccgo/v4 v4.19.2/go.mod h1:ysS3mxiMV38XGRTTcgo0DQTeTmAO4oCmJl1nX9VFI3s=
++modernc.org/fileutil v1.3.0 h1:gQ5SIzK3H9kdfai/5x41oQiKValumqNTDXMvKo62HvE=
++modernc.org/fileutil v1.3.0/go.mod h1:XatxS8fZi3pS8/hKG2GH/ArUogfxjpEKs3Ku3aK4JyQ=
++modernc.org/gc/v2 v2.4.1 h1:9cNzOqPyMJBvrUipmynX0ZohMhcxPtMccYgGOJdOiBw=
++modernc.org/gc/v2 v2.4.1/go.mod h1:wzN5dK1AzVGoH6XOzc3YZ+ey/jPgYHLuVckd62P0GYU=
++modernc.org/libc v1.55.3 h1:AzcW1mhlPNrRtjS5sS+eW2ISCgSOLLNyFzRh/V3Qj/U=
++modernc.org/libc v1.55.3/go.mod h1:qFXepLhz+JjFThQ4kzwzOjA/y/artDeg+pcYnY+Q83w=
++modernc.org/mathutil v1.6.0 h1:fRe9+AmYlaej+64JsEEhoWuAYBkOtQiMEU7n/XgfYi4=
++modernc.org/mathutil v1.6.0/go.mod h1:Ui5Q9q1TR2gFm0AQRqQUaBWFLAhQpCwNcuhBOSedWPo=
++modernc.org/memory v1.8.0 h1:IqGTL6eFMaDZZhEWwcREgeMXYwmW83LYW8cROZYkg+E=
++modernc.org/memory v1.8.0/go.mod h1:XPZ936zp5OMKGWPqbD3JShgd/ZoQ7899TUuQqxY+peU=
++modernc.org/opt v0.1.3 h1:3XOZf2yznlhC+ibLltsDGzABUGVx8J6pnFMS3E4dcq4=
++modernc.org/opt v0.1.3/go.mod h1:WdSiB5evDcignE70guQKxYUl14mgWtbClRi5wmkkTX0=
++modernc.org/sortutil v1.2.0 h1:jQiD3PfS2REGJNzNCMMaLSp/wdMNieTbKX920Cqdgqc=
++modernc.org/sortutil v1.2.0/go.mod h1:TKU2s7kJMf1AE84OoiGppNHJwvB753OYfNl2WRb++Ss=
++modernc.org/sqlite v1.34.5 h1:Bb6SR13/fjp15jt70CL4f18JIN7p7dnMExd+UFnF15g=
++modernc.org/sqlite v1.34.5/go.mod h1:YLuNmX9NKs8wRNK2ko1LW1NGYcc9FkBO69JOt1AR9JE=
++modernc.org/strutil v1.2.0 h1:agBi9dp1I+eOnxXeiZawM8F4LawKv4NzGWSaLfyeNZA=
++modernc.org/strutil v1.2.0/go.mod h1:/mdcBmfOibveCTBxUl5B5l6W+TTH1FXPLHZE6bTosX0=
++modernc.org/token v1.1.0 h1:Xl7Ap9dKaEs5kLoOQeQmPWevfnk/DM5qcLcYlA8ys6Y=
++modernc.org/token v1.1.0/go.mod h1:UGzOrNV1mAFSEB63lOFHIpNRUVMvYTc6yu1SMY/XTDM=
+diff --git a/go-core/internal/store/store.go b/go-core/internal/store/store.go
+new file mode 100644
+index 0000000..96fe170
+--- /dev/null
++++ b/go-core/internal/store/store.go
+@@ -0,0 +1,426 @@
++// Package store implements a single-writer SQLite event log for AgentBus Go core.
++package store
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"fmt"
++	"os"
++	"path/filepath"
++	"runtime"
++	"sync"
++	"time"
++
++	_ "modernc.org/sqlite"
++)
++
++const (
++	StatusPublished = "PUBLISHED"
++)
++
++// Event is one bus event row (parity subset with Python EventStore).
++type Event struct {
++	EventID        int64          `json:"event_id"`
++	Topic          string         `json:"topic"`
++	ProducerID     string         `json:"producer_id"`
++	Timestamp      string         `json:"timestamp"`
++	SchemaVersion  string         `json:"schema_version"`
++	Payload        map[string]any `json:"payload"`
++	CausationID    *int64         `json:"causation_id,omitempty"`
++	IdempotencyKey *string        `json:"idempotency_key,omitempty"`
++	Status         string         `json:"status"`
++	TraceID        *string        `json:"trace_id,omitempty"`
++	SpanID         *string        `json:"span_id,omitempty"`
++	ParentSpanID   *string        `json:"parent_span_id,omitempty"`
++}
++
++// PublishRequest is an async write request handled by the single-writer loop.
++type PublishRequest struct {
++	Topic          string
++	ProducerID     string
++	SchemaVersion  string
++	Payload        map[string]any
++	CausationID    *int64
++	IdempotencyKey *string
++	TraceID        *string
++	ParentSpanID   *string
++	Result         chan PublishResult
++}
++
++// PublishResult is returned on PublishRequest.Result.
++type PublishResult struct {
++	Event     Event
++	Duplicate bool
++	Err       error
++}
++
++// PollResult matches Python poll envelope.
++type PollResult struct {
++	Events   []Event `json:"events"`
++	LatestID int64   `json:"latest_id"`
++	HasMore  bool    `json:"has_more"`
++}
++
++// EventStore is a SQLite-backed event log with a single writer goroutine.
++type EventStore struct {
++	db      *sql.DB
++	dbPath  string
++	writeCh chan PublishRequest
++	wg      sync.WaitGroup
++	closed  chan struct{}
++	closeMu sync.Mutex
++	closedB bool
++}
++
++// Open creates or opens events.db under workspace/.agentbus and starts the writer.
++func Open(workspace string) (*EventStore, error) {
++	ws, err := filepath.Abs(workspace)
++	if err != nil {
++		return nil, err
++	}
++	dir := filepath.Join(ws, ".agentbus")
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		return nil, err
++	}
++	dbPath := filepath.Join(dir, "events.db")
++	// modernc sqlite DSN
++	db, err := sql.Open("sqlite", dbPath)
++	if err != nil {
++		return nil, err
++	}
++	// Single connection — all writes serialize through writer goroutine anyway.
++	db.SetMaxOpenConns(1)
++
++	s := &EventStore{
++		db:      db,
++		dbPath:  dbPath,
++		writeCh: make(chan PublishRequest, 256),
++		closed:  make(chan struct{}),
++	}
++	if err := s.configurePRAGMAs(); err != nil {
++		_ = db.Close()
++		return nil, err
++	}
++	if err := s.initSchema(); err != nil {
++		_ = db.Close()
++		return nil, err
++	}
++	s.wg.Add(1)
++	go s.writerLoop()
++	return s, nil
++}
++
++func (s *EventStore) configurePRAGMAs() error {
++	if _, err := s.db.Exec(`PRAGMA synchronous = NORMAL`); err != nil {
++		return err
++	}
++	journal := "WAL"
++	busy := 5000
++	if runtime.GOOS == "windows" {
++		journal = "MEMORY"
++		busy = 10000
++	}
++	if v := os.Getenv("AGENTBUS_SQLITE_JOURNAL"); v != "" {
++		journal = v
++	}
++	if v := os.Getenv("AGENTBUS_SQLITE_BUSY_TIMEOUT"); v != "" {
++		fmt.Sscanf(v, "%d", &busy)
++	}
++	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA journal_mode = %s`, journal)); err != nil {
++		return err
++	}
++	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA busy_timeout = %d`, busy)); err != nil {
++		return err
++	}
++	return nil
++}
++
++func (s *EventStore) initSchema() error {
++	_, err := s.db.Exec(`
++CREATE TABLE IF NOT EXISTS events (
++  event_id INTEGER PRIMARY KEY AUTOINCREMENT,
++  topic TEXT NOT NULL,
++  producer_id TEXT NOT NULL,
++  timestamp TEXT NOT NULL,
++  schema_version TEXT NOT NULL,
++  payload TEXT NOT NULL,
++  causation_id INTEGER,
++  idempotency_key TEXT UNIQUE,
++  status TEXT NOT NULL DEFAULT 'PUBLISHED',
++  pending_until TEXT,
++  rejection_reason TEXT,
++  projected_to_log INTEGER NOT NULL DEFAULT 0,
++  sla_timeout_minutes INTEGER,
++  sla_deadline TEXT,
++  sla_cleared INTEGER NOT NULL DEFAULT 0,
++  trace_id TEXT,
++  span_id TEXT,
++  parent_span_id TEXT
++);
++CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events(topic, event_id);
++CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id);
++`)
++	return err
++}
++
++func (s *EventStore) writerLoop() {
++	defer s.wg.Done()
++	for {
++		select {
++		case <-s.closed:
++			// drain remaining
++			for {
++				select {
++				case req := <-s.writeCh:
++					s.handlePublish(req)
++				default:
++					return
++				}
++			}
++		case req := <-s.writeCh:
++			s.handlePublish(req)
++		}
++	}
++}
++
++func (s *EventStore) handlePublish(req PublishRequest) {
++	res := PublishResult{}
++	defer func() { req.Result <- res }()
++
++	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
++		existing, err := s.loadByIdempotency(*req.IdempotencyKey)
++		if err != nil {
++			res.Err = err
++			return
++		}
++		if existing != nil {
++			res.Event = *existing
++			res.Duplicate = true
++			return
++		}
++	}
++
++	payloadJSON, err := json.Marshal(req.Payload)
++	if err != nil {
++		res.Err = err
++		return
++	}
++	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
++	sv := req.SchemaVersion
++	if sv == "" {
++		sv = "1.0"
++	}
++	span := fmt.Sprintf("span-%x", time.Now().UnixNano())
++
++	var causation any
++	if req.CausationID != nil {
++		causation = *req.CausationID
++	}
++	var idem any
++	if req.IdempotencyKey != nil {
++		idem = *req.IdempotencyKey
++	}
++	var trace, parent any
++	if req.TraceID != nil {
++		trace = *req.TraceID
++	}
++	if req.ParentSpanID != nil {
++		parent = *req.ParentSpanID
++	}
++
++	r, err := s.db.Exec(`
++INSERT INTO events (
++  topic, producer_id, timestamp, schema_version, payload,
++  causation_id, idempotency_key, status, span_id, trace_id, parent_span_id
++) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
++		req.Topic, req.ProducerID, ts, sv, string(payloadJSON),
++		causation, idem, StatusPublished, span, trace, parent,
++	)
++	if err != nil {
++		res.Err = err
++		return
++	}
++	id, err := r.LastInsertId()
++	if err != nil {
++		res.Err = err
++		return
++	}
++	ev := Event{
++		EventID:        id,
++		Topic:          req.Topic,
++		ProducerID:     req.ProducerID,
++		Timestamp:      ts,
++		SchemaVersion:  sv,
++		Payload:        req.Payload,
++		CausationID:    req.CausationID,
++		IdempotencyKey: req.IdempotencyKey,
++		Status:         StatusPublished,
++		SpanID:         &span,
++		TraceID:        req.TraceID,
++		ParentSpanID:   req.ParentSpanID,
++	}
++	res.Event = ev
++}
++
++func (s *EventStore) loadByIdempotency(key string) (*Event, error) {
++	row := s.db.QueryRow(`
++SELECT event_id, topic, producer_id, timestamp, schema_version, payload,
++       causation_id, idempotency_key, status, trace_id, span_id, parent_span_id
++FROM events WHERE idempotency_key = ?`, key)
++	return scanEvent(row)
++}
++
++// Publish enqueues a write on the single-writer loop and waits for the result.
++func (s *EventStore) Publish(ctx context.Context, req PublishRequest) (Event, bool, error) {
++	if req.Result == nil {
++		req.Result = make(chan PublishResult, 1)
++	}
++	select {
++	case <-s.closed:
++		return Event{}, false, fmt.Errorf("store closed")
++	case <-ctx.Done():
++		return Event{}, false, ctx.Err()
++	case s.writeCh <- req:
++	}
++	select {
++	case <-ctx.Done():
++		return Event{}, false, ctx.Err()
++	case res := <-req.Result:
++		return res.Event, res.Duplicate, res.Err
++	}
++}
++
++// Poll returns events after sinceID for topic (PUBLISHED only for MVP parity).
++func (s *EventStore) Poll(topic string, sinceID int64, limit int) (PollResult, error) {
++	if limit <= 0 {
++		limit = 50
++	}
++	if limit > 100 {
++		limit = 100
++	}
++	rows, err := s.db.Query(`
++SELECT event_id, topic, producer_id, timestamp, schema_version, payload,
++       causation_id, idempotency_key, status, trace_id, span_id, parent_span_id
++FROM events
++WHERE topic = ? AND event_id > ? AND status = ?
++ORDER BY event_id ASC
++LIMIT ?`, topic, sinceID, StatusPublished, limit+1)
++	if err != nil {
++		return PollResult{}, err
++	}
++	defer rows.Close()
++
++	var events []Event
++	for rows.Next() {
++		ev, err := scanEventRows(rows)
++		if err != nil {
++			return PollResult{}, err
++		}
++		events = append(events, *ev)
++	}
++	hasMore := false
++	if len(events) > limit {
++		hasMore = true
++		events = events[:limit]
++	}
++	var latest int64 = sinceID
++	if len(events) > 0 {
++		latest = events[len(events)-1].EventID
++	}
++	return PollResult{Events: events, LatestID: latest, HasMore: hasMore}, nil
++}
++
++// Status returns a minimal health payload.
++func (s *EventStore) Status() (map[string]any, error) {
++	var count, maxID int64
++	_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(event_id), 0) FROM events`).Scan(&count, &maxID)
++	return map[string]any{
++		"event_count":     count,
++		"latest_event_id": maxID,
++		"db_path":         s.dbPath,
++		"engine":          "go",
++	}, nil
++}
++
++// MaxEventID returns the highest event_id (0 if empty).
++func (s *EventStore) MaxEventID() (int64, error) {
++	var maxID int64
++	err := s.db.QueryRow(`SELECT COALESCE(MAX(event_id), 0) FROM events`).Scan(&maxID)
++	return maxID, err
++}
++
++// DB exposes the underlying connection for lease helpers (same events.db).
++func (s *EventStore) DB() *sql.DB { return s.db }
++
++// Workspace returns the workspace root inferred from db path.
++func (s *EventStore) Workspace() string {
++	return filepath.Dir(filepath.Dir(s.dbPath))
++}
++
++// Close stops the writer and closes the DB.
++func (s *EventStore) Close() error {
++	s.closeMu.Lock()
++	if s.closedB {
++		s.closeMu.Unlock()
++		return nil
++	}
++	s.closedB = true
++	close(s.closed)
++	s.closeMu.Unlock()
++	s.wg.Wait()
++	return s.db.Close()
++}
++
++type rowScanner interface {
++	Scan(dest ...any) error
++}
++
++func scanEvent(row rowScanner) (*Event, error) {
++	var (
++		ev             Event
++		payloadStr     string
++		causation      sql.NullInt64
++		idem           sql.NullString
++		trace, span, p sql.NullString
++	)
++	err := row.Scan(
++		&ev.EventID, &ev.Topic, &ev.ProducerID, &ev.Timestamp, &ev.SchemaVersion, &payloadStr,
++		&causation, &idem, &ev.Status, &trace, &span, &p,
++	)
++	if err == sql.ErrNoRows {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	_ = json.Unmarshal([]byte(payloadStr), &ev.Payload)
++	if ev.Payload == nil {
++		ev.Payload = map[string]any{}
++	}
++	if causation.Valid {
++		v := causation.Int64
++		ev.CausationID = &v
++	}
++	if idem.Valid {
++		v := idem.String
++		ev.IdempotencyKey = &v
++	}
++	if trace.Valid {
++		v := trace.String
++		ev.TraceID = &v
++	}
++	if span.Valid {
++		v := span.String
++		ev.SpanID = &v
++	}
++	if p.Valid {
++		v := p.String
++		ev.ParentSpanID = &v
++	}
++	return &ev, nil
++}
++
++func scanEventRows(rows *sql.Rows) (*Event, error) {
++	return scanEvent(rows)
++}
+diff --git a/go-core/internal/store/store_test.go b/go-core/internal/store/store_test.go
+new file mode 100644
+index 0000000..3de7d64
+--- /dev/null
++++ b/go-core/internal/store/store_test.go
+@@ -0,0 +1,169 @@
++package store
++
++import (
++	"context"
++	"fmt"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestPublishPollRoundTrip(t *testing.T) {
++	dir := t.TempDir()
++	s, err := Open(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++
++	ctx := context.Background()
++	ev, dup, err := s.Publish(ctx, PublishRequest{
++		Topic:         "okf/handoff",
++		ProducerID:    "grok",
++		SchemaVersion: "1.0",
++		Payload: map[string]any{
++			"from":    "grok",
++			"to":      "agy",
++			"summary": "hello go",
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if dup {
++		t.Fatal("unexpected duplicate")
++	}
++	if ev.EventID != 1 {
++		t.Fatalf("event_id=%d want 1", ev.EventID)
++	}
++
++	poll, err := s.Poll("okf/handoff", 0, 50)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(poll.Events) != 1 {
++		t.Fatalf("events=%d want 1", len(poll.Events))
++	}
++	if poll.Events[0].Payload["summary"] != "hello go" {
++		t.Fatalf("payload=%v", poll.Events[0].Payload)
++	}
++	if poll.LatestID != 1 {
++		t.Fatalf("latest=%d", poll.LatestID)
++	}
++}
++
++func TestIdempotencyKey(t *testing.T) {
++	dir := t.TempDir()
++	s, err := Open(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++
++	key := "idem-1"
++	ctx := context.Background()
++	_, _, err = s.Publish(ctx, PublishRequest{
++		Topic:          "okf/handoff",
++		ProducerID:     "grok",
++		Payload:        map[string]any{"from": "a", "to": "b", "summary": "x"},
++		IdempotencyKey: &key,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ev2, dup, err := s.Publish(ctx, PublishRequest{
++		Topic:          "okf/handoff",
++		ProducerID:     "grok",
++		Payload:        map[string]any{"from": "a", "to": "b", "summary": "x"},
++		IdempotencyKey: &key,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !dup || ev2.EventID != 1 {
++		t.Fatalf("dup=%v id=%d", dup, ev2.EventID)
++	}
++}
++
++func TestSingleWriterConcurrent(t *testing.T) {
++	dir := t.TempDir()
++	s, err := Open(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++
++	const n = 50
++	var wg sync.WaitGroup
++	errs := make(chan error, n)
++	ctx := context.Background()
++	for i := 0; i < n; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			_, _, err := s.Publish(ctx, PublishRequest{
++				Topic:      "okf/handoff",
++				ProducerID: "swarm",
++				Payload: map[string]any{
++					"from":    "swarm",
++					"to":      "all",
++					"summary": fmt.Sprintf("msg-%d", i),
++				},
++			})
++			if err != nil {
++				errs <- err
++			}
++		}(i)
++	}
++	wg.Wait()
++	close(errs)
++	for err := range errs {
++		t.Fatal(err)
++	}
++	poll, err := s.Poll("okf/handoff", 0, 100)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(poll.Events) != n {
++		t.Fatalf("got %d events want %d", len(poll.Events), n)
++	}
++	// sequential ids
++	for i, e := range poll.Events {
++		if e.EventID != int64(i+1) {
++			t.Fatalf("event[%d].id=%d", i, e.EventID)
++		}
++	}
++}
++
++func TestDBPathUnderAgentbus(t *testing.T) {
++	dir := t.TempDir()
++	s, err := Open(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++	want := filepath.Join(dir, ".agentbus", "events.db")
++	if s.dbPath != want {
++		t.Fatalf("dbPath=%s want %s", s.dbPath, want)
++	}
++}
++
++func TestPublishTimeout(t *testing.T) {
++	dir := t.TempDir()
++	s, err := Open(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer s.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	_, _, err = s.Publish(ctx, PublishRequest{
++		Topic:      "okf/handoff",
++		ProducerID: "grok",
++		Payload:    map[string]any{"from": "g", "to": "a", "summary": "t"},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/go-core/internal/worker/config.go b/go-core/internal/worker/config.go
+new file mode 100644
+index 0000000..de2b435
+--- /dev/null
++++ b/go-core/internal/worker/config.go
+@@ -0,0 +1,189 @@
++package worker
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"time"
++
++	"gopkg.in/yaml.v3"
++)
++
++// Config is .agentbus/worker.yaml (version 1.0).
++type Config struct {
++	Version     string         `yaml:"version"`
++	WorkerID    string         `yaml:"worker_id"`
++	Role        string         `yaml:"role"`
++	ProducerID  string         `yaml:"producer_id"`
++	CursorPath  string         `yaml:"cursor_path"`
++	StatePath   string         `yaml:"state_path"`
++	Subscribe   []SubscribeRule `yaml:"subscribe"`
++	Watch       WatchConfig    `yaml:"watch"`
++	OnTask      []OnTaskAction `yaml:"on_task"`
++	Budget      BudgetConfig   `yaml:"budget"`
++	Dispatch    DispatchConfig `yaml:"dispatch"`
++	Dedupe      DedupeConfig   `yaml:"dedupe"`
++	LeaseTTLSec int            `yaml:"lease_ttl_seconds"`
++}
++
++type SubscribeRule struct {
++	Topic      string   `yaml:"topic"`
++	From       []string `yaml:"from"`
++	To         []string `yaml:"to"`
++	Initiative []string `yaml:"initiative"`
++}
++
++type WatchConfig struct {
++	Mode           string   `yaml:"mode"` // auto|fsnotify|poll
++	PollFallbackMS int      `yaml:"poll_fallback_ms"`
++	Paths          []string `yaml:"paths"`
++}
++
++type OnTaskAction struct {
++	Write *WriteAction `yaml:"write"`
++	Exec  *ExecAction  `yaml:"exec"`
++}
++
++type WriteAction struct {
++	Path string `yaml:"path"`
++}
++
++type ExecAction struct {
++	Command    []string `yaml:"command"`
++	TimeoutSec int      `yaml:"timeout_sec"`
++}
++
++type BudgetConfig struct {
++	MaxDispatchesPerHour  int  `yaml:"max_dispatches_per_hour"`
++	MaxConcurrentExec     int  `yaml:"max_concurrent_exec"`
++	IdleSleepAfterMinutes *int `yaml:"idle_sleep_after_minutes"`
++	RequireWakeAfterSleep bool `yaml:"require_wake_after_sleep"`
++}
++
++type DispatchConfig struct {
++	MaxEventAge string `yaml:"max_event_age"` // e.g. 24h
++}
++
++type DedupeConfig struct {
++	ByIdempotencyKey bool `yaml:"by_idempotency_key"`
++	ByEventID        bool `yaml:"by_event_id"`
++}
++
++// State is persisted sleep/run state.
++type State struct {
++	Sleeping     bool      `json:"sleeping"`
++	SleptAt      *time.Time `json:"slept_at,omitempty"`
++	LastMatchAt  *time.Time `json:"last_match_at,omitempty"`
++	LastEventID  int64     `json:"last_event_id"`
++	MatchesTotal int64     `json:"matches_total"`
++	Dispatches   int64     `json:"dispatches_total"`
++}
++
++// DefaultConfig returns implementer-oriented defaults (PRD §14.1).
++func DefaultConfig() *Config {
++	idle := 30
++	return &Config{
++		Version:    "1.0",
++		WorkerID:   "implementer-1",
++		Role:       "implementer",
++		ProducerID: "grok",
++		CursorPath: ".agentbus/worker.cursor",
++		StatePath:  ".agentbus/worker.state.json",
++		Subscribe: []SubscribeRule{{
++			Topic: "okf/handoff",
++			From:  []string{"agy"},
++			// Worker identities; event.to swarm/*/all still matches via filter broadcast rules.
++			To: []string{"grok", "implementer"},
++		}},
++		Watch: WatchConfig{
++			Mode:           "auto",
++			PollFallbackMS: 1500,
++			Paths: []string{
++				".agentbus/events.db",
++				".agentbus/events.db-wal",
++			},
++		},
++		OnTask: []OnTaskAction{{
++			Write: &WriteAction{Path: ".agentbus/WAKE.json"},
++		}},
++		Budget: BudgetConfig{
++			MaxDispatchesPerHour:  60,
++			MaxConcurrentExec:     1,
++			IdleSleepAfterMinutes: &idle,
++			RequireWakeAfterSleep: true,
++		},
++		Dispatch: DispatchConfig{
++			MaxEventAge: "24h",
++		},
++		Dedupe: DedupeConfig{
++			ByIdempotencyKey: true,
++			ByEventID:        true,
++		},
++		LeaseTTLSec: 300,
++	}
++}
++
++func LoadConfig(path string) (*Config, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, err
++	}
++	cfg := DefaultConfig()
++	if err := yaml.Unmarshal(data, cfg); err != nil {
++		return nil, err
++	}
++	if cfg.WorkerID == "" {
++		return nil, fmt.Errorf("worker_id required")
++	}
++	if len(cfg.Subscribe) == 0 {
++		return nil, fmt.Errorf("subscribe rules required")
++	}
++	if cfg.Watch.PollFallbackMS <= 0 {
++		cfg.Watch.PollFallbackMS = 1500
++	}
++	if cfg.Dispatch.MaxEventAge == "" {
++		cfg.Dispatch.MaxEventAge = "24h"
++	}
++	if cfg.LeaseTTLSec <= 0 {
++		cfg.LeaseTTLSec = 300
++	}
++	return cfg, nil
++}
++
++func (c *Config) MaxEventAge() time.Duration {
++	d, err := time.ParseDuration(c.Dispatch.MaxEventAge)
++	if err != nil {
++		return 24 * time.Hour
++	}
++	return d
++}
++
++func ResolvePath(workspace, rel string) string {
++	if filepath.IsAbs(rel) {
++		return rel
++	}
++	return filepath.Join(workspace, rel)
++}
++
++// WritePresetImplementer writes a default worker.yaml for AEs.
++func WritePresetImplementer(workspace, to string) (string, error) {
++	cfg := DefaultConfig()
++	if to != "" {
++		cfg.Subscribe[0].To = []string{to, "implementer", "swarm", "*", "all"}
++		cfg.WorkerID = to + "-1"
++		cfg.ProducerID = to
++	}
++	dir := filepath.Join(workspace, ".agentbus")
++	if err := os.MkdirAll(dir, 0o755); err != nil {
++		return "", err
++	}
++	path := filepath.Join(dir, "worker.yaml")
++	b, err := yaml.Marshal(cfg)
++	if err != nil {
++		return "", err
++	}
++	if err := os.WriteFile(path, b, 0o644); err != nil {
++		return "", err
++	}
++	return path, nil
++}
+diff --git a/go-core/internal/worker/cursor.go b/go-core/internal/worker/cursor.go
+new file mode 100644
+index 0000000..294c337
+--- /dev/null
++++ b/go-core/internal/worker/cursor.go
+@@ -0,0 +1,34 @@
++package worker
++
++import (
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++)
++
++func LoadCursor(path string) (int64, error) {
++	b, err := os.ReadFile(path)
++	if err != nil {
++		if os.IsNotExist(err) {
++			return 0, nil
++		}
++		return 0, err
++	}
++	s := strings.TrimSpace(string(b))
++	if s == "" {
++		return 0, nil
++	}
++	return strconv.ParseInt(s, 10, 64)
++}
++
++func SaveCursor(path string, id int64) error {
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		return err
++	}
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(id, 10)+"\n"), 0o644); err != nil {
++		return err
++	}
++	return os.Rename(tmp, path)
++}
+diff --git a/go-core/internal/worker/dispatch.go b/go-core/internal/worker/dispatch.go
+new file mode 100644
+index 0000000..94f5d31
+--- /dev/null
++++ b/go-core/internal/worker/dispatch.go
+@@ -0,0 +1,93 @@
++package worker
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"time"
++
++	"github.com/onicarps/agentbus-go/internal/store"
++)
++
++// WakeFile is the default on_task write payload (PRD §5.3).
++type WakeFile struct {
++	SchemaVersion string         `json:"schema_version"`
++	WokenAt       string         `json:"woken_at"`
++	WorkerID      string         `json:"worker_id"`
++	EventID       int64          `json:"event_id"`
++	Topic         string         `json:"topic"`
++	TraceID       *string        `json:"trace_id"`
++	CausationID   *int64         `json:"causation_id"`
++	Payload       map[string]any `json:"payload"`
++	Hint          map[string]string `json:"hint"`
++}
++
++func Dispatch(cfg *Config, workspace string, ev store.Event) error {
++	for _, action := range cfg.OnTask {
++		if action.Write != nil {
++			if err := writeWake(cfg, workspace, action.Write.Path, ev); err != nil {
++				return err
++			}
++		}
++		if action.Exec != nil && len(action.Exec.Command) > 0 {
++			if err := runExec(workspace, action.Exec, ev); err != nil {
++				return err
++			}
++		}
++	}
++	return nil
++}
++
++func writeWake(cfg *Config, workspace, rel string, ev store.Event) error {
++	path := ResolvePath(workspace, rel)
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		return err
++	}
++	wf := WakeFile{
++		SchemaVersion: "1.0",
++		WokenAt:       time.Now().UTC().Format("2006-01-02T15:04:05Z"),
++		WorkerID:      cfg.WorkerID,
++		EventID:       ev.EventID,
++		Topic:         ev.Topic,
++		TraceID:       ev.TraceID,
++		CausationID:   ev.CausationID,
++		Payload:       ev.Payload,
++		Hint: map[string]string{
++			"suggested_prompt_tokens_budget": "task-only",
++			"do_not":                         "full-system-prompt-replay-for-idle-check",
++		},
++	}
++	b, err := json.MarshalIndent(wf, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
++		return err
++	}
++	return os.Rename(tmp, path)
++}
++
++func runExec(workspace string, ex *ExecAction, ev store.Event) error {
++	timeout := time.Duration(ex.TimeoutSec) * time.Second
++	if timeout <= 0 {
++		timeout = time.Hour
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++	// argv only — no shell
++	cmd := exec.CommandContext(ctx, ex.Command[0], ex.Command[1:]...)
++	cmd.Dir = workspace
++	cmd.Env = append(os.Environ(),
++		fmt.Sprintf("AGENTBUS_WAKE_EVENT_ID=%d", ev.EventID),
++		"AGENTBUS_WAKE_TOPIC="+ev.Topic,
++	)
++	out, err := cmd.CombinedOutput()
++	if err != nil {
++		return fmt.Errorf("exec: %w: %s", err, string(out))
++	}
++	return nil
++}
+diff --git a/go-core/internal/worker/filter.go b/go-core/internal/worker/filter.go
+new file mode 100644
+index 0000000..5665f75
+--- /dev/null
++++ b/go-core/internal/worker/filter.go
+@@ -0,0 +1,118 @@
++package worker
++
++import (
++	"strings"
++	"time"
++
++	"github.com/onicarps/agentbus-go/internal/store"
++)
++
++// Match reports whether event matches any subscribe rule and age policy.
++func Match(cfg *Config, ev store.Event, now time.Time) bool {
++	if cfg == nil {
++		return false
++	}
++	// max age (worker-side anti-stale; PRD §14.1.1)
++	if ts, err := time.Parse(time.RFC3339, strings.Replace(ev.Timestamp, "Z", "+00:00", 1)); err == nil {
++		if now.Sub(ts) > cfg.MaxEventAge() {
++			return false
++		}
++	} else if ts2, err2 := time.Parse("2006-01-02T15:04:05Z", ev.Timestamp); err2 == nil {
++		if now.Sub(ts2) > cfg.MaxEventAge() {
++			return false
++		}
++	}
++	// optional payload expires_at
++	if exp, ok := ev.Payload["expires_at"].(string); ok && exp != "" {
++		if t, err := time.Parse(time.RFC3339, strings.Replace(exp, "Z", "+00:00", 1)); err == nil && now.After(t) {
++			return false
++		}
++	}
++
++	for _, rule := range cfg.Subscribe {
++		if rule.Topic != "" && rule.Topic != ev.Topic {
++			continue
++		}
++		if !matchFrom(rule.From, payloadString(ev.Payload, "from")) {
++			continue
++		}
++		if !matchTo(rule.To, payloadString(ev.Payload, "to")) {
++			continue
++		}
++		if len(rule.Initiative) > 0 {
++			ini := payloadString(ev.Payload, "initiative")
++			if !containsFold(rule.Initiative, ini) {
++				continue
++			}
++		}
++		return true
++	}
++	return false
++}
++
++func payloadString(p map[string]any, key string) string {
++	if p == nil {
++		return ""
++	}
++	v, ok := p[key]
++	if !ok || v == nil {
++		return ""
++	}
++	s, ok := v.(string)
++	if !ok {
++		return ""
++	}
++	return s
++}
++
++func matchFrom(allowed []string, from string) bool {
++	if len(allowed) == 0 {
++		return true
++	}
++	return containsFold(allowed, from)
++}
++
++// matchTo: event.to is for this worker if it is a broadcast, exact role match,
++// or a multi-target list containing one of our allowed names.
++// Note: "*", "all", "swarm" on the *event* are broadcasts (match any worker).
++// Putting those tokens in allowed does not mean "match every event".
++func matchTo(allowed []string, to string) bool {
++	if len(allowed) == 0 {
++		return true
++	}
++	toLower := strings.ToLower(strings.TrimSpace(to))
++	// broadcast destinations — any worker may wake
++	if toLower == "*" || toLower == "all" || toLower == "swarm" {
++		return true
++	}
++	parts := strings.Split(toLower, ",")
++	for i := range parts {
++		parts[i] = strings.TrimSpace(parts[i])
++	}
++	for _, a := range allowed {
++		a = strings.ToLower(strings.TrimSpace(a))
++		if a == "" || a == "*" || a == "all" {
++			// ignore magic tokens in allow-list; broadcasts handled above
++			continue
++		}
++		if a == toLower {
++			return true
++		}
++		for _, p := range parts {
++			if p == a {
++				return true
++			}
++		}
++	}
++	return false
++}
++
++func containsFold(list []string, v string) bool {
++	v = strings.ToLower(strings.TrimSpace(v))
++	for _, x := range list {
++		if strings.ToLower(strings.TrimSpace(x)) == v {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/go-core/internal/worker/filter_test.go b/go-core/internal/worker/filter_test.go
+new file mode 100644
+index 0000000..cd3a34f
+--- /dev/null
++++ b/go-core/internal/worker/filter_test.go
+@@ -0,0 +1,59 @@
++package worker
++
++import (
++	"testing"
++	"time"
++
++	"github.com/onicarps/agentbus-go/internal/store"
++)
++
++func TestMatchFromTo(t *testing.T) {
++	cfg := DefaultConfig()
++	now := time.Now().UTC()
++	ev := store.Event{
++		EventID:   1,
++		Topic:     "okf/handoff",
++		Timestamp: now.Format("2006-01-02T15:04:05Z"),
++		Payload: map[string]any{
++			"from":    "agy",
++			"to":      "grok",
++			"summary": "hi",
++		},
++	}
++	if !Match(cfg, ev, now) {
++		t.Fatal("expected match agy→grok")
++	}
++	ev.Payload["from"] = "hermes"
++	if Match(cfg, ev, now) {
++		t.Fatal("hermes should not match default from=[agy]")
++	}
++	ev.Payload["from"] = "agy"
++	ev.Payload["to"] = "hermes"
++	if Match(cfg, ev, now) {
++		t.Fatal("to=hermes should not match")
++	}
++	ev.Payload["to"] = "grok,hermes"
++	if !Match(cfg, ev, now) {
++		t.Fatal("multi-target should match grok substring")
++	}
++	ev.Payload["to"] = "swarm"
++	if !Match(cfg, ev, now) {
++		t.Fatal("swarm should match")
++	}
++}
++
++func TestMatchMaxAge(t *testing.T) {
++	cfg := DefaultConfig()
++	cfg.Dispatch.MaxEventAge = "1h"
++	now := time.Now().UTC()
++	old := now.Add(-2 * time.Hour)
++	ev := store.Event{
++		EventID:   2,
++		Topic:     "okf/handoff",
++		Timestamp: old.Format("2006-01-02T15:04:05Z"),
++		Payload:   map[string]any{"from": "agy", "to": "grok", "summary": "stale"},
++	}
++	if Match(cfg, ev, now) {
++		t.Fatal("stale event should not match")
++	}
++}
+diff --git a/go-core/internal/worker/lease.go b/go-core/internal/worker/lease.go
+new file mode 100644
+index 0000000..b17889d
+--- /dev/null
++++ b/go-core/internal/worker/lease.go
+@@ -0,0 +1,87 @@
++package worker
++
++import (
++	"database/sql"
++	"fmt"
++	"path/filepath"
++	"time"
++
++	"github.com/google/uuid"
++)
++
++// LeaseStore is a minimal local advisory lease table in events.db (Python parity).
++type LeaseStore struct {
++	db        *sql.DB
++	workspace string
++}
++
++func NewLeaseStore(db *sql.DB, workspace string) (*LeaseStore, error) {
++	ls := &LeaseStore{db: db, workspace: workspace}
++	_, err := db.Exec(`
++CREATE TABLE IF NOT EXISTS leases (
++  lease_id TEXT PRIMARY KEY,
++  resource TEXT NOT NULL UNIQUE,
++  owner_id TEXT NOT NULL,
++  acquired_at TEXT NOT NULL,
++  expires_at TEXT NOT NULL
++);
++CREATE INDEX IF NOT EXISTS idx_leases_resource ON leases(resource);
++CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at);
++`)
++	return ls, err
++}
++
++func (ls *LeaseStore) resourcePath(topic string, eventID int64) string {
++	// Path under workspace so it mirrors Python normalize_resource semantics.
++	return filepath.Join(ls.workspace, ".agentbus", "wake-locks", topic, fmt.Sprintf("%d", eventID))
++}
++
++func fmtUTC(t time.Time) string {
++	return t.UTC().Format("2006-01-02T15:04:05Z")
++}
++
++func (ls *LeaseStore) purge(now time.Time) {
++	_, _ = ls.db.Exec(`DELETE FROM leases WHERE expires_at <= ?`, fmtUTC(now))
++}
++
++// TryAcquire returns true if this owner holds the lease for the event.
++func (ls *LeaseStore) TryAcquire(topic string, eventID int64, owner string, ttlSec int) (bool, string, error) {
++	if ttlSec <= 0 {
++		ttlSec = 300
++	}
++	now := time.Now().UTC()
++	ls.purge(now)
++	res := ls.resourcePath(topic, eventID)
++	var curOwner, leaseID, exp string
++	err := ls.db.QueryRow(
++		`SELECT owner_id, lease_id, expires_at FROM leases WHERE resource = ?`, res,
++	).Scan(&curOwner, &leaseID, &exp)
++	if err == nil {
++		if curOwner == owner {
++			return true, leaseID, nil
++		}
++		return false, "", nil
++	}
++	if err != sql.ErrNoRows {
++		return false, "", err
++	}
++	id := uuid.NewString()
++	expires := now.Add(time.Duration(ttlSec) * time.Second)
++	_, err = ls.db.Exec(
++		`INSERT INTO leases (lease_id, resource, owner_id, acquired_at, expires_at) VALUES (?,?,?,?,?)`,
++		id, res, owner, fmtUTC(now), fmtUTC(expires),
++	)
++	if err != nil {
++		// race: another worker won
++		return false, "", nil
++	}
++	return true, id, nil
++}
++
++func (ls *LeaseStore) Release(topic string, eventID int64, owner, leaseID string) {
++	res := ls.resourcePath(topic, eventID)
++	_, _ = ls.db.Exec(
++		`DELETE FROM leases WHERE resource = ? AND lease_id = ? AND owner_id = ?`,
++		res, leaseID, owner,
++	)
++}
+diff --git a/go-core/internal/worker/service.go b/go-core/internal/worker/service.go
+new file mode 100644
+index 0000000..b251887
+--- /dev/null
++++ b/go-core/internal/worker/service.go
+@@ -0,0 +1,378 @@
++package worker
++
++import (
++	"encoding/json"
++	"fmt"
++	"log"
++	"os"
++	"path/filepath"
++	"sync"
++	"time"
++
++	"github.com/fsnotify/fsnotify"
++	"github.com/onicarps/agentbus-go/internal/store"
++)
++
++// Service is the non-LLM wake loop.
++type Service struct {
++	cfg       *Config
++	workspace string
++	store     *store.EventStore
++	leases    *LeaseStore
++	mu        sync.Mutex
++	state     State
++	stopCh    chan struct{}
++	wakeCh    chan struct{}
++}
++
++func NewService(workspace string, cfg *Config) (*Service, error) {
++	es, err := store.Open(workspace)
++	if err != nil {
++		return nil, err
++	}
++	ls, err := NewLeaseStore(es.DB(), workspace)
++	if err != nil {
++		_ = es.Close()
++		return nil, err
++	}
++	s := &Service{
++		cfg:       cfg,
++		workspace: workspace,
++		store:     es,
++		leases:    ls,
++		stopCh:    make(chan struct{}),
++		wakeCh:    make(chan struct{}, 1),
++	}
++	_ = s.loadState()
++	return s, nil
++}
++
++func (s *Service) Close() error {
++	select {
++	case <-s.stopCh:
++	default:
++		close(s.stopCh)
++	}
++	return s.store.Close()
++}
++
++func (s *Service) cursorPath() string {
++	return ResolvePath(s.workspace, s.cfg.CursorPath)
++}
++
++func (s *Service) statePath() string {
++	return ResolvePath(s.workspace, s.cfg.StatePath)
++}
++
++func (s *Service) loadState() error {
++	b, err := os.ReadFile(s.statePath())
++	if err != nil {
++		if os.IsNotExist(err) {
++			return nil
++		}
++		return err
++	}
++	return json.Unmarshal(b, &s.state)
++}
++
++func (s *Service) saveState() error {
++	path := s.statePath()
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		return err
++	}
++	b, err := json.MarshalIndent(s.state, "", "  ")
++	if err != nil {
++		return err
++	}
++	tmp := path + ".tmp"
++	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
++		return err
++	}
++	return os.Rename(tmp, path)
++}
++
++// Sleep pauses dispatch; cursor held (not advanced).
++func (s *Service) Sleep() error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	s.state.Sleeping = true
++	now := time.Now().UTC()
++	s.state.SleptAt = &now
++	return s.saveState()
++}
++
++// Wake resumes. skipBacklog=true fast-forwards cursor (PRD §14.1.1 default).
++func (s *Service) Wake(skipBacklog bool) error {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if skipBacklog {
++		maxID, err := s.store.MaxEventID()
++		if err != nil {
++			return err
++		}
++		if err := SaveCursor(s.cursorPath(), maxID); err != nil {
++			return err
++		}
++		s.state.LastEventID = maxID
++	}
++	s.state.Sleeping = false
++	s.state.SleptAt = nil
++	if err := s.saveState(); err != nil {
++		return err
++	}
++	s.kick()
++	return nil
++}
++
++func (s *Service) kick() {
++	select {
++	case s.wakeCh <- struct{}{}:
++	default:
++	}
++}
++
++// StatusJSON returns operator-facing status.
++func (s *Service) StatusJSON() ([]byte, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	cur, _ := LoadCursor(s.cursorPath())
++	maxID, _ := s.store.MaxEventID()
++	out := map[string]any{
++		"worker_id":            s.cfg.WorkerID,
++		"sleeping":             s.state.Sleeping,
++		"cursor":               cur,
++		"max_event_id":         maxID,
++		"last_event_id":        s.state.LastEventID,
++		"matches_total":        s.state.MatchesTotal,
++		"dispatches_total":     s.state.Dispatches,
++		"llm_invocations_hour": 0,
++		"engine":               "go",
++	}
++	return json.MarshalIndent(out, "", "  ")
++}
++
++// Once drains new events once (CI/debug).
++func (s *Service) Once() (int, error) {
++	return s.drain()
++}
++
++func (s *Service) drain() (int, error) {
++	s.mu.Lock()
++	sleeping := s.state.Sleeping
++	s.mu.Unlock()
++	if sleeping {
++		return 0, nil
++	}
++
++	cur, err := LoadCursor(s.cursorPath())
++	if err != nil {
++		return 0, err
++	}
++	now := time.Now().UTC()
++	matched := 0
++
++	topics := map[string]struct{}{}
++	for _, r := range s.cfg.Subscribe {
++		topics[r.Topic] = struct{}{}
++	}
++	// track highest processed for non-match advance
++	high := cur
++	for topic := range topics {
++		// page until empty
++		since := cur
++		for {
++			res, err := s.store.Poll(topic, since, 100)
++			if err != nil {
++				return matched, err
++			}
++			if len(res.Events) == 0 {
++				break
++			}
++			for _, ev := range res.Events {
++				if ev.EventID > high {
++					high = ev.EventID
++				}
++				if !Match(s.cfg, ev, now) {
++					if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
++						return matched, err
++					}
++					continue
++				}
++				matched++
++				s.mu.Lock()
++				s.state.MatchesTotal++
++				t := now
++				s.state.LastMatchAt = &t
++				s.mu.Unlock()
++
++				ok, leaseID, err := s.leases.TryAcquire(ev.Topic, ev.EventID, s.cfg.WorkerID, s.cfg.LeaseTTLSec)
++				if err != nil {
++					return matched, err
++				}
++				if !ok {
++					if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
++						return matched, err
++					}
++					continue
++				}
++
++				if err := Dispatch(s.cfg, s.workspace, ev); err != nil {
++					s.leases.Release(ev.Topic, ev.EventID, s.cfg.WorkerID, leaseID)
++					return matched, err
++				}
++				s.leases.Release(ev.Topic, ev.EventID, s.cfg.WorkerID, leaseID)
++				if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
++					return matched, err
++				}
++				s.mu.Lock()
++				s.state.Dispatches++
++				s.state.LastEventID = ev.EventID
++				_ = s.saveState()
++				s.mu.Unlock()
++			}
++			since = res.LatestID
++			if !res.HasMore {
++				break
++			}
++		}
++	}
++	return matched, nil
++}
++
++// Run blocks until Close (fsnotify + poll fallback).
++func (s *Service) Run() error {
++	mode := s.cfg.Watch.Mode
++	if mode == "" || mode == "auto" {
++		mode = "fsnotify"
++	}
++
++	var (
++		watcher  *fsnotify.Watcher
++		fsEvents <-chan fsnotify.Event
++		fsErrors <-chan error
++	)
++	if mode == "fsnotify" {
++		w, err := fsnotify.NewWatcher()
++		if err != nil {
++			log.Printf("fsnotify unavailable, falling back to poll: %v", err)
++			mode = "poll"
++		} else {
++			watcher = w
++			defer watcher.Close()
++			fsEvents = watcher.Events
++			fsErrors = watcher.Errors
++			seen := map[string]struct{}{}
++			for _, p := range s.cfg.Watch.Paths {
++				full := ResolvePath(s.workspace, p)
++				_ = os.MkdirAll(filepath.Dir(full), 0o755)
++				dir := filepath.Dir(full)
++				if _, ok := seen[dir]; ok {
++					continue
++				}
++				seen[dir] = struct{}{}
++				if err := watcher.Add(dir); err != nil {
++					log.Printf("watch add %s: %v", dir, err)
++				}
++			}
++		}
++	}
++
++	pollEvery := time.Duration(s.cfg.Watch.PollFallbackMS) * time.Millisecond
++	ticker := time.NewTicker(pollEvery)
++	defer ticker.Stop()
++
++	var idleTimer *time.Timer
++	var idleC <-chan time.Time
++	if s.cfg.Budget.IdleSleepAfterMinutes != nil && *s.cfg.Budget.IdleSleepAfterMinutes > 0 {
++		d := time.Duration(*s.cfg.Budget.IdleSleepAfterMinutes) * time.Minute
++		idleTimer = time.NewTimer(d)
++		idleC = idleTimer.C
++		defer idleTimer.Stop()
++	}
++
++	resetIdle := func() {
++		if idleTimer == nil || s.cfg.Budget.IdleSleepAfterMinutes == nil {
++			return
++		}
++		if !idleTimer.Stop() {
++			select {
++			case <-idleTimer.C:
++			default:
++			}
++		}
++		idleTimer.Reset(time.Duration(*s.cfg.Budget.IdleSleepAfterMinutes) * time.Minute)
++	}
++
++	if n, err := s.drain(); err != nil {
++		log.Printf("drain: %v", err)
++	} else if n > 0 {
++		resetIdle()
++	}
++
++	debounce := time.NewTimer(0)
++	if !debounce.Stop() {
++		<-debounce.C
++	}
++	pendingFS := false
++
++	for {
++		select {
++		case <-s.stopCh:
++			return nil
++		case <-s.wakeCh:
++			if n, err := s.drain(); err != nil {
++				log.Printf("drain: %v", err)
++			} else if n > 0 {
++				resetIdle()
++			}
++		case <-ticker.C:
++			if n, err := s.drain(); err != nil {
++				log.Printf("drain: %v", err)
++			} else if n > 0 {
++				resetIdle()
++			}
++		case _, ok := <-fsEvents:
++			if !ok {
++				fsEvents = nil
++				continue
++			}
++			pendingFS = true
++			debounce.Reset(80 * time.Millisecond)
++		case <-debounce.C:
++			if pendingFS {
++				pendingFS = false
++				if n, err := s.drain(); err != nil {
++					log.Printf("drain: %v", err)
++				} else if n > 0 {
++					resetIdle()
++				}
++			}
++		case err, ok := <-fsErrors:
++			if !ok {
++				fsErrors = nil
++				continue
++			}
++			log.Printf("fsnotify: %v", err)
++		case <-idleC:
++			s.mu.Lock()
++			already := s.state.Sleeping
++			s.mu.Unlock()
++			if !already {
++				log.Printf("idle sleep after %dm", *s.cfg.Budget.IdleSleepAfterMinutes)
++				maxID, _ := s.store.MaxEventID()
++				_ = SaveCursor(s.cursorPath(), maxID)
++				_ = s.Sleep()
++			}
++			resetIdle()
++		}
++	}
++}
++
++// EnsurePID writes a pid file for the worker.
++func EnsurePID(workspace, workerID string) (string, error) {
++	path := filepath.Join(workspace, ".agentbus", "worker-"+workerID+".pid")
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		return "", err
++	}
++	return path, os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644)
++}
+diff --git a/src/agentbus/cli.py b/src/agentbus/cli.py
+index f35d558..3a1937a 100644
+--- a/src/agentbus/cli.py
++++ b/src/agentbus/cli.py
+@@ -80,6 +80,83 @@ def _auth(ws: Path, token: str | None) -> None:
+         raise click.ClickException(str(exc)) from exc
+ 
+ 
++def _resolve_go_serve_binary() -> Path:
++    """Locate agentbus-go-serve for --engine go (Strangler spike)."""
++    env = os.environ.get("AGENTBUS_GO_SERVE")
++    if env:
++        p = Path(env).expanduser()
++        if p.is_file():
++            return p
++        raise click.ClickException(f"AGENTBUS_GO_SERVE not found: {env}")
++    # Repo layout: <repo>/go-core/bin/agentbus-go-serve
++    here = Path(__file__).resolve()
++    candidates = [
++        here.parents[2] / "go-core" / "bin" / "agentbus-go-serve",
++        Path.cwd() / "go-core" / "bin" / "agentbus-go-serve",
++        Path.cwd() / "bin" / "agentbus-go-serve",
++    ]
++    which = os.environ.get("PATH", "")
++    for part in which.split(os.pathsep):
++        if part:
++            candidates.append(Path(part) / "agentbus-go-serve")
++    for c in candidates:
++        if c.is_file() and os.access(c, os.X_OK):
++            return c
++    raise click.ClickException(
++        "Go engine binary not found. Build with: "
++        "(cd go-core && make build) or set AGENTBUS_GO_SERVE"
++    )
++
++
++def _exec_go_serve(workspace: Path) -> None:
++    """Replace process with Go MCP stdio server for workspace."""
++    binary = _resolve_go_serve_binary()
++    env = os.environ.copy()
++    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
++    os.execve(str(binary), [str(binary)], env)
++
++
++def _resolve_go_worker_binary() -> Path:
++    """Locate agentbus-go-worker (wake plane PRD v0.12)."""
++    env = os.environ.get("AGENTBUS_GO_WORKER")
++    if env:
++        p = Path(env).expanduser()
++        if p.is_file():
++            return p
++        raise click.ClickException(f"AGENTBUS_GO_WORKER not found: {env}")
++    here = Path(__file__).resolve()
++    candidates = [
++        here.parents[2] / "go-core" / "bin" / "agentbus-go-worker",
++        Path.cwd() / "go-core" / "bin" / "agentbus-go-worker",
++        Path.cwd() / "bin" / "agentbus-go-worker",
++    ]
++    for part in os.environ.get("PATH", "").split(os.pathsep):
++        if part:
++            candidates.append(Path(part) / "agentbus-go-worker")
++    for c in candidates:
++        if c.is_file() and os.access(c, os.X_OK):
++            return c
++    raise click.ClickException(
++        "Go worker binary not found. Build with: "
++        "(cd go-core && make build) or set AGENTBUS_GO_WORKER"
++    )
++
++
++def _run_go_worker(workspace: Path, *args: str) -> None:
++    """Run agentbus-go-worker as subprocess (inherit stdio) or exec for long-run."""
++    import subprocess
++
++    binary = _resolve_go_worker_binary()
++    env = os.environ.copy()
++    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
++    cmd = [str(binary), "--workspace", str(workspace.resolve()), *args]
++    # long-running "up" replaces process
++    if args and args[0] == "--cmd" and "up" in args:
++        os.execve(str(binary), cmd, env)
++    proc = subprocess.run(cmd, env=env)
++    raise SystemExit(proc.returncode)
++
++
+ def _configure_cli_logging(*, quiet: bool) -> None:
+     """Keep MCP stdout clean: logs always go to stderr; quiet raises threshold."""
+     level = logging.CRITICAL if quiet else logging.WARNING
+@@ -164,6 +241,13 @@ def main(ctx: click.Context, quiet: bool) -> None:
+     envvar="AGENTBUS_MCPSAFE_LOCK",
+     help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
+ )
++@click.option(
++    "--engine",
++    type=click.Choice(["python", "go"], case_sensitive=False),
++    default=None,
++    envvar="AGENTBUS_ENGINE",
++    help="Serve engine: python (default) or go (Strangler sidecar spike)",
++)
+ def mcp_serve(
+     workspace: str | None,
+     retention_days: int,
+@@ -172,11 +256,15 @@ def mcp_serve(
+     wiretap_log: str | None,
+     enable_mcpsafe: bool,
+     mcpsafe_lock: str | None,
++    engine: str | None,
+ ) -> None:
+     """MCP entrypoint for IDE configs (ensures token, then serve)."""
+     ws = _cli_workspace(workspace)
+     ensure_ephemeral_token(ws, rotate=rotate_token)
+     os.environ["AGENTBUS_TOKEN"] = read_workspace_token(ws) or ""
++    if (engine or "python").lower() == "go":
++        _exec_go_serve(ws)
++        return
+     run_stdio(
+         ws,
+         retention_days=retention_days,
+@@ -216,6 +304,13 @@ def mcp_serve(
+     envvar="AGENTBUS_MCPSAFE_LOCK",
+     help="Path to .mcpsafe.lock (default: <workspace>/.mcpsafe.lock)",
+ )
++@click.option(
++    "--engine",
++    type=click.Choice(["python", "go"], case_sensitive=False),
++    default=None,
++    envvar="AGENTBUS_ENGINE",
++    help="Serve engine: python (default) or go (Strangler sidecar spike)",
++)
+ def serve(
+     workspace: str | None,
+     retention_days: int,
+@@ -224,10 +319,16 @@ def serve(
+     wiretap_log: str | None,
+     enable_mcpsafe: bool,
+     mcpsafe_lock: str | None,
++    engine: str | None,
+ ) -> None:
+     """Run MCP server on stdio."""
++    ws = _cli_workspace(workspace)
++    if (engine or "python").lower() == "go":
++        ensure_ephemeral_token(ws, rotate=rotate_token)
++        _exec_go_serve(ws)
++        return
+     run_stdio(
+-        _cli_workspace(workspace),
++        ws,
+         retention_days=retention_days,
+         rotate_token=rotate_token,
+         wiretap=wiretap,
