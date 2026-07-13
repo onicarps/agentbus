@@ -8,6 +8,13 @@
     "dist",
     "README.md"
   ],
+  "optionalDependencies": {
+    "@agentbus/go-worker-linux-x64": "0.11.3",
+    "@agentbus/go-worker-linux-arm64": "0.11.3",
+    "@agentbus/go-worker-darwin-x64": "0.11.3",
+    "@agentbus/go-worker-darwin-arm64": "0.11.3",
+    "@agentbus/go-worker-win32-x64": "0.11.3"
+  },
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",

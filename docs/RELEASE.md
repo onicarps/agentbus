@@ -4,11 +4,30 @@ Tag-driven releases via `.github/workflows/release.yml` (`push` tags `v*`).
 
 ## What the workflow does
 
+**Strategy (Agy #625):** ship Go helpers as **platform-specific wheels** (Ruff-style)
+and **npm optionalDependencies** (esbuild-style). **No runtime lazy-downloads.**
+
 | Job | Artifact | Auth |
 |-----|----------|------|
-| `build` | sdist + wheel + GitHub Release assets | `contents: write` |
-| `publish-pypi` | `okf-agentbus` → PyPI | OIDC Trusted Publisher (`environment: pypi`) |
-| `publish-npm` | `@agentbus/agentbus-client` → npm | OIDC Trusted Publisher (`environment: npm`) |
+| `build-go` (matrix) | Cross-compiled `agentbus-go-worker` + `agentbus-go-serve` | — |
+| `build-python` (matrix) | Platform wheels with `agentbus/bin/<plat>/…` | — |
+| `build-sdist` | Source-only sdist (includes `go-core/`) | — |
+| `collect-python` | GitHub Release assets | `contents: write` |
+| `publish-pypi` | all wheels + sdist → PyPI | OIDC (`environment: pypi`) |
+| `publish-npm-platforms` | `@agentbus/go-worker-<plat>` packages | OIDC (`environment: npm`) |
+| `publish-npm` | `@agentbus/agentbus-client` + optionalDeps | OIDC (`environment: npm`) |
+
+### Platforms
+
+| Key | GOOS/GOARCH | Wheel tag (approx) |
+|-----|-------------|--------------------|
+| `linux-x64` | linux/amd64 | manylinux2014_x86_64 |
+| `linux-arm64` | linux/arm64 | manylinux2014_aarch64 |
+| `darwin-x64` | darwin/amd64 | macosx_11_0_x86_64 |
+| `darwin-arm64` | darwin/arm64 | macosx_11_0_arm64 |
+| `win32-x64` | windows/amd64 | win_amd64 |
+
+Local rebuild: `./scripts/embed_go_binaries.sh` then `python -m build --wheel`.
 
 ## One-time: PyPI Trusted Publisher
 

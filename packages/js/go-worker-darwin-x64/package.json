@@ -1,0 +1,24 @@
+{
+  "name": "@agentbus/go-worker-darwin-x64",
+  "version": "0.11.3",
+  "description": "Prebuilt agentbus-go-worker + agentbus-go-serve for darwin-x64 (optionalDependency of @agentbus/agentbus-client)",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/**"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/onicarps/agentbus.git",
+    "directory": "packages/js/go-worker-darwin-x64"
+  }
+}
