@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## [0.12.1] - 2026-07-13
+
+### Fixed — fat wheels actually embed Go binaries
+
+- Hatch wheel build sets `ignore-vcs = true` so CI-injected `agentbus/bin/<plat>/*` are not stripped by `.gitignore`
+- 0.12.0 wheels on PyPI were ~70KB pure-Python; 0.12.1 rebuilds platform wheels with full binaries (~5–6MB)
+
+### Notes
+
+- npm `@agentbus/go-worker-*` first publish still needs npm Trusted Publisher / package create for each new name (E404 on 0.12.0)
+
 ## [0.12.0] - 2026-07-13
 
 ### Added — Wake plane + fat Go binaries

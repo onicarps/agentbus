@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okf-agentbus"
-version = "0.12.0"
+version = "0.12.1"
 description = "SQLite-backed MCP event bus and control surface for heterogeneous agent orchestration."
 readme = "README.md"
 license = { text = "MIT" }
@@ -45,6 +45,8 @@ agentbus = "agentbus.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentbus"]
+# Binaries are gitignored (large); CI injects them — must not respect VCS ignore for wheel content.
+ignore-vcs = true
 # Platform wheels: CI places Go binaries under src/agentbus/bin/<plat>/ before build.
 
 [tool.hatch.build.targets.sdist]
