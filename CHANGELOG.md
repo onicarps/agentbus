@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [0.12.0] - 2026-07-13
+
+### Added — Wake plane + fat Go binaries
+
+- **agentbus-go-worker** wake plane (non-LLM): filter, fsnotify, WAKE.json, sleep/wake, role leases
+- **agentbus worker** CLI wraps Go binary
+- **Platform wheels** (Ruff-style): cross-compile matrix embeds `agentbus-go-worker` + `agentbus-go-serve` per platform
+- **npm optionalDependencies** (esbuild-style): `@agentbus/go-worker-<plat>` packages — no runtime downloads
+- Docs: `docs/WAKE.md`, release packaging notes
+
+### Fixed
+
+- Factory-droid CR: poison-pill cursor advance, role-scoped leases, success lease TTL tombstone
+
 ## [0.11.3] - 2026-07-12
 
 ### Added — Release hygiene + mcpsafe

@@ -1,6 +1,6 @@
 {
   "name": "@agentbus/agentbus-client",
-  "version": "0.11.3",
+  "version": "0.12.0",
   "description": "TypeScript/Node EventEmitter client for AgentBus (MCP + fs.watch poll)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -9,11 +9,11 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@agentbus/go-worker-linux-x64": "0.11.3",
-    "@agentbus/go-worker-linux-arm64": "0.11.3",
-    "@agentbus/go-worker-darwin-x64": "0.11.3",
-    "@agentbus/go-worker-darwin-arm64": "0.11.3",
-    "@agentbus/go-worker-win32-x64": "0.11.3"
+    "@agentbus/go-worker-linux-x64": "0.12.0",
+    "@agentbus/go-worker-linux-arm64": "0.12.0",
+    "@agentbus/go-worker-darwin-x64": "0.12.0",
+    "@agentbus/go-worker-darwin-arm64": "0.12.0",
+    "@agentbus/go-worker-win32-x64": "0.12.0"
   },
   "scripts": {
     "build": "tsc",
