@@ -47,11 +47,14 @@ from agentbus.swarm import (
 )
 
 def _cli_workspace(workspace: str | None) -> Path:
+    from agentbus.workspace_guard import assert_workspace_supported
+
     if workspace:
         return resolve_workspace(workspace)
     env = os.environ.get("AGENTBUS_WORKSPACE")
     if env:
-        return Path(env).resolve()
+        # Env may point at an absolute tree that is not a git root; still guard FS.
+        return assert_workspace_supported(Path(env).expanduser())
     return resolve_workspace()
 
 
@@ -1295,6 +1298,45 @@ def worker_status(workspace: str | None) -> None:
 def worker_init(workspace: str | None, to: str) -> None:
     """Write .agentbus/worker.yaml implementer preset."""
     _run_go_worker(_cli_workspace(workspace), "--cmd", "init", "--to", to)
+
+
+@main.command("wake-ingress")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--runtime",
+    type=click.Choice(["hermes", "factory"], case_sensitive=False),
+    required=True,
+    help="Queue namespace + default port (hermes=18787, factory=18788)",
+)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=None, help="Override default port")
+@click.option(
+    "--token",
+    default=None,
+    envvar="AGENTBUS_WEBHOOK_TOKEN",
+    help="Shared secret (optional; warns if empty)",
+)
+def wake_ingress_cmd(
+    workspace: str | None,
+    runtime: str,
+    host: str,
+    port: int | None,
+    token: str | None,
+) -> None:
+    """Mode A localhost ingress: POST /agentbus/wake → JSONL queue (no LLM)."""
+    from agentbus.wake_ingress import run_ingress
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    try:
+        run_ingress(
+            _cli_workspace(workspace),
+            runtime=runtime.lower(),
+            host=host,
+            port=port,
+            token=token,
+        )
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

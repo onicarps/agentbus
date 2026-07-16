@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	wsguard "github.com/onicarps/agentbus-go/internal/workspace"
 	_ "modernc.org/sqlite"
 )
 
@@ -77,6 +78,9 @@ type EventStore struct {
 func Open(workspace string) (*EventStore, error) {
 	ws, err := filepath.Abs(workspace)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := wsguard.AssertSupported(ws); err != nil {
 		return nil, err
 	}
 	dir := filepath.Join(ws, ".agentbus")

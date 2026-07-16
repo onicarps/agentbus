@@ -23,9 +23,11 @@ type Config struct {
 	Budget      BudgetConfig   `yaml:"budget"`
 	Dispatch    DispatchConfig `yaml:"dispatch"`
 	Dedupe      DedupeConfig   `yaml:"dedupe"`
-	LeaseTTLSec int            `yaml:"lease_ttl_seconds"`
-	WakeMode    string         `yaml:"wake_mode"`
-	WebhookUrl  string         `yaml:"webhook_url"`
+	LeaseTTLSec   int    `yaml:"lease_ttl_seconds"`
+	WakeMode      string `yaml:"wake_mode"`
+	WebhookUrl    string `yaml:"webhook_url"`
+	// WebhookToken optional shared secret → X-AgentBus-Token + Authorization Bearer.
+	WebhookToken  string `yaml:"webhook_token"`
 }
 
 type SubscribeRule struct {
@@ -73,12 +75,14 @@ type DedupeConfig struct {
 
 // State is persisted sleep/run state.
 type State struct {
-	Sleeping     bool      `json:"sleeping"`
-	SleptAt      *time.Time `json:"slept_at,omitempty"`
-	LastMatchAt  *time.Time `json:"last_match_at,omitempty"`
-	LastEventID  int64     `json:"last_event_id"`
-	MatchesTotal int64     `json:"matches_total"`
-	Dispatches   int64     `json:"dispatches_total"`
+	Sleeping           bool       `json:"sleeping"`
+	SleptAt            *time.Time `json:"slept_at,omitempty"`
+	LastMatchAt        *time.Time `json:"last_match_at,omitempty"`
+	LastEventID        int64      `json:"last_event_id"`
+	MatchesTotal       int64      `json:"matches_total"`
+	Dispatches         int64      `json:"dispatches_total"`
+	WebhookSuccessTotal int64     `json:"webhook_success_total"`
+	WebhookFailTotal   int64      `json:"webhook_fail_total"`
 }
 
 // DefaultConfig returns implementer-oriented defaults.

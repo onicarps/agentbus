@@ -7,6 +7,9 @@ htmlcov/
 .agentbus/
 dist/
 go-core/bin/
+# Local webhook dogfood artifacts (mock_webhook.py)
+webhook_received.json
+webhook_received.jsonl
 # Platform Go binaries (injected by CI for wheels; never commit)
 src/agentbus/bin/**
 !src/agentbus/bin/.gitkeep

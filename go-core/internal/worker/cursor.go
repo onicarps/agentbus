@@ -26,8 +26,20 @@ func SaveCursor(path string, id int64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.FormatInt(id, 10)+"\n"), 0o644); err != nil {
+	// Unique temp name avoids races when multiple workers write the same cursor.
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	payload := []byte(strconv.FormatInt(id, 10) + "\n")
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)

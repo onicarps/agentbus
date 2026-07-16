@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/onicarps/agentbus-go/internal/worker"
+	"github.com/onicarps/agentbus-go/internal/workspace"
 )
 
 func main() {
@@ -25,6 +26,10 @@ func main() {
 		*ws = cwd
 	}
 	abs, err := filepath.Abs(*ws)
+	if err != nil {
+		fail(err)
+	}
+	abs, err = workspace.AssertSupported(abs)
 	if err != nil {
 		fail(err)
 	}

@@ -77,7 +77,9 @@ class Event:
 
 class EventStore:
     def __init__(self, workspace: Path, retention_days: int = 7) -> None:
-        self.workspace = workspace.resolve()
+        from agentbus.workspace_guard import assert_workspace_supported
+
+        self.workspace = assert_workspace_supported(workspace)
         self.retention_days = retention_days
         self._mcpsafe: PolicyEnforcer | None = None
         db_dir = self.workspace / ".agentbus"

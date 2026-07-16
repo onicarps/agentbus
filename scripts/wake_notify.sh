@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Bridge WAKE.grok.json → stdout for Grok Build monitor / session hooks.
-# Usage: monitor this script, or: inotifywait -m WAKE.grok.json | ...
+# Zero-LLM session bridge: print one line when WAKE.<agent>.json advances.
+# Usage:
+#   ./scripts/wake_notify.sh grok
+#   ./scripts/wake_notify.sh agy --once
+#   AGENTBUS_WORKSPACE=/home/oni/okf_agent_workspace ./scripts/wake_notify.sh hermes
 set -euo pipefail
+
+AGENT="${1:-grok}"
+shift || true
 WS="${AGENTBUS_WORKSPACE:-/home/oni/okf_agent_workspace}"
-# Prefer per-agent wake file; fall back to legacy WAKE.json
-if [[ -n "${AGENTBUS_WAKE_FILE:-}" ]]; then
-  WAKE="${AGENTBUS_WAKE_FILE}"
-elif [[ -f "${WS}/.agentbus/WAKE.grok.json" ]]; then
-  WAKE="${WS}/.agentbus/WAKE.grok.json"
-else
+WAKE="${AGENTBUS_WAKE_FILE:-${WS}/.agentbus/WAKE.${AGENT}.json}"
+# Fallback legacy single file for implementer-only setups
+if [[ ! -f "$WAKE" && -f "${WS}/.agentbus/WAKE.json" && "$AGENT" == "grok" ]]; then
   WAKE="${WS}/.agentbus/WAKE.json"
 fi
-CURSOR="${WS}/.agentbus/grok_wake_notify.cursor"
+CURSOR="${WS}/.agentbus/wake_notify.${AGENT}.cursor"
 
 last=0
 if [[ -f "$CURSOR" ]]; then
@@ -20,16 +23,16 @@ fi
 
 emit() {
   if [[ ! -f "$WAKE" ]]; then
-    return
+    return 0
   fi
   eid=$(python3 -c "import json;print(json.load(open('$WAKE')).get('event_id',0))" 2>/dev/null || echo 0)
   if [[ -z "$eid" || "$eid" -le "$last" ]]; then
-    return
+    return 0
   fi
   summary=$(python3 -c "import json;p=json.load(open('$WAKE'));print((p.get('payload')or{}).get('summary',''))" 2>/dev/null | tr '\n' ' ')
   fr=$(python3 -c "import json;p=json.load(open('$WAKE'));print((p.get('payload')or{}).get('from',''))" 2>/dev/null)
   to=$(python3 -c "import json;p=json.load(open('$WAKE'));print((p.get('payload')or{}).get('to',''))" 2>/dev/null)
-  echo "WAKE_TASK event_id=${eid} from=${fr} to=${to} summary=${summary}"
+  echo "WAKE_TASK agent=${AGENT} event_id=${eid} from=${fr} to=${to} summary=${summary}"
   echo "$eid" > "$CURSOR"
   last=$eid
 }
@@ -41,5 +44,5 @@ fi
 
 while true; do
   emit
-  sleep "${GROK_WAKE_POLL_SEC:-2}"
+  sleep "${AGENTBUS_WAKE_POLL_SEC:-2}"
 done

@@ -54,6 +54,8 @@ KNOWN_TOPICS: dict[str, dict] = {
             "from": {"type": "string", "pattern": r"^[a-z][a-z0-9_-]*$"},
             "to": {"type": "string", "pattern": r"^[a-z][a-z0-9_*,*-]+$"},
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+            # Reply/ack convention (bus field causation_id on publish, not payload):
+            # set causation_id=<wake event_id> when acknowledging a handoff.
             "links": {
                 "type": "array",
                 "items": {"type": "string"},

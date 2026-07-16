@@ -36,21 +36,30 @@ class InitResult:
 
 
 def resolve_workspace(path: str | Path | None = None) -> Path:
-    """Resolve workspace root: walk up to git root or .agentbus from path or cwd."""
+    """Resolve workspace root: walk up to git root or .agentbus from path or cwd.
+
+    Enforces native-FS constraint (rejects WSL DrvFS ``/mnt/c`` etc.).
+    """
+    from agentbus.workspace_guard import assert_workspace_supported
+
     start = Path(path).expanduser().resolve() if path else Path.cwd().resolve()
     if not start.is_dir():
         raise ValueError(f"Workspace not found: {start}")
+    resolved = start
     for candidate in [start, *start.parents]:
         if (candidate / ".git").exists():
-            return candidate
+            resolved = candidate
+            break
         if (candidate / ".agentbus").exists():
             marker = candidate / ".agentbus" / "workspace"
             if marker.exists():
                 text = marker.read_text(encoding="utf-8").strip()
                 if text:
-                    return Path(text).resolve()
-            return candidate
-    return start
+                    resolved = Path(text).resolve()
+                    break
+            resolved = candidate
+            break
+    return assert_workspace_supported(resolved)
 
 
 def resolve_mcp_command() -> list[str]:

@@ -138,15 +138,17 @@ func (s *Service) StatusJSON() ([]byte, error) {
 	cur, _ := LoadCursor(s.cursorPath())
 	maxID, _ := s.store.MaxEventID()
 	out := map[string]any{
-		"worker_id":            s.cfg.WorkerID,
-		"sleeping":             s.state.Sleeping,
-		"cursor":               cur,
-		"max_event_id":         maxID,
-		"last_event_id":        s.state.LastEventID,
-		"matches_total":        s.state.MatchesTotal,
-		"dispatches_total":     s.state.Dispatches,
-		"llm_invocations_hour": 0,
-		"engine":               "go",
+		"worker_id":             s.cfg.WorkerID,
+		"sleeping":              s.state.Sleeping,
+		"cursor":                cur,
+		"max_event_id":          maxID,
+		"last_event_id":         s.state.LastEventID,
+		"matches_total":         s.state.MatchesTotal,
+		"dispatches_total":      s.state.Dispatches,
+		"webhook_success_total": s.state.WebhookSuccessTotal,
+		"webhook_fail_total":    s.state.WebhookFailTotal,
+		"llm_invocations_hour":  0,
+		"engine":                "go",
 	}
 	return json.MarshalIndent(out, "", "  ")
 }
@@ -224,13 +226,18 @@ func (s *Service) drain() (int, error) {
 				// Dispatch failures are non-fatal by default (PRD on_task):
 				// log, advance cursor, keep lease as short tombstone (no early release
 				// on success — factory-droid CR #1 poison-pill + #3 crash window).
-				if err := Dispatch(s.cfg, s.workspace, ev); err != nil {
+				dres, err := Dispatch(s.cfg, s.workspace, ev)
+				if err != nil {
 					log.Printf("dispatch event_id=%d: %v (advancing cursor)", ev.EventID, err)
 					if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {
 						return matched, err
 					}
-					// Do not Release on failure either if we advanced — optional release
-					// only wastes a tombstone; leave TTL to expire.
+					s.mu.Lock()
+					if dres.WebhookAttempted && !dres.WebhookOK {
+						s.state.WebhookFailTotal++
+						_ = s.saveState()
+					}
+					s.mu.Unlock()
 					_ = leaseID
 					continue
 				}
@@ -241,6 +248,13 @@ func (s *Service) drain() (int, error) {
 				s.mu.Lock()
 				s.state.Dispatches++
 				s.state.LastEventID = ev.EventID
+				if dres.WebhookAttempted {
+					if dres.WebhookOK {
+						s.state.WebhookSuccessTotal++
+					} else {
+						s.state.WebhookFailTotal++
+					}
+				}
 				_ = s.saveState()
 				s.mu.Unlock()
 			}
@@ -291,9 +305,25 @@ func (s *Service) Run() error {
 		}
 	}
 
+	// Defensive poll loop: time.Sleep + unbuffered signal (not time.Ticker).
+	// Unbuffered send paces ticks after drain completes; avoids dropped Ticker
+	// ticks under slow drain. Complements fsnotify (which may miss events on
+	// some hosts). Not a substitute for session-bridge / reason-plane attention.
 	pollEvery := time.Duration(s.cfg.Watch.PollFallbackMS) * time.Millisecond
-	ticker := time.NewTicker(pollEvery)
-	defer ticker.Stop()
+	if pollEvery <= 0 {
+		pollEvery = 1500 * time.Millisecond
+	}
+	pollCh := make(chan struct{})
+	go func() {
+		for {
+			time.Sleep(pollEvery)
+			select {
+			case pollCh <- struct{}{}:
+			case <-s.stopCh:
+				return
+			}
+		}
+	}()
 
 	var idleTimer *time.Timer
 	var idleC <-chan time.Time
@@ -339,7 +369,7 @@ func (s *Service) Run() error {
 			} else if n > 0 {
 				resetIdle()
 			}
-		case <-ticker.C:
+		case <-pollCh:
 			if n, err := s.drain(); err != nil {
 				log.Printf("drain: %v", err)
 			} else if n > 0 {

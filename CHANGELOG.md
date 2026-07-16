@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented here.
 
+## [0.13.0] - 2026-07-16
+
+### v0.13 webhook bridge (WEBHOOK_SPEC_GO #98 / Agy GO #188)
+
+### Added
+
+- **Workspace hard-ban (DrvFS):** reject WSL `/mnt/<drive>` at EventStore / CLI / Go store+worker (`AGENTBUS_ALLOW_DRVFS=1` break-glass)
+- **`agentbus wake-ingress`:** Mode A localhost queue (Hermes :18787 / Factory :18788); dedupe SQLite; `GET /health`; token optional + loud warning
+- **Webhook sender D1:** `Idempotency-Key`, `X-AgentBus-Token` / Bearer, 3× retry, dual-signal file+HTTP, `webhook_success_total` / `webhook_fail_total` in worker status
+- **Session-bridge scripts:** `wake_notify.sh`, `drain_wake_queue.sh`, `grok_wake_notify.sh`
+- **Docs / process:** `docs/WAKE.md` three-plane; `runbooks/swarm-session.md`; SDLC handoffs; PRD v0.13 dual-signal
+
+### Changed
+
+- Swarm: per-agent workers + `hermes-wake-ingress`; factory services opt-in
+- Poll loop: paced `time.Sleep` channel (defensive)
+
+### Product decisions reflected
+
+- MVP mailbox + optional bridge; webhook for Hermes/Factory first; `causation_id` acks; Factory opt-in
+
 ## [0.12.1] - 2026-07-13
 
 ### Fixed — fat wheels actually embed Go binaries

@@ -43,7 +43,9 @@ def _get_lease_store() -> LeaseStore:
 
 def init_store(workspace: Path, retention_days: int = 7) -> EventStore:
     global _store, _lease_store, _workspace
-    _workspace = workspace.resolve()
+    from agentbus.workspace_guard import assert_workspace_supported
+
+    _workspace = assert_workspace_supported(workspace)
     set_validation_workspace(_workspace)
     _store = EventStore(_workspace, retention_days=retention_days)
     if _mcpsafe is not None:
