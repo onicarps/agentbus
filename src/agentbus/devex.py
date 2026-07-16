@@ -249,20 +249,41 @@ def poll_events_snapshot(
         store.close()
 
 
+def _clip(value: Any, max_len: int) -> str:
+    s = str(value if value is not None else "")
+    if len(s) <= max_len:
+        return s
+    if max_len <= 3:
+        return s[:max_len]
+    return s[: max_len - 3] + "..."
+
+
 def format_event_row(event: dict[str, Any]) -> dict[str, str]:
+    """Normalize one event for monitor tables / plain CLI.
+
+    Always extracts payload ``from`` / ``to`` when present (Agy #210 / v0.14).
+    Falls back to producer_id for from; em-dash for missing to (system events).
+    """
     payload = event.get("payload") or {}
-    frm = payload.get("from", event.get("producer_id", "?"))
-    to = payload.get("to", "—")
+    if not isinstance(payload, dict):
+        payload = {}
+    frm = payload.get("from")
+    if frm is None or frm == "":
+        frm = event.get("producer_id") or "?"
+    to = payload.get("to")
+    if to is None or to == "":
+        to = "—"
     summary = payload.get("summary", "")
-    if len(summary) > 60:
-        summary = summary[:57] + "..."
+    if not summary and event.get("topic", "").startswith("system/"):
+        # Compact system detail for stream when no handoff summary
+        summary = str(payload)[:60]
     return {
-        "id": str(event["event_id"]),
-        "time": event.get("timestamp", "")[-8:],  # HH:MM:SSZ tail
-        "topic": event.get("topic", ""),
-        "from": str(frm),
-        "to": str(to),
-        "summary": summary,
+        "id": str(event.get("event_id", "")),
+        "time": str(event.get("timestamp", ""))[-8:],  # HH:MM:SSZ tail
+        "topic": _clip(event.get("topic", ""), 16),
+        "from": _clip(frm, 14),
+        "to": _clip(to, 14),
+        "summary": _clip(summary, 60),
     }
 
 
@@ -325,9 +346,10 @@ def run_monitor(
             )
             for ev in events:
                 row = format_event_row(ev)
+                # Dedicated from/to columns (not only arrow-joined)
                 print(
-                    f"{row['id']:>4} {row['time']} {row['topic']:<14} "
-                    f"{row['from']}->{row['to']} {row['summary']}"
+                    f"{row['id']:>4} {row['time']} {row['topic']:<16} "
+                    f"{row['from']:<14} {row['to']:<14} {row['summary']}"
                 )
             if events:
                 since_id = max(since_id, events[-1]["event_id"])

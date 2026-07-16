@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.14.0] - 2026-07-16
+
+### Added — monitor from/to columns (Agy #210)
+
+- TUI event stream: dedicated **from** and **to** columns extracted from payload JSON
+- HITL pending table: **to** column added
+- Plain CLI monitor lines: fixed-width from/to columns
+- `format_event_row` robust fallbacks for system events
+
 All notable changes to this project are documented here.
 
 ## [0.13.0] - 2026-07-16

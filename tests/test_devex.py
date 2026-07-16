@@ -81,6 +81,44 @@ def test_resolve_workspace_explicit_and_git(tmp_path):
     assert resolve_workspace(sub) == git_root.resolve()
 
 
+def test_format_event_row_extracts_from_to():
+    from agentbus.devex import format_event_row
+
+    row = format_event_row(
+        {
+            "event_id": 42,
+            "timestamp": "2026-07-16T05:00:51Z",
+            "topic": "okf/handoff",
+            "producer_id": "agy",
+            "payload": {
+                "from": "agy",
+                "to": "grok",
+                "summary": "Feature Request (v0.14): columns",
+            },
+        }
+    )
+    assert row["from"] == "agy"
+    assert row["to"] == "grok"
+    assert "v0.14" in row["summary"]
+    assert row["id"] == "42"
+
+
+def test_format_event_row_fallback_producer():
+    from agentbus.devex import format_event_row
+
+    row = format_event_row(
+        {
+            "event_id": 1,
+            "timestamp": "2026-07-16T00:00:00Z",
+            "topic": "system/fs",
+            "producer_id": "os-watcher",
+            "payload": {"event": "modified", "path": "x.md"},
+        }
+    )
+    assert row["from"] == "os-watcher"
+    assert row["to"] == "—"
+
+
 def test_cli_init_monitor_ping(tmp_path, monkeypatch):
     ws = str(tmp_path)
     mcp_dir = tmp_path / ".cursor"
@@ -110,6 +148,9 @@ def test_cli_init_monitor_ping(tmp_path, monkeypatch):
     )
     assert mon.exit_code == 0, mon.output
     assert "PING" in mon.output
+    # v0.14 columns present in rich table or plain output
+    assert "from" in mon.output.lower() or "grok" in mon.output
+    assert "to" in mon.output.lower() or "all" in mon.output
 
 
 def test_mcp_serve_entry_shape(tmp_path):

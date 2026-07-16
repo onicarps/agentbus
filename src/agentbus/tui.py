@@ -248,9 +248,10 @@ def run_monitor_tui(
 
         def on_mount(self) -> None:
             stream = self.query_one("#stream", DataTable)
-            stream.add_columns("id", "time", "topic", "status", "summary")
+            # v0.14 (Agy #210): dedicated from/to from payload JSON
+            stream.add_columns("id", "time", "topic", "from", "to", "status", "summary")
             hitl = self.query_one("#hitl", DataTable)
-            hitl.add_columns("id", "topic", "from", "summary")
+            hitl.add_columns("id", "topic", "from", "to", "summary")
             wire = self.query_one("#wiretap", DataTable)
             wire.add_columns("id", "time", "topic", "detail")
             self.set_interval(interval, self.refresh_data)
@@ -288,6 +289,8 @@ def run_monitor_tui(
                     row["id"],
                     row["time"],
                     row["topic"],
+                    row["from"],
+                    row["to"],
                     status,
                     row["summary"],
                     key=str(ev["event_id"]),
@@ -299,12 +302,13 @@ def run_monitor_tui(
             hitl_cursor = hitl.cursor_row
             hitl.clear()
             for ev in reversed(state["pending"]):
-                payload = ev.get("payload") or {}
+                row = format_event_row(ev)
                 hitl.add_row(
                     str(ev["event_id"]),
                     ev.get("topic", ""),
-                    str(payload.get("from", ev.get("producer_id", "?"))),
-                    format_event_row(ev)["summary"],
+                    row["from"],
+                    row["to"],
+                    row["summary"],
                     key=str(ev["event_id"]),
                 )
             if hitl.row_count and 0 <= hitl_cursor < hitl.row_count:
