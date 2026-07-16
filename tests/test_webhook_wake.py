@@ -3,6 +3,7 @@ import json
 import time
 import subprocess
 import os
+import shutil
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -10,6 +11,27 @@ import pytest
 import yaml
 
 from agentbus.store import EventStore
+
+
+def _ensure_go_worker() -> Path:
+    """Build go-core/bin/agentbus-go-worker if missing (CI / clean checkouts)."""
+    go_core = Path(__file__).parent.parent / "go-core"
+    binary = go_core / "bin" / "agentbus-go-worker"
+    if binary.is_file() and os.access(binary, os.X_OK):
+        return binary
+    go = shutil.which("go")
+    if not go:
+        pytest.skip("go toolchain not available to build agentbus-go-worker")
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [go, "build", "-o", str(binary), "./cmd/agentbus-go-worker"],
+        cwd=go_core,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"go build failed: {result.stderr}")
+    return binary
 
 
 class MockServerRequestHandler(BaseHTTPRequestHandler):
@@ -91,14 +113,13 @@ def test_webhook_wake(mock_server, tmp_path):
         payload=payload,
     )
     store.close()
-    
-    # Build and run worker with `go run` or compiled binary
-    go_core_dir = Path(__file__).parent.parent / "go-core"
-    
-    cmd = [str(go_core_dir / "bin" / "agentbus-go-worker"), "-cmd", "once"]
+
+    binary = _ensure_go_worker()
+    go_core_dir = binary.parent.parent
+    cmd = [str(binary), "-cmd", "once"]
     env = os.environ.copy()
     env["AGENTBUS_WORKSPACE"] = str(workspace)
-    
+
     result = subprocess.run(cmd, cwd=go_core_dir, env=env, capture_output=True, text=True)
     
     # Verify webhook received
@@ -190,8 +211,9 @@ def test_webhook_sends_idempotency_and_token(mock_server, tmp_path, monkeypatch)
             payload={"from": "agy", "to": "grok", "summary": "token header check 2"},
         )
         store.close()
-        go_core_dir = Path(__file__).parent.parent / "go-core"
-        cmd = [str(go_core_dir / "bin" / "agentbus-go-worker"), "-cmd", "once"]
+        binary = _ensure_go_worker()
+        go_core_dir = binary.parent.parent
+        cmd = [str(binary), "-cmd", "once"]
         env = os.environ.copy()
         env["AGENTBUS_WORKSPACE"] = str(workspace)
         env["AGENTBUS_WEBHOOK_TOKEN"] = "dogfood-token"
