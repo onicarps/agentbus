@@ -26,7 +26,7 @@ from agentbus.devex import (
 from agentbus.intercepts import InterceptRule, add_rule, load_config
 from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
 from agentbus.mcpsafe import AccessDeniedError
-from agentbus.rbac import ForbiddenError, assign_producer_role, ensure_default_roles, mint_droid_proof
+from agentbus.rbac import ForbiddenError, ensure_default_roles, mint_droid_proof
 from agentbus.leases import LeaseStore
 from agentbus.project_log import project_handoffs
 from agentbus.schema_registry import import_schema_file, list_schemas, register_schema
@@ -400,7 +400,9 @@ def publish(
             for path in attach:
                 arts.append(artifact_from_file(Path(path)))
             payload["artifacts"] = arts
-        payload = validate_payload(topic, payload, workspace=ws)
+        payload = validate_payload(
+            topic, payload, workspace=ws, producer_id=_producer_id(producer_id)
+        )
     except PayloadTooLargeError as exc:
         raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
@@ -479,7 +481,12 @@ def publish_batch(
             payload = spec.get("payload")
             if not topic or not isinstance(payload, dict):
                 raise click.ClickException(f"line {line_no}: require topic and payload object")
-            payload = validate_payload(topic, payload, workspace=ws)
+            payload = validate_payload(
+                topic,
+                payload,
+                workspace=ws,
+                producer_id=spec.get("producer_id") or pid,
+            )
             try:
                 event, duplicate = store.publish(
                     topic=topic,
@@ -1368,6 +1375,184 @@ def run_cmd(workspace: str | None, config_path: str, once: bool) -> None:
     except (FileNotFoundError, ValueError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc
     raise SystemExit(code)
+
+
+@main.command("await")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--event-id",
+    type=click.IntRange(min=1),
+    default=None,
+    envvar="AGENTBUS_WAKE_EVENT_ID",
+    help="Origin wake event_id (drop file path). Env: AGENTBUS_WAKE_EVENT_ID.",
+)
+@click.option(
+    "--expect-from",
+    "expect_from",
+    multiple=True,
+    help="Allowed payload.from / producer_id values (repeatable). Primary predicate.",
+)
+@click.option(
+    "--causation-id",
+    type=int,
+    default=None,
+    help="Require matching causation_id on fulfilling event (primary predicate).",
+)
+@click.option(
+    "--match",
+    "summary_contains",
+    default=None,
+    help="Secondary filter: substring required in payload.summary.",
+)
+@click.option(
+    "--topic",
+    default="okf/handoff",
+    show_default=True,
+    help="Topic to match for fulfillment.",
+)
+@click.option(
+    "--timeout-hours",
+    type=float,
+    default=4.0,
+    show_default=True,
+    help="Mandatory wait timeout (max 24h). Default 4h.",
+)
+@click.option(
+    "--reason",
+    default="await",
+    show_default=True,
+    help="Human reason stored on WaitRegistration.",
+)
+@click.option(
+    "--producer-id",
+    default=None,
+    envvar="AGENTBUS_PRODUCER_ID",
+    help="Waiting agent id (default: AGENTBUS_PRODUCER_ID or 'agent').",
+)
+@click.option(
+    "--runner-id",
+    default=None,
+    envvar="AGENTBUS_RUNNER_ID",
+    help="Runner id for suspend-ack keys (optional; runner fills if empty).",
+)
+@click.option(
+    "--chain-key",
+    default=None,
+    envvar="AGENTBUS_CHAIN_KEY",
+    help="Budget chain key (optional; runner fills from ChainBudget if empty).",
+)
+@click.option(
+    "--wait-id",
+    default=None,
+    help="Optional wait id (default: generated w_<hex>).",
+)
+@click.option(
+    "--register",
+    is_flag=True,
+    help="Also create WaitRegistration now (default: drop file only; runner registers).",
+)
+def await_cmd(
+    workspace: str | None,
+    event_id: int | None,
+    expect_from: tuple[str, ...],
+    causation_id: int | None,
+    summary_contains: str | None,
+    topic: str,
+    timeout_hours: float,
+    reason: str,
+    producer_id: str | None,
+    runner_id: str | None,
+    chain_key: str | None,
+    wait_id: str | None,
+    register: bool,
+) -> None:
+    """Cooperative await (v0.16): write await.json and exit 75 (EX_TEMPFAIL).
+
+    The headless runner maps exit 75 / await drop → TurnResult.status=suspended,
+    publishes RUNNER_SUSPEND, and registers a durable wait. When the predicate
+    matches (or timeout fires), a synthetic RESUME wake is delivered.
+    """
+    from agentbus.runner.types import AWAIT_EXIT_CODE
+    from agentbus.runner.wait_store import (
+        WaitPredicate,
+        WaitStore,
+        clamp_timeout_hours,
+        new_wait_id,
+        validate_agent_id,
+        write_await_drop,
+    )
+
+    ws = _cli_workspace(workspace)
+    if event_id is None:
+        raise click.ClickException(
+            "event-id required (flag --event-id or env AGENTBUS_WAKE_EVENT_ID)"
+        )
+    if not expect_from and causation_id is None:
+        raise click.ClickException(
+            "predicate requires --expect-from and/or --causation-id "
+            "(summary --match alone is not allowed)"
+        )
+
+    hours = clamp_timeout_hours(timeout_hours)
+    wid = wait_id or new_wait_id()
+    raw_producer = (
+        producer_id or os.environ.get("AGENTBUS_PRODUCER_ID") or "agent"
+    ).strip()
+    # Reject path-bearing / malformed identities before they reach filesystem
+    # path construction or wait registration.
+    try:
+        producer = validate_agent_id(raw_producer)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    from_any = [x.strip() for x in expect_from if x and str(x).strip()]
+    predicate = {
+        "causation_id": causation_id,
+        "from_any": from_any,
+        "summary_contains": summary_contains,
+        "topic": topic or "okf/handoff",
+    }
+    drop: dict = {
+        "wait_id": wid,
+        "origin_event_id": int(event_id),
+        "producer_id": producer,
+        "runner_id": runner_id or "",
+        "chain_key": chain_key or "",
+        "timeout_hours": hours,
+        "reason": reason,
+        "predicate": predicate,
+        "expect_from": from_any,
+        "causation_id": causation_id,
+        "match": summary_contains,
+        "topic": topic,
+    }
+    path = write_await_drop(ws, int(event_id), drop)
+
+    if register:
+        WaitStore(ws).create(
+            runner_id=str(runner_id or producer),
+            producer_id=producer,
+            chain_key=str(chain_key or event_id),
+            origin_event_id=int(event_id),
+            predicate=WaitPredicate.from_dict(predicate),
+            reason=reason,
+            timeout_hours=hours,
+            wait_id=wid,
+        )
+
+    click.echo(
+        json.dumps(
+            {
+                "wait_id": wid,
+                "event_id": int(event_id),
+                "await_path": str(path),
+                "timeout_hours": hours,
+                "exit_code": AWAIT_EXIT_CODE,
+                "registered": bool(register),
+            },
+            indent=2,
+        )
+    )
+    raise SystemExit(AWAIT_EXIT_CODE)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ def test_build_factory_command_shape(tmp_path: Path):
         mission=True,
         tag="factory-runner",
         extra_args=["--use-spec"],
+        skip_permissions=False,
     )
     assert cmd[0:2] == ["droid", "exec"]
     assert "-f" in cmd and str(prompt) in cmd
@@ -66,6 +67,48 @@ def test_build_factory_command_shape(tmp_path: Path):
     assert "-m" in cmd and "m1" in cmd
     assert "--tag" in cmd and "factory-runner" in cmd
     assert "--use-spec" in cmd
+    assert "--skip-permissions-unsafe" not in cmd
+
+
+def test_build_factory_command_skip_permissions_omits_auto(tmp_path: Path):
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hi", encoding="utf-8")
+    cmd = build_factory_command(
+        droid_bin="droid",
+        prompt_path=prompt,
+        cwd=tmp_path,
+        auto="high",
+        output_format="text",
+        model=None,
+        mission=False,
+        tag=None,
+        extra_args=[],
+        skip_permissions=True,
+    )
+    assert "--skip-permissions-unsafe" in cmd
+    assert "--auto" not in cmd
+
+
+def test_factory_default_skip_permissions(tmp_path: Path):
+    """Headless dogfood default is skip_permissions=True (droid --auto high insufficient)."""
+    mock_run = MagicMock(
+        return_value=subprocess.CompletedProcess(
+            args=["droid"],
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+        )
+    )
+    ad = FactoryAdapter(
+        workspace=tmp_path,
+        options={"command": "droid", "timeout_seconds": 90},
+        run_fn=mock_run,
+    )
+    r = ad.start_turn(_wake(9), budget_remaining=3)
+    assert r.ok is True
+    cmd = mock_run.call_args[0][0]
+    assert "--skip-permissions-unsafe" in cmd
+    assert "--auto" not in cmd
 
 
 def test_factory_dry_run(tmp_path: Path):
@@ -137,7 +180,11 @@ def test_factory_timeout(tmp_path: Path):
 
 
 def test_factory_invalid_auto(tmp_path: Path):
-    ad = FactoryAdapter(workspace=tmp_path, options={"auto": "ultra"})
+    # Invalid auto only checked when skip_permissions is false (auto is used).
+    ad = FactoryAdapter(
+        workspace=tmp_path,
+        options={"auto": "ultra", "skip_permissions": False},
+    )
     r = ad.start_turn(_wake(5), budget_remaining=1)
     assert r.ok is False
     assert "invalid auto" in r.summary

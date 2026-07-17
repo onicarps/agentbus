@@ -24,7 +24,12 @@ from agentbus.runner.intake import (
     load_done_ids,
     read_wake_file,
 )
-from agentbus.runner.types import BROADCAST_TO, TurnResult, WakeEnvelope
+from agentbus.runner.types import AWAIT_EXIT_CODE, BROADCAST_TO, TurnResult, WakeEnvelope
+from agentbus.runner.wait_store import (
+    load_await_drop,
+    suspend_ack_idempotency_key,
+)
+from agentbus.runner.wait_tick import register_wait_from_await_drop, tick_waits
 from agentbus.store import EventStore
 
 log = logging.getLogger("agentbus.runner")
@@ -64,6 +69,16 @@ def _wake_file_path(workspace: Path, cfg: RunnerConfig) -> Path:
     return workspace / ".agentbus" / f"WAKE.{name}.json"
 
 
+def _intake_hint(cfg: RunnerConfig) -> dict[str, Any]:
+    return {
+        "mode": cfg.intake.mode,
+        "runtime": cfg.intake.runtime,
+        "queue_path": cfg.intake.queue_path,
+        "wake_file": cfg.intake.wake_file
+        or f".agentbus/WAKE.{cfg.producer_id}.json",
+    }
+
+
 def _write_run_log(
     workspace: Path, cfg: RunnerConfig, wake: WakeEnvelope, result: TurnResult
 ) -> Path:
@@ -83,9 +98,11 @@ def _write_run_log(
                     "summary": wake.summary,
                     "source": wake.source,
                     "topic": wake.topic,
+                    "causation_id": wake.causation_id,
                 },
                 "result": {
                     "ok": result.ok,
+                    "status": result.status,
                     "summary": result.summary,
                     "detail": result.detail,
                 },
@@ -152,6 +169,39 @@ def should_skip(wake: WakeEnvelope, cfg: RunnerConfig) -> str | None:
     return None
 
 
+def detect_suspend(
+    workspace: Path, wake: WakeEnvelope, result: TurnResult
+) -> TurnResult:
+    """Map await drop file / exit 75 onto TurnResult.status=suspended."""
+    if result.status == "suspended":
+        return result
+
+    drop = load_await_drop(workspace, wake.event_id)
+    rc = None
+    if isinstance(result.detail, dict):
+        rc = result.detail.get("returncode")
+
+    if drop is None and rc != AWAIT_EXIT_CODE:
+        return result
+
+    wait_id = ""
+    if isinstance(drop, dict):
+        wait_id = str(drop.get("wait_id") or "")
+    summary = result.summary or ""
+    if not summary.startswith("RUNNER_SUSPEND:"):
+        summary = (
+            f"RUNNER_SUSPEND: event_id={wake.event_id}"
+            + (f" wait_id={wait_id}" if wait_id else "")
+        )
+    detail = dict(result.detail or {})
+    detail["status"] = "suspended"
+    if drop is not None:
+        detail["await"] = drop
+    if rc is not None:
+        detail["returncode"] = rc
+    return TurnResult(status="suspended", summary=summary, detail=detail)
+
+
 def process_envelope(
     workspace: Path,
     cfg: RunnerConfig,
@@ -173,6 +223,10 @@ def process_envelope(
         return {"event_id": wake.event_id, "status": "skipped", "reason": skip}
 
     chain = budget.chain_key(wake.event_id, wake.causation_id)
+    # Scan boundary from the event store (not wake.event_id): queue-injected
+    # wakes often carry synthetic IDs that are not store event_ids. Captured
+    # before the adapter so events concurrent with the turn still fulfill.
+    scan_from_event_id = store.latest_event_id()
     if budget.would_exceed(chain):
         result = TurnResult(
             ok=False,
@@ -201,16 +255,105 @@ def process_envelope(
                 ),
                 detail={"error": str(exc)},
             )
-
-    _write_run_log(workspace, cfg, wake, result)
+        result = detect_suspend(workspace, wake, result)
 
     reply_to = wake.from_agent or "agy"
     if not reply_to or reply_to == cfg.producer_id:
         reply_to = wake.from_agent or "all"
-        # avoid engineer RBAC issues: never use bare broadcast if we can help it
         if reply_to in BROADCAST_TO:
             reply_to = "agy"
 
+    if result.status == "suspended":
+        # Register / load durable wait; never ERROR path.
+        await_data = load_await_drop(workspace, wake.event_id) or {}
+        if isinstance(result.detail, dict) and isinstance(
+            result.detail.get("await"), dict
+        ):
+            await_data = {**await_data, **result.detail["await"]}
+        try:
+            wait = register_wait_from_await_drop(
+                workspace,
+                runner_id=cfg.runner_id,
+                producer_id=cfg.producer_id,
+                chain_key=chain,
+                origin_event_id=wake.event_id,
+                await_data=await_data if isinstance(await_data, dict) else {},
+                intake_hint=_intake_hint(cfg),
+                # Store-id boundary at turn start (not synthetic wake ids).
+                scan_from_event_id=scan_from_event_id,
+            )
+            wait_id = wait.wait_id
+        except Exception as exc:  # noqa: BLE001
+            log.exception("wait registration failed event_id=%s", wake.event_id)
+            result = TurnResult(
+                ok=False,
+                summary=(
+                    f"RUNNER_ERROR: wait registration failed event_id={wake.event_id} "
+                    f"err={type(exc).__name__}"
+                ),
+                detail={"error": str(exc)},
+            )
+            wait_id = None
+        else:
+            if not result.summary.startswith("RUNNER_SUSPEND:"):
+                result = TurnResult(
+                    status="suspended",
+                    summary=(
+                        f"RUNNER_SUSPEND: event_id={wake.event_id} wait_id={wait_id}"
+                    ),
+                    detail=result.detail,
+                )
+            # Avoid "blocked"/"error" substrings in summary (schema lock)
+            low = result.summary.lower()
+            if "blocked" in low or (
+                "error" in low and not result.summary.startswith("RUNNER_SUSPEND:")
+            ):
+                result = TurnResult(
+                    status="suspended",
+                    summary=(
+                        f"RUNNER_SUSPEND: event_id={wake.event_id} wait_id={wait_id}"
+                    ),
+                    detail=result.detail,
+                )
+
+        if result.status == "suspended":
+            # Persist the finalized suspended record (matches the published ACK).
+            _write_run_log(workspace, cfg, wake, result)
+            event, duplicate = store.publish(
+                topic="okf/handoff",
+                producer_id=cfg.producer_id,
+                schema_version="1.0",
+                payload={
+                    "from": cfg.producer_id,
+                    "to": reply_to if reply_to not in BROADCAST_TO else "agy",
+                    "summary": result.summary,
+                },
+                causation_id=wake.event_id,
+                idempotency_key=suspend_ack_idempotency_key(
+                    cfg.runner_id, wake.event_id
+                ),
+            )
+            # Suspend turn counts as 1 (LLM already ran); idle wait = 0
+            if not duplicate:
+                budget.record(chain)
+            append_done_id(done_path, wake.event_id)
+            done.add(wake.event_id)
+            return {
+                "event_id": wake.event_id,
+                "status": "suspended",
+                "ok": True,
+                "turn_status": "suspended",
+                "ack_event_id": event.event_id,
+                "duplicate_ack": duplicate,
+                "summary": result.summary,
+                "wait_id": wait_id,
+                "chain_key": chain,
+            }
+
+    # ok / error path (unchanged semantics)
+    # Persist the finalized result (covers the registration-failed error case,
+    # so the durable run record never contradicts the published RUNNER_ERROR).
+    _write_run_log(workspace, cfg, wake, result)
     event, duplicate = store.publish(
         topic="okf/handoff",
         producer_id=cfg.producer_id,
@@ -235,6 +378,7 @@ def process_envelope(
         "event_id": wake.event_id,
         "status": "processed",
         "ok": result.ok,
+        "turn_status": result.status,
         "ack_event_id": event.event_id,
         "duplicate_ack": duplicate,
         "summary": result.summary,
@@ -254,7 +398,7 @@ def collect_pending(
 
 
 def run_once(workspace: Path, cfg: RunnerConfig) -> list[dict[str, Any]]:
-    """Process all currently pending envelopes; return result dicts."""
+    """Process all currently pending envelopes; tick waits; return result dicts."""
     from agentbus.workspace_guard import assert_workspace_supported
 
     assert_workspace_supported(workspace)
@@ -280,6 +424,10 @@ def run_once(workspace: Path, cfg: RunnerConfig) -> list[dict[str, Any]]:
                     done=done,
                 )
             )
+        # Wait plane: resolve timeouts + fulfillments (lost-wakeup safe)
+        wait_results = tick_waits(workspace, store)
+        for wr in wait_results:
+            results.append({"status": "wait_tick", **wr})
     finally:
         store.close()
     return results

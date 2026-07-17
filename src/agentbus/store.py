@@ -720,6 +720,10 @@ class EventStore:
             "sla_active_count": len(rows),
         }
 
+    def latest_event_id(self) -> int:
+        row = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()
+        return int(row["m"] or 0)
+
     def status(self, producer_id: str | None = None) -> dict:
         self.expire_pending()
         self.expire_sla_breaches()

@@ -150,7 +150,7 @@ agentbus run --config examples/runner.hermes.yaml --once
 |---------|-----------|
 | `echo` | No LLM — run log + ACK (CI) |
 | `hermes` | `hermes chat -q … -Q --max-turns N` subprocess |
-| `factory` | `droid exec -f prompt.md --auto medium -o text` subprocess |
+| `factory` | `droid exec -f prompt.md --skip-permissions-unsafe -o text` (default; or `--auto high` when `skip_permissions: false`) |
 | `grok` | `grok --prompt-file … --always-approve --max-turns N` (Phase E) |
 | `agy` | `agy --print … --print-timeout …` (Phase E) |
 | `aider` | `aider --message …` SRE/health (optional) |
@@ -176,6 +176,31 @@ hermes-runner:
 ```
 
 `agentbus up` skips disabled services (listed in `skipped`). Wake plane stays on.
+
+## Async suspend / await (v0.16)
+
+Cooperative **continuation-passing** waits (no LLM session freeze).
+
+```bash
+# Inside a headless turn (AGENTBUS_WAKE_EVENT_ID set by adapter):
+agentbus await \
+  --expect-from factory \
+  --causation-id 412 \
+  --match QA_VERDICT \
+  --timeout-hours 4
+# exit 75 → runner publishes RUNNER_SUSPEND + durable WaitRegistration
+```
+
+| Piece | Behavior |
+|-------|----------|
+| Drop file | `.agentbus/runs/<event_id>/await.json` |
+| Wait store | `.agentbus/waits/<wait_id>.json` |
+| Fulfill | Predicate match (`from_any` + `causation_id`; optional summary) |
+| Timeout | Default 4h (max 24h) → `okf/dead-letter` `WAIT_TIMEOUT` + resume `status=timeout` |
+| Resume wake | `payload.resume` locked keys; bus `causation_id` = stored `chain_key` (budget continuity) |
+| Idempotency | `suspend-ack:{runner}:{event_id}` · `resume:{wait_id}:{fulfilled_by}` |
+
+Design: `initiatives/agentbus/decisions/v0.16-async-suspend-design.md`
 
 ## Anti-patterns
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.16.0] - 2026-07-17
+
+### Added — async suspend / await MVP (Agy #467)
+
+### Added
+
+- **`agentbus await`:** cooperative wait CLI — writes `.agentbus/runs/<event_id>/await.json`, exits **75** (EX_TEMPFAIL); requires primary predicate (`--expect-from` and/or `--causation-id`); default timeout **4h** (max 24h)
+- **WaitStore** (`.agentbus/waits/<wait_id>.json`): durable `WaitRegistration` + cursor; corrupt files skipped
+- **Wait tick:** predicate match + mandatory timeout → synthetic **RESUME** wake (`payload.resume` locked keys); `causation_id` = stored `chain_key` (budget continuity); idempotency `resume:{wait_id}:{fulfilled_by}`
+- **Runner:** `TurnResult.status` ∈ `{ok,error,suspended}`; `RUNNER_SUSPEND:` ACK with `suspend-ack:{runner_id}:{event_id}`; exit 75 / await drop → suspended (not ERROR)
+- **Timeout path:** `okf/dead-letter` reason `WAIT_TIMEOUT` + resume `status=timeout`; late fulfill after terminal is no-op
+- **Adapters:** `AGENTBUS_WAKE_EVENT_ID` / `AGENTBUS_CHAIN_KEY` env; exit 75 → suspended; prompts document await
+- **Factory adapter:** `skip_permissions` (default True) → `droid exec --skip-permissions-unsafe`; omits `--auto` (CLI mutual exclusion). Fixes headless QA RUNNER_ERROR "insufficient permission… Re-run with --skip-permissions-unsafe"
+- **Tests:** `tests/test_async_suspend.py` hard gates (budget chain, single-wake, timeout, lost-wakeup, self-fulfill guard)
+
+### Schema locks
+
+- Resume keys: `wait_id`, `chain_key`, `origin_event_id`, `fulfilled_by`, `status` (`ok`|`timeout`), `reason`
+- Dead-letter reason enum includes `WAIT_TIMEOUT`
+
 ## [0.15.0] - 2026-07-17
 
 ### Added — headless reason-plane runner (Phases B–F)

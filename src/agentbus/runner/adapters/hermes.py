@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.adapters.prompt_common import (
+    runner_subprocess_env,
+    turn_result_from_cli_exit,
+)
 from agentbus.runner.types import TurnResult, WakeEnvelope
 
 log = logging.getLogger("agentbus.runner.hermes")
@@ -140,11 +143,12 @@ class HermesAdapter:
         cwd = opts.get("cwd")
         workdir = Path(cwd).resolve() if cwd else self.workspace
 
-        env = os.environ.copy()
-        env.setdefault("AGENTBUS_WORKSPACE", str(self.workspace))
-        env.setdefault("AGENTBUS_PRODUCER_ID", "hermes")
-        # Avoid interactive hooks prompts
-        env.setdefault("HERMES_ACCEPT_HOOKS", "1")
+        env = runner_subprocess_env(
+            self.workspace,
+            producer_id="hermes",
+            wake=wake,
+            extra_defaults={"HERMES_ACCEPT_HOOKS": "1"},
+        )
 
         if dry_run:
             return TurnResult(
@@ -206,38 +210,15 @@ class HermesAdapter:
 
         stdout = (proc.stdout or "").strip()
         stderr = (proc.stderr or "").strip()
-        # Quiet mode: final response is primarily stdout
-        final_text = stdout or stderr
-        preview = final_text[-800:] if final_text else "(no output)"
-        # Collapse newlines for handoff summary (single-line friendly)
-        preview_one = " ".join(preview.split())
-
-        if proc.returncode != 0:
-            return TurnResult(
-                ok=False,
-                summary=(
-                    f"RUNNER_ERROR: hermes exit={proc.returncode} "
-                    f"event_id={wake.event_id} out={preview_one[:400]}"
-                ),
-                detail={
-                    "adapter": "hermes",
-                    "returncode": proc.returncode,
-                    "stdout": stdout[-8000:],
-                    "stderr": stderr[-8000:],
-                    "cmd0": cmd[:3],
-                },
-            )
-
-        return TurnResult(
-            ok=True,
-            summary=(
-                f"RUNNER_ACK: hermes completed event_id={wake.event_id} "
-                f"out={preview_one[:500]}"
-            ),
+        preview = (stdout or stderr or "(no output)")[-800:]
+        return turn_result_from_cli_exit(
+            adapter="hermes",
+            event_id=wake.event_id,
+            returncode=proc.returncode,
+            preview=preview,
             detail={
-                "adapter": "hermes",
-                "returncode": 0,
                 "stdout": stdout[-8000:],
-                "stderr": stderr[-4000:],
+                "stderr": stderr[-8000:],
+                "cmd0": cmd[:3],
             },
         )
