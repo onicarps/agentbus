@@ -100,6 +100,10 @@ def envelope_from_wake_file(data: dict[str, Any]) -> WakeEnvelope | None:
         causation_id = int(causation) if causation is not None else None
     except (TypeError, ValueError):
         causation_id = None
+    # v0.16 synthetic resume wakes tag source=resume in the wake body
+    src = str(data.get("source") or "wake_file")
+    if src not in ("wake_file", "webhook_queue", "resume"):
+        src = "wake_file"
     return WakeEnvelope(
         event_id=eid,
         topic=str(data.get("topic") or "okf/handoff"),
@@ -107,7 +111,7 @@ def envelope_from_wake_file(data: dict[str, Any]) -> WakeEnvelope | None:
         to=to,
         summary=summary,
         payload=payload,
-        source="wake_file",
+        source=src,
         raw=data,
         causation_id=causation_id,
         trace_id=str(data["trace_id"]) if data.get("trace_id") else None,

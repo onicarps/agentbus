@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from agentbus.runner.adapters.prompt_common import build_cli_role_prompt
+from agentbus.runner.adapters.prompt_common import (
+    build_cli_role_prompt,
+    runner_subprocess_env,
+    turn_result_from_cli_exit,
+)
 from agentbus.runner.types import TurnResult, WakeEnvelope
 
 log = logging.getLogger("agentbus.runner.aider")
@@ -138,9 +141,9 @@ class AiderAdapter:
             extra_args=[str(a) for a in extra],
         )
 
-        env = os.environ.copy()
-        env.setdefault("AGENTBUS_WORKSPACE", str(self.workspace))
-        env.setdefault("AGENTBUS_PRODUCER_ID", "aider")
+        env = runner_subprocess_env(
+            self.workspace, producer_id="aider", wake=wake
+        )
 
         if dry_run:
             return TurnResult(
@@ -197,33 +200,15 @@ class AiderAdapter:
 
         stdout = (proc.stdout or "").strip()
         stderr = (proc.stderr or "").strip()
-        preview = " ".join((stdout or stderr or "(no output)")[-800:].split())
-        if proc.returncode != 0:
-            return TurnResult(
-                ok=False,
-                summary=(
-                    f"RUNNER_ERROR: aider exit={proc.returncode} "
-                    f"event_id={wake.event_id} out={preview[:400]}"
-                ),
-                detail={
-                    "adapter": "aider",
-                    "returncode": proc.returncode,
-                    "stdout": stdout[-8000:],
-                    "stderr": stderr[-8000:],
-                    "prompt_path": str(prompt_path),
-                },
-            )
-        return TurnResult(
-            ok=True,
-            summary=(
-                f"RUNNER_ACK: aider completed event_id={wake.event_id} "
-                f"out={preview[:500]}"
-            ),
+        preview = stdout or stderr or "(no output)"
+        return turn_result_from_cli_exit(
+            adapter="aider",
+            event_id=wake.event_id,
+            returncode=proc.returncode,
+            preview=preview[-800:],
             detail={
-                "adapter": "aider",
-                "returncode": 0,
                 "stdout": stdout[-8000:],
-                "stderr": stderr[-4000:],
+                "stderr": stderr[-8000:],
                 "prompt_path": str(prompt_path),
             },
         )

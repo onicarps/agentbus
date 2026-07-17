@@ -29,7 +29,7 @@ KNOWN_TOPICS: dict[str, dict] = {
         "required": ["reason", "original_event_id", "original_event", "summary"],
         "additionalProperties": False,
         "properties": {
-            "reason": {"enum": ["SLA_BREACH"]},
+            "reason": {"enum": ["SLA_BREACH", "WAIT_TIMEOUT"]},
             "original_event_id": {"type": "integer", "minimum": 1},
             "original_event": {"type": "object"},
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
@@ -93,6 +93,27 @@ KNOWN_TOPICS: dict[str, dict] = {
                         "name": {"type": "string", "minLength": 1, "maxLength": 256},
                         "content": {"type": "string"},
                     },
+                },
+            },
+            # v0.16 synthetic resume wake (locked keys under resume)
+            "resume": {
+                "type": "object",
+                "required": [
+                    "wait_id",
+                    "chain_key",
+                    "origin_event_id",
+                    "fulfilled_by",
+                    "status",
+                    "reason",
+                ],
+                "additionalProperties": False,
+                "properties": {
+                    "wait_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "chain_key": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "origin_event_id": {"type": "integer", "minimum": 0},
+                    "fulfilled_by": {"type": "integer", "minimum": 0},
+                    "status": {"enum": ["ok", "timeout"]},
+                    "reason": {"type": "string", "maxLength": 2000},
                 },
             },
         },

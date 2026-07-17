@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-import os
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.adapters.prompt_common import (
+    runner_subprocess_env,
+    turn_result_from_cli_exit,
+)
 from agentbus.runner.types import TurnResult, WakeEnvelope
 
 log = logging.getLogger("agentbus.runner.factory")
@@ -73,8 +76,13 @@ def build_factory_command(
     mission: bool,
     tag: str | None,
     extra_args: Sequence[str],
+    skip_permissions: bool = False,
 ) -> list[str]:
-    """droid exec -f prompt.md --cwd … --auto … -o text"""
+    """droid exec -f prompt.md --cwd … [-o text] [--auto … | --skip-permissions-unsafe].
+
+    ``--skip-permissions-unsafe`` cannot be combined with ``--auto`` (droid CLI).
+    When skip_permissions is True, --auto is omitted.
+    """
     cmd: list[str] = [
         droid_bin,
         "exec",
@@ -82,11 +90,13 @@ def build_factory_command(
         str(prompt_path),
         "--cwd",
         str(cwd),
-        "--auto",
-        auto,
         "-o",
         output_format,
     ]
+    if skip_permissions:
+        cmd.append("--skip-permissions-unsafe")
+    else:
+        cmd.extend(["--auto", auto])
     if mission:
         cmd.append("--mission")
     if model:
@@ -104,7 +114,9 @@ class FactoryAdapter:
     Config keys (adapter section in runner YAML):
       command: droid binary (default: droid)
       timeout_seconds: default 1800
-      auto: low|medium|high (default high — headless droid needs high for pytest/write)
+      auto: low|medium|high (default high — used only when skip_permissions is false)
+      skip_permissions: bool (default True for headless dogfood; maps to
+        --skip-permissions-unsafe; mutually exclusive with --auto)
       output_format: text (default)
       model: optional
       mission: bool (default false)
@@ -134,9 +146,12 @@ class FactoryAdapter:
         opts = self.options
         dry_run = bool(opts.get("dry_run", False))
         timeout = int(opts.get("timeout_seconds", 1800))
-        # Headless QA routinely needs file writes + pytest; droid rejects medium.
+        # Headless droid often hits permission walls even with --auto high;
+        # default skip_permissions=True (same pattern as Agy). --auto is ignored
+        # when skip_permissions is set (CLI mutual exclusion).
+        skip_permissions = bool(opts.get("skip_permissions", True))
         auto = str(opts.get("auto") or "high").strip().lower()
-        if auto not in {"low", "medium", "high"}:
+        if not skip_permissions and auto not in {"low", "medium", "high"}:
             return TurnResult(
                 ok=False,
                 summary=(
@@ -198,18 +213,24 @@ class FactoryAdapter:
             mission=mission,
             tag=str(tag) if tag else None,
             extra_args=[str(a) for a in extra],
+            skip_permissions=skip_permissions,
         )
 
-        env = os.environ.copy()
-        env.setdefault("AGENTBUS_WORKSPACE", str(self.workspace))
-        env.setdefault("AGENTBUS_PRODUCER_ID", "factory")
+        env = runner_subprocess_env(
+            self.workspace, producer_id="factory", wake=wake
+        )
 
+        mode_label = (
+            "skip_permissions"
+            if skip_permissions
+            else f"auto={auto}"
+        )
         if dry_run:
             return TurnResult(
                 ok=True,
                 summary=(
                     f"RUNNER_ACK: factory dry_run event_id={wake.event_id} "
-                    f"cmd_bin={droid_bin} auto={auto}"
+                    f"cmd_bin={droid_bin} {mode_label}"
                 ),
                 detail={
                     "adapter": "factory",
@@ -218,14 +239,15 @@ class FactoryAdapter:
                     "prompt_path": str(prompt_path),
                     "prompt_preview": prompt[:500],
                     "cwd": str(workdir),
+                    "skip_permissions": skip_permissions,
                 },
             )
 
         log.info(
-            "factory turn start event_id=%s timeout=%s auto=%s",
+            "factory turn start event_id=%s timeout=%s %s",
             wake.event_id,
             timeout,
-            auto,
+            mode_label,
         )
         try:
             proc = self._run_fn(
@@ -266,38 +288,16 @@ class FactoryAdapter:
 
         stdout = (proc.stdout or "").strip()
         stderr = (proc.stderr or "").strip()
-        final_text = stdout or stderr
-        preview = final_text[-800:] if final_text else "(no output)"
-        preview_one = " ".join(preview.split())
-
-        if proc.returncode != 0:
-            return TurnResult(
-                ok=False,
-                summary=(
-                    f"RUNNER_ERROR: factory exit={proc.returncode} "
-                    f"event_id={wake.event_id} out={preview_one[:400]}"
-                ),
-                detail={
-                    "adapter": "factory",
-                    "returncode": proc.returncode,
-                    "stdout": stdout[-8000:],
-                    "stderr": stderr[-8000:],
-                    "prompt_path": str(prompt_path),
-                    "cmd0": cmd[:6],
-                },
-            )
-
-        return TurnResult(
-            ok=True,
-            summary=(
-                f"RUNNER_ACK: factory completed event_id={wake.event_id} "
-                f"out={preview_one[:500]}"
-            ),
+        preview = (stdout or stderr or "(no output)")[-800:]
+        return turn_result_from_cli_exit(
+            adapter="factory",
+            event_id=wake.event_id,
+            returncode=proc.returncode,
+            preview=preview,
             detail={
-                "adapter": "factory",
-                "returncode": 0,
                 "stdout": stdout[-8000:],
-                "stderr": stderr[-4000:],
+                "stderr": stderr[-8000:],
                 "prompt_path": str(prompt_path),
+                "cmd0": cmd[:6],
             },
         )

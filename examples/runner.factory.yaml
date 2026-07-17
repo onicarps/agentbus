@@ -14,7 +14,8 @@ adapter:
   type: factory
   command: droid
   timeout_seconds: 1800
-  auto: high
+  # skip_permissions: true  # default True → --skip-permissions-unsafe (no --auto)
+  # auto: high              # only used when skip_permissions: false
   output_format: text
   tag: factory-runner
   # dry_run: true
