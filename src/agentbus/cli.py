@@ -400,7 +400,9 @@ def publish(
             for path in attach:
                 arts.append(artifact_from_file(Path(path)))
             payload["artifacts"] = arts
-        payload = validate_payload(topic, payload, workspace=ws)
+        payload = validate_payload(
+            topic, payload, workspace=ws, producer_id=_producer_id(producer_id)
+        )
     except PayloadTooLargeError as exc:
         raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
@@ -479,7 +481,12 @@ def publish_batch(
             payload = spec.get("payload")
             if not topic or not isinstance(payload, dict):
                 raise click.ClickException(f"line {line_no}: require topic and payload object")
-            payload = validate_payload(topic, payload, workspace=ws)
+            payload = validate_payload(
+                topic,
+                payload,
+                workspace=ws,
+                producer_id=spec.get("producer_id") or pid,
+            )
             try:
                 event, duplicate = store.publish(
                     topic=topic,
@@ -1374,7 +1381,7 @@ def run_cmd(workspace: str | None, config_path: str, once: bool) -> None:
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option(
     "--event-id",
-    type=int,
+    type=click.IntRange(min=1),
     default=None,
     envvar="AGENTBUS_WAKE_EVENT_ID",
     help="Origin wake event_id (drop file path). Env: AGENTBUS_WAKE_EVENT_ID.",
@@ -1471,6 +1478,7 @@ def await_cmd(
         WaitStore,
         clamp_timeout_hours,
         new_wait_id,
+        validate_agent_id,
         write_await_drop,
     )
 
@@ -1487,7 +1495,15 @@ def await_cmd(
 
     hours = clamp_timeout_hours(timeout_hours)
     wid = wait_id or new_wait_id()
-    producer = (producer_id or os.environ.get("AGENTBUS_PRODUCER_ID") or "agent").strip()
+    raw_producer = (
+        producer_id or os.environ.get("AGENTBUS_PRODUCER_ID") or "agent"
+    ).strip()
+    # Reject path-bearing / malformed identities before they reach filesystem
+    # path construction or wait registration.
+    try:
+        producer = validate_agent_id(raw_producer)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     from_any = [x.strip() for x in expect_from if x and str(x).strip()]
     predicate = {
         "causation_id": causation_id,

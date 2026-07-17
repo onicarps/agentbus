@@ -412,6 +412,7 @@ def publish_ping(
             "to": "all",
             "summary": f"PING from {producer_id}",
         },
+        producer_id=producer_id,
     )
     store = EventStore(workspace, retention_days=retention_days)
     try:

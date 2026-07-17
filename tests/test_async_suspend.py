@@ -96,6 +96,8 @@ def test_clamp_timeout_hours():
     assert clamp_timeout_hours(-1) == 4.0
     assert clamp_timeout_hours(2) == 2.0
     assert clamp_timeout_hours(100) == 24.0
+    assert clamp_timeout_hours(float("nan")) == 4.0
+    assert clamp_timeout_hours(float("inf")) == 4.0
 
 
 def test_match_predicate_primary_and_self_guard():
@@ -342,16 +344,32 @@ def test_fulfillment_resume_and_budget_continuity(tmp_path: Path):
         ]
         assert len(resumes2) == 1
 
-        # Delivered intake (queue)
+        # Delivered intake (queue): tick_waits itself must deliver a record that
+        # carries the full locked resume context (not a payload-less placeholder).
         q = tmp_path / ".agentbus" / "ingress" / "hermes_wake_queue.jsonl"
         lines = [json.loads(x) for x in q.read_text().splitlines() if x.strip()]
-        resume_lines = [x for x in lines if (x.get("raw") or {}).get("source") == "resume" or x.get("from") == "agentbus"]
-        assert len(resume_lines) >= 1
+        resume_lines = [x for x in lines if (x.get("raw") or {}).get("source") == "resume"]
+        assert len(resume_lines) == 1
+        delivered_resume = (resume_lines[0].get("raw") or {}).get("payload", {}).get(
+            "resume"
+        )
+        assert delivered_resume is not None
+        assert set(delivered_resume) == {
+            "wait_id",
+            "chain_key",
+            "origin_event_id",
+            "fulfilled_by",
+            "status",
+            "reason",
+        }
+        assert delivered_resume["chain_key"] == "100"
+        assert delivered_resume["status"] == "ok"
     finally:
         store.close()
 
     # Resume turn counts toward same chain (max 3: suspend=1, resume=1, one more, then trip)
-    # Manually process resume envelope if in queue with event_id of resume
+    # Consume the resume record delivered by tick_waits() itself (no manual
+    # duplicate enqueue): it must carry payload.resume through to the adapter.
     store = EventStore(tmp_path)
     try:
         resume_ev = [
@@ -359,43 +377,32 @@ def test_fulfillment_resume_and_budget_continuity(tmp_path: Path):
             for e in store.poll("okf/handoff", since_id=0)["events"]
             if isinstance(e.get("payload"), dict) and "resume" in e["payload"]
         ][0]
-        _enqueue(
-            tmp_path,
-            resume_ev["event_id"],
-            to="hermes",
-            frm="agentbus",
-            summary=resume_ev["payload"]["summary"],
-            causation_id=resume_ev["causation_id"],
-        )
-        # Patch queue record to include resume payload
-        qpath = tmp_path / ".agentbus" / "ingress" / "hermes_wake_queue.jsonl"
-        with qpath.open("a", encoding="utf-8") as fh:
-            fh.write(
-                json.dumps(
-                    {
-                        "event_id": resume_ev["event_id"],
-                        "from": "agentbus",
-                        "to": "hermes",
-                        "summary": resume_ev["payload"]["summary"],
-                        "topic": "okf/handoff",
-                        "causation_id": 100,
-                        "raw": {
-                            "event_id": resume_ev["event_id"],
-                            "causation_id": 100,
-                            "payload": resume_ev["payload"],
-                            "source": "resume",
-                        },
-                    }
-                )
-                + "\n"
-            )
         cfg = load_runner_config(cfg_path)
         r2 = run_once(tmp_path, cfg)
-        processed = [x for x in r2 if x.get("status") == "processed" and x.get("event_id") == resume_ev["event_id"]]
-        assert processed
+        processed = [
+            x
+            for x in r2
+            if x.get("status") == "processed"
+            and x.get("event_id") == resume_ev["event_id"]
+        ]
+        assert processed, "tick_waits-delivered resume record was not processed"
+        # The processed record must be the real RESUME envelope (not a
+        # payload-less placeholder), and it must carry the locked resume block.
+        assert resume_ev["payload"]["resume"]["chain_key"] == "100"
+        run_log = (
+            tmp_path
+            / ".agentbus"
+            / "runs"
+            / str(resume_ev["event_id"])
+            / "result.json"
+        )
+        assert run_log.is_file()
+        logged = json.loads(run_log.read_text())
+        assert logged["wake"]["summary"].startswith("RESUME:")
         budget = ChainBudget(runner_state_path(tmp_path, "test-runner-1"), 3)
-        # chain_key for causation 100
-        assert budget.remaining("100") == 1  # 3 - suspend - resume
+        # Budget continuity proves the resume ran on the original chain (100):
+        # 3 - suspend(1) - resume(1) = 1 remaining.
+        assert budget.remaining("100") == 1
     finally:
         store.close()
 
@@ -481,9 +488,22 @@ def test_timeout_dead_letter_and_late_fulfill_no_double_wake(tmp_path: Path):
 
 
 def test_lost_wakeup_fulfill_before_tick(tmp_path: Path):
-    """Event lands before wait is registered; later tick still resolves."""
+    """Event lands after origin wake but before wait is registered; tick resolves."""
     store = EventStore(tmp_path)
     try:
+        origin, _ = store.publish(
+            topic="okf/handoff",
+            producer_id="agy",
+            schema_version="1.0",
+            payload={
+                "from": "agy",
+                "to": "hermes",
+                "summary": "please run QA",
+            },
+            skip_rbac=True,
+            skip_intercept=True,
+        )
+        # Fulfillment arrives during the turn, before WaitRegistration is written.
         ev, _ = store.publish(
             topic="okf/handoff",
             producer_id="factory",
@@ -493,30 +513,181 @@ def test_lost_wakeup_fulfill_before_tick(tmp_path: Path):
                 "to": "hermes",
                 "summary": "QA_VERDICT: GREEN early",
             },
-            causation_id=77,
+            causation_id=origin.event_id,
             skip_rbac=True,
             skip_intercept=True,
         )
-        # Wait registered AFTER fulfillment event exists
         waits = WaitStore(tmp_path)
         waits.create(
             runner_id="r1",
             producer_id="hermes",
-            chain_key="77",
-            origin_event_id=77,
+            chain_key=str(origin.event_id),
+            origin_event_id=origin.event_id,
             predicate=WaitPredicate(
                 from_any=["factory"],
-                causation_id=77,
+                causation_id=origin.event_id,
                 summary_contains="QA_VERDICT",
             ),
             wait_id="w_lost",
             timeout_hours=4,
         )
-        # Cursor starts at 0; scan includes the early event
+        # scan_from defaults to origin; early fulfill (eid > origin) still matches.
         outcomes = tick_waits(tmp_path, store, waits=waits)
         assert len(outcomes) == 1
         assert outcomes[0]["status"] == "ok"
         assert outcomes[0]["fulfilled_by"] == ev.event_id
+    finally:
+        store.close()
+
+
+def test_from_any_only_rejects_stale_history(tmp_path: Path):
+    """from_any-only wait must not fulfill from unrelated older producer events."""
+    store = EventStore(tmp_path)
+    try:
+        stale, _ = store.publish(
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload={
+                "from": "factory",
+                "to": "hermes",
+                "summary": "QA_VERDICT: GREEN ancient",
+            },
+            skip_rbac=True,
+            skip_intercept=True,
+        )
+        origin, _ = store.publish(
+            topic="okf/handoff",
+            producer_id="agy",
+            schema_version="1.0",
+            payload={"from": "agy", "to": "hermes", "summary": "new task"},
+            skip_rbac=True,
+            skip_intercept=True,
+        )
+        waits = WaitStore(tmp_path)
+        waits.create(
+            runner_id="r1",
+            producer_id="hermes",
+            chain_key=str(origin.event_id),
+            origin_event_id=origin.event_id,
+            predicate=WaitPredicate(from_any=["factory"]),  # no causation_id
+            wait_id="w_stale",
+            timeout_hours=4,
+        )
+        outcomes = tick_waits(tmp_path, store, waits=waits)
+        assert outcomes == []
+        reloaded = waits.load("w_stale")
+        assert reloaded is not None
+        assert reloaded.status == "pending"
+        assert stale.event_id <= origin.event_id
+
+        # A post-origin factory event does fulfill.
+        fresh, _ = store.publish(
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload={
+                "from": "factory",
+                "to": "hermes",
+                "summary": "QA_VERDICT: GREEN fresh",
+            },
+            skip_rbac=True,
+            skip_intercept=True,
+        )
+        outcomes2 = tick_waits(tmp_path, store, waits=waits)
+        assert len(outcomes2) == 1
+        assert outcomes2[0]["fulfilled_by"] == fresh.event_id
+    finally:
+        store.close()
+
+
+def test_concurrent_claim_timeout_vs_match_single_resume(tmp_path: Path):
+    """Timeout and match racing through fulfill_wait produce one resume only."""
+    waits = WaitStore(tmp_path)
+    wait = waits.create(
+        runner_id="r1",
+        producer_id="hermes",
+        chain_key="5",
+        origin_event_id=5,
+        predicate=WaitPredicate(from_any=["factory"], causation_id=5),
+        wait_id="w_race",
+    )
+    store = EventStore(tmp_path)
+    try:
+        o1 = fulfill_wait(
+            tmp_path,
+            store,
+            waits,
+            wait,
+            fulfilled_by=101,
+            status="timeout",
+            reason="timeout path",
+        )
+        o2 = fulfill_wait(
+            tmp_path,
+            store,
+            waits,
+            wait,
+            fulfilled_by=202,
+            status="ok",
+            reason="match path",
+        )
+        assert o1 is not None
+        assert o2 is None  # second claim lost (already terminal)
+        resumes = [
+            e
+            for e in store.poll("okf/handoff", since_id=0)["events"]
+            if isinstance(e.get("payload"), dict) and "resume" in e["payload"]
+        ]
+        assert len(resumes) == 1
+        assert resumes[0]["payload"]["resume"]["fulfilled_by"] == 101
+        assert resumes[0]["payload"]["resume"]["status"] == "timeout"
+        reloaded = waits.load("w_race")
+        assert reloaded is not None
+        assert reloaded.status == "timeout"
+    finally:
+        store.close()
+
+
+def test_crash_mid_fulfill_retries_from_progress(tmp_path: Path):
+    """If claim persisted but terminal not yet set, next tick finishes delivery."""
+    waits = WaitStore(tmp_path)
+    wait = waits.create(
+        runner_id="r1",
+        producer_id="hermes",
+        chain_key="9",
+        origin_event_id=9,
+        predicate=WaitPredicate(from_any=["factory"], causation_id=9),
+        wait_id="w_crash",
+        intake_hint={"mode": "webhook_queue", "runtime": "hermes"},
+    )
+    # Simulate crash after exclusive claim, before publish/intake/terminal.
+    claimed = waits.claim_fulfillment(
+        wait.wait_id,
+        fulfilled_by=55,
+        resume_status="ok",
+        reason="partial",
+    )
+    assert claimed is not None
+    assert claimed.status == "fulfilling"
+    assert claimed.resume_published is False
+
+    store = EventStore(tmp_path)
+    try:
+        outcomes = tick_waits(tmp_path, store, waits=waits)
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "ok"
+        assert outcomes[0]["fulfilled_by"] == 55
+        reloaded = waits.load("w_crash")
+        assert reloaded is not None
+        assert reloaded.is_terminal
+        assert reloaded.resume_published is True
+        assert reloaded.intake_delivered is True
+        q = tmp_path / ".agentbus" / "ingress" / "hermes_wake_queue.jsonl"
+        assert q.is_file()
+        lines = [json.loads(x) for x in q.read_text().splitlines() if x.strip()]
+        assert len(lines) == 1
+        assert (lines[0].get("raw") or {}).get("source") == "resume"
     finally:
         store.close()
 
@@ -582,3 +753,84 @@ def test_corrupt_wait_file_skipped(tmp_path: Path):
     )
     listed = waits.list_waits(status="pending")
     assert [w.wait_id for w in listed] == ["w_good"]
+
+
+def test_clamp_timeout_rejects_non_finite():
+    assert clamp_timeout_hours(float("nan")) == 4.0  # non-finite → default
+    assert clamp_timeout_hours(float("inf")) == 4.0  # non-finite → default
+    assert clamp_timeout_hours(-1) == 4.0
+    assert clamp_timeout_hours(100) == 24.0  # finite over-max → clamped
+    assert clamp_timeout_hours(2) == 2.0
+
+
+def test_wait_id_grammar_and_no_blind_replace(tmp_path: Path):
+    import pytest
+
+    waits = WaitStore(tmp_path)
+    # Reserved / traversal / empty ids are rejected outright.
+    for bad in ("_cursor", "../escape", "a/b", "", "with space"):
+        with pytest.raises(ValueError):
+            waits.path_for(bad)
+    waits.create(
+        runner_id="r1",
+        producer_id="hermes",
+        chain_key="1",
+        origin_event_id=1,
+        predicate=WaitPredicate(from_any=["factory"], causation_id=1),
+        wait_id="w_dup",
+    )
+    # create() must not silently reopen or replace an existing wait.
+    with pytest.raises(ValueError):
+        waits.create(
+            runner_id="r1",
+            producer_id="hermes",
+            chain_key="1",
+            origin_event_id=1,
+            predicate=WaitPredicate(from_any=["factory"], causation_id=1),
+            wait_id="w_dup",
+        )
+
+
+def test_scan_boundary_rejects_stale_history(tmp_path: Path):
+    """A from_any-only wait must not fulfill from events older than its boundary."""
+    store = EventStore(tmp_path)
+    try:
+        # Stale historical event from factory, published BEFORE the wait exists.
+        stale, _ = store.publish(
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload={"from": "factory", "to": "hermes", "summary": "old news"},
+            idempotency_key="stale-1",
+            skip_rbac=True,
+            skip_intercept=True,
+        )
+        waits = WaitStore(tmp_path)
+        waits.create(
+            runner_id="r1",
+            producer_id="hermes",
+            chain_key="1",
+            origin_event_id=1,
+            predicate=WaitPredicate(from_any=["factory"]),  # from-only
+            wait_id="w_scan",
+            scan_from_event_id=stale.event_id,
+        )
+        # Tick: the stale event is at/below the boundary → no fulfillment.
+        assert tick_waits(tmp_path, store) == []
+        assert WaitStore(tmp_path).load("w_scan").status == "pending"
+
+        # A fresh matching event past the boundary fulfills the wait.
+        fresh, _ = store.publish(
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload={"from": "factory", "to": "hermes", "summary": "fresh"},
+            idempotency_key="fresh-1",
+            skip_rbac=True,
+            skip_intercept=True,
+        )
+        outcomes = tick_waits(tmp_path, store)
+        assert len(outcomes) == 1
+        assert outcomes[0]["fulfilled_by"] == fresh.event_id
+    finally:
+        store.close()

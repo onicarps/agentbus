@@ -60,7 +60,7 @@ class AgentBus:
         try:
             from agentbus.schemas import validate_payload
 
-            payload = validate_payload(topic, payload)
+            payload = validate_payload(topic, payload, producer_id=pid)
             event, duplicate = store.publish(
                 topic=topic,
                 producer_id=pid,

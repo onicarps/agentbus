@@ -18,8 +18,10 @@ def runner_subprocess_env(
 ) -> dict[str, str]:
     """Env for headless CLI adapters (workspace + wake id for ``agentbus await``)."""
     env = os.environ.copy()
-    env.setdefault("AGENTBUS_WORKSPACE", str(workspace.resolve()))
-    env.setdefault("AGENTBUS_PRODUCER_ID", producer_id)
+    # Authoritative from the active runner; inherited ambient values must not
+    # redirect an adapter's `agentbus await` drop to the wrong workspace/producer.
+    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
+    env["AGENTBUS_PRODUCER_ID"] = producer_id
     env["AGENTBUS_WAKE_EVENT_ID"] = str(wake.event_id)
     # Matches ChainBudget.chain_key(event_id, causation_id)
     env["AGENTBUS_CHAIN_KEY"] = str(

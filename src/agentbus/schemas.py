@@ -245,12 +245,27 @@ def normalize_handoff_payload(payload: dict) -> dict:
 
 
 def validate_payload(
-    topic: str, payload: dict, *, workspace: Path | None = None
+    topic: str,
+    payload: dict,
+    *,
+    workspace: Path | None = None,
+    producer_id: str | None = None,
 ) -> dict:
     """Validate and return normalized payload (may coerce common agent mistakes)."""
     validate_topic(topic, workspace=workspace)
     if topic == "okf/handoff":
         payload = normalize_handoff_payload(payload)
+        # The synthetic resume object is reserved for the internal AgentBus
+        # resume path. Ordinary handoff publishers must not forge resume context.
+        if (
+            isinstance(payload, dict)
+            and "resume" in payload
+            and producer_id is not None
+            and producer_id != "agentbus"
+        ):
+            raise ValueError(
+                "invalid_payload: 'resume' is reserved for the agentbus producer"
+            )
     schema = _resolve_schema(topic, workspace=workspace)
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(payload), key=lambda e: e.path)

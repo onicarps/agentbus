@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import os
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -19,8 +22,37 @@ MAX_TIMEOUT_HOURS = 24
 WAITS_DIRNAME = "waits"
 CURSOR_FILENAME = "_cursor.json"
 
+# Strict wait-id / agent-id grammar. Reject traversal, collisions, and reserved
+# internal names (anything beginning with "_", e.g. the cursor file).
+WAIT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def validate_agent_id(value: str) -> str:
+    """Return ``value`` if it matches the agent-id grammar, else raise ValueError."""
+    v = (value or "").strip()
+    if not AGENT_ID_PATTERN.match(v):
+        raise ValueError(f"invalid agent id: {value!r}")
+    return v
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via a unique same-directory temp file + os.replace (concurrency safe)."""
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
 # Terminal wait statuses — no further live resumes.
 TERMINAL_STATUSES = frozenset({"fulfilled", "timeout", "cancelled"})
+# In-flight claim: exclusive owner is completing publish + intake delivery.
+CLAIMING_STATUS = "fulfilling"
 
 
 def utc_now() -> datetime:
@@ -51,7 +83,7 @@ def clamp_timeout_hours(hours: float | int | None) -> float:
     if hours is None:
         return float(DEFAULT_TIMEOUT_HOURS)
     h = float(hours)
-    if h <= 0:
+    if not math.isfinite(h) or h <= 0:
         return float(DEFAULT_TIMEOUT_HOURS)
     return min(h, float(MAX_TIMEOUT_HOURS))
 
@@ -111,10 +143,21 @@ class WaitRegistration:
     timeout_at: str
     reason: str
     predicate: WaitPredicate
-    status: str = "pending"  # pending | fulfilled | timeout | cancelled
+    # pending | fulfilling | fulfilled | timeout | cancelled
+    status: str = "pending"
     fulfilled_by: int | None = None
     intake_hint: dict[str, Any] = field(default_factory=dict)
     task_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Lower event-id boundary: events at or below it are stale history.
+    # Defaults to origin_event_id (lost-wakeup window = events after the turn wake).
+    # 0 = unset (no lower bound; legacy).
+    scan_from_event_id: int = 0
+    # Durable outbox progress (crash-safe claim → publish → intake → terminal).
+    claim_resume_status: str = ""  # ok | timeout (set on claim)
+    claim_reason: str = ""
+    resume_event_id: int | None = None
+    resume_published: bool = False
+    intake_delivered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -133,6 +176,15 @@ class WaitRegistration:
             fulfilled_by = int(fb) if fb is not None else None
         except (TypeError, ValueError):
             fulfilled_by = None
+        try:
+            scan_from = int(data.get("scan_from_event_id") or 0)
+        except (TypeError, ValueError):
+            scan_from = 0
+        try:
+            resume_eid = data.get("resume_event_id")
+            resume_event_id = int(resume_eid) if resume_eid is not None else None
+        except (TypeError, ValueError):
+            resume_event_id = None
         return cls(
             wait_id=str(data.get("wait_id") or ""),
             runner_id=str(data.get("runner_id") or ""),
@@ -147,6 +199,12 @@ class WaitRegistration:
             ),
             status=str(data.get("status") or "pending"),
             fulfilled_by=fulfilled_by,
+            scan_from_event_id=scan_from,
+            claim_resume_status=str(data.get("claim_resume_status") or ""),
+            claim_reason=str(data.get("claim_reason") or ""),
+            resume_event_id=resume_event_id,
+            resume_published=bool(data.get("resume_published")),
+            intake_delivered=bool(data.get("intake_delivered")),
             intake_hint=dict(data.get("intake_hint") or {})
             if isinstance(data.get("intake_hint"), dict)
             else {},
@@ -158,6 +216,10 @@ class WaitRegistration:
     @property
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
+
+    @property
+    def is_fulfilling(self) -> bool:
+        return self.status == CLAIMING_STATUS
 
 
 def match_predicate(
@@ -338,20 +400,22 @@ class WaitStore:
         self.waits_dir.mkdir(parents=True, exist_ok=True)
 
     def path_for(self, wait_id: str) -> Path:
-        safe = "".join(c for c in wait_id if c.isalnum() or c in "_-")
-        if not safe:
-            raise ValueError("invalid wait_id")
-        return self.waits_dir / f"{safe}.json"
+        # Validate strictly (do not sanitize): distinct ids must map to distinct
+        # files, and reserved internal names (leading "_", e.g. _cursor) are
+        # never valid wait ids.
+        if not WAIT_ID_PATTERN.match(wait_id or ""):
+            raise ValueError(f"invalid wait_id: {wait_id!r}")
+        if wait_id.startswith("_"):
+            raise ValueError(f"reserved wait_id: {wait_id!r}")
+        return self.waits_dir / f"{wait_id}.json"
 
     def save(self, wait: WaitRegistration) -> Path:
         self.ensure_dir()
         path = self.path_for(wait.wait_id)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(
+        _atomic_write(
+            path,
             json.dumps(wait.to_dict(), indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
         )
-        tmp.replace(path)
         return path
 
     def load(self, wait_id: str) -> WaitRegistration | None:
@@ -417,9 +481,7 @@ class WaitStore:
             "last_seen_event_id": int(event_id),
             "updated_at": utc_now_iso(self._now()),
         }
-        tmp = self.cursor_path.with_suffix(self.cursor_path.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(self.cursor_path)
+        _atomic_write(self.cursor_path, json.dumps(payload, indent=2) + "\n")
 
     def create(
         self,
@@ -434,25 +496,123 @@ class WaitStore:
         wait_id: str | None = None,
         intake_hint: dict[str, Any] | None = None,
         task_snapshot: dict[str, Any] | None = None,
+        scan_from_event_id: int | None = None,
         now: datetime | None = None,
     ) -> WaitRegistration:
         now_dt = now or self._now()
         hours = clamp_timeout_hours(timeout_hours)
         timeout_at = utc_now_iso(now_dt + timedelta(hours=hours))
+        wid = wait_id or new_wait_id()
+        # Do not silently reopen or replace an existing wait (pending or
+        # terminal). Callers that legitimately resume an existing wait must go
+        # through load()/save(); create() is strictly for new registrations.
+        existing = self.load(wid)
+        if existing is not None:
+            raise ValueError(f"wait already exists: {wid}")
+        origin = int(origin_event_id)
+        # Default scan boundary = origin wake when caller omits it (direct
+        # create / tests). Runner path must pass store.latest_event_id() at
+        # turn start — wake.event_id may be a synthetic queue id, not a store id.
+        # Explicit 0 is allowed (no lower bound).
+        if scan_from_event_id is None:
+            scan_from = origin
+        else:
+            scan_from = int(scan_from_event_id)
         wait = WaitRegistration(
-            wait_id=wait_id or new_wait_id(),
+            wait_id=wid,
             runner_id=runner_id,
             producer_id=producer_id,
             chain_key=str(chain_key),
-            origin_event_id=int(origin_event_id),
+            origin_event_id=origin,
             suspended_at=utc_now_iso(now_dt),
             timeout_at=timeout_at,
             reason=reason,
             predicate=predicate,
             status="pending",
+            scan_from_event_id=scan_from,
             intake_hint=dict(intake_hint or {}),
             task_snapshot=dict(task_snapshot or {}),
         )
+        self.save(wait)
+        return wait
+
+    def claim_fulfillment(
+        self,
+        wait_id: str,
+        *,
+        fulfilled_by: int,
+        resume_status: str,
+        reason: str,
+    ) -> WaitRegistration | None:
+        """Atomically claim a pending wait for exclusive fulfillment.
+
+        Returns the claimed wait if this caller won the claim, the already-
+        claimed wait if status is ``fulfilling`` (for crash retry), or None if
+        the wait is terminal / missing. Concurrent timeout vs match ticks
+        cannot both claim: only the first exclusive locker wins.
+        """
+        path = self.path_for(wait_id)
+        if not path.is_file():
+            return None
+
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX fallback
+            fcntl = None  # type: ignore[assignment]
+
+        with path.open("r+", encoding="utf-8") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            try:
+                raw = fh.read()
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(data, dict):
+                    return None
+                try:
+                    wait = WaitRegistration.from_dict(data)
+                except (TypeError, ValueError, KeyError):
+                    return None
+
+                if wait.is_terminal:
+                    return None
+
+                if wait.is_fulfilling:
+                    # Crash recovery: return existing claim so caller can finish
+                    # publish/intake from persisted progress fields.
+                    return wait
+
+                if wait.status != "pending":
+                    return None
+
+                wait.status = CLAIMING_STATUS
+                wait.fulfilled_by = int(fulfilled_by)
+                wait.claim_resume_status = (
+                    resume_status if resume_status in ("ok", "timeout") else "ok"
+                )
+                wait.claim_reason = reason
+                wait.resume_published = False
+                wait.intake_delivered = False
+                wait.resume_event_id = None
+
+                text = json.dumps(wait.to_dict(), indent=2, ensure_ascii=False) + "\n"
+                fh.seek(0)
+                fh.truncate()
+                fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
+                return wait
+            finally:
+                if fcntl is not None:
+                    try:
+                        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+
+    def save_progress(self, wait: WaitRegistration) -> WaitRegistration:
+        """Persist outbox progress while status remains ``fulfilling``."""
         self.save(wait)
         return wait
 

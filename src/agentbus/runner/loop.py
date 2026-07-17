@@ -223,6 +223,10 @@ def process_envelope(
         return {"event_id": wake.event_id, "status": "skipped", "reason": skip}
 
     chain = budget.chain_key(wake.event_id, wake.causation_id)
+    # Scan boundary from the event store (not wake.event_id): queue-injected
+    # wakes often carry synthetic IDs that are not store event_ids. Captured
+    # before the adapter so events concurrent with the turn still fulfill.
+    scan_from_event_id = store.latest_event_id()
     if budget.would_exceed(chain):
         result = TurnResult(
             ok=False,
@@ -253,8 +257,6 @@ def process_envelope(
             )
         result = detect_suspend(workspace, wake, result)
 
-    _write_run_log(workspace, cfg, wake, result)
-
     reply_to = wake.from_agent or "agy"
     if not reply_to or reply_to == cfg.producer_id:
         reply_to = wake.from_agent or "all"
@@ -277,6 +279,8 @@ def process_envelope(
                 origin_event_id=wake.event_id,
                 await_data=await_data if isinstance(await_data, dict) else {},
                 intake_hint=_intake_hint(cfg),
+                # Store-id boundary at turn start (not synthetic wake ids).
+                scan_from_event_id=scan_from_event_id,
             )
             wait_id = wait.wait_id
         except Exception as exc:  # noqa: BLE001
@@ -313,6 +317,8 @@ def process_envelope(
                 )
 
         if result.status == "suspended":
+            # Persist the finalized suspended record (matches the published ACK).
+            _write_run_log(workspace, cfg, wake, result)
             event, duplicate = store.publish(
                 topic="okf/handoff",
                 producer_id=cfg.producer_id,
@@ -345,6 +351,9 @@ def process_envelope(
             }
 
     # ok / error path (unchanged semantics)
+    # Persist the finalized result (covers the registration-failed error case,
+    # so the durable run record never contradicts the published RUNNER_ERROR).
+    _write_run_log(workspace, cfg, wake, result)
     event, duplicate = store.publish(
         topic="okf/handoff",
         producer_id=cfg.producer_id,

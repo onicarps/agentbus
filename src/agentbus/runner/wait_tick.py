@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +25,21 @@ from agentbus.store import EventStore
 log = logging.getLogger("agentbus.runner.wait_tick")
 
 Clock = Callable[[], datetime]
+
+
+def _confine_to_workspace(workspace: Path, rel: str | None, default_rel: str) -> Path:
+    """Resolve an intake path hint, falling back to a trusted default if the
+    hint is absolute or escapes the workspace (path-traversal guard)."""
+    root = workspace.resolve()
+    candidate = Path(rel) if rel else Path(default_rel)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        resolved = (root / default_rel).resolve()
+    return resolved
 
 
 def _event_as_dict(ev: Any) -> dict[str, Any]:
@@ -62,10 +78,9 @@ def deliver_resume_intake(
     }
 
     # Always write classical WAKE.<producer>.json (wake_file runners + fallback)
-    wake_rel = hint.get("wake_file") or f".agentbus/WAKE.{producer}.json"
-    wake_path = Path(wake_rel)
-    if not wake_path.is_absolute():
-        wake_path = workspace / wake_path
+    wake_path = _confine_to_workspace(
+        workspace, hint.get("wake_file"), f".agentbus/WAKE.{producer}.json"
+    )
     wake_path.parent.mkdir(parents=True, exist_ok=True)
     wake_path.write_text(
         json.dumps(wake_body, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -76,9 +91,8 @@ def deliver_resume_intake(
     mode = hint.get("mode")
     if mode == "webhook_queue" or hint.get("queue_path") or runtime:
         if hint.get("queue_path"):
-            qpath = Path(hint["queue_path"])
-            if not qpath.is_absolute():
-                qpath = workspace / qpath
+            default_rel = f".agentbus/ingress/{runtime}_wake_queue.jsonl"
+            qpath = _confine_to_workspace(workspace, hint["queue_path"], default_rel)
         else:
             qpath = default_queue_path(workspace, str(runtime))
         qpath.parent.mkdir(parents=True, exist_ok=True)
@@ -175,6 +189,18 @@ def _wait_terminal_status(resume_status: str) -> str:
     return "fulfilled"
 
 
+def _try_claim_intake_marker(waits: WaitStore, wait_id: str) -> bool:
+    """O_EXCL marker so concurrent fulfillers deliver intake at most once."""
+    waits.ensure_dir()
+    marker = waits.waits_dir / f".{wait_id}.intake_done"
+    try:
+        fd = os.open(str(marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
 def fulfill_wait(
     workspace: Path,
     store: EventStore,
@@ -185,59 +211,100 @@ def fulfill_wait(
     status: str,
     reason: str,
 ) -> dict[str, Any] | None:
-    """Mark wait terminal, publish resume (idempotent), deliver intake.
+    """Claim wait, publish resume (idempotent), deliver intake, mark terminal.
+
+    Durable state machine (crash-safe)::
+
+        pending → fulfilling (exclusive claim) → fulfilled|timeout
+
+    Progress fields ``resume_published`` / ``intake_delivered`` / ``resume_event_id``
+    are persisted so a crash mid-path can resume without double-wake or lost
+    delivery. Concurrent timeout vs match ticks: only the first exclusive claim
+    proceeds; resume publish uses a fixed ``fulfilled_by`` from the claim;
+    intake uses an O_EXCL marker for exactly-once delivery.
 
     ``status`` is the resume payload status (``ok`` | ``timeout``).
-    WaitRegistration is stored as ``fulfilled`` | ``timeout`` (terminal).
 
-    Returns result dict or None if wait was already terminal / duplicate no-op.
+    Returns result dict or None if wait was already terminal / claim lost.
     """
     if wait.is_terminal:
         return None
 
-    # Re-load to reduce double-tick races
-    current = waits.load(wait.wait_id) or wait
-    if current.is_terminal:
-        return None
-
     resume_status = status if status in ("ok", "timeout") else "ok"
-    event, duplicate = _publish_resume(
-        store,
-        current,
+    current = waits.claim_fulfillment(
+        wait.wait_id,
         fulfilled_by=fulfilled_by,
-        status=resume_status,
+        resume_status=resume_status,
         reason=reason,
     )
+    if current is None:
+        return None
+
+    # Use the locked claim values (first claimer wins fulfilled_by).
+    claimed_by = int(current.fulfilled_by or fulfilled_by)
+    resume_status = (
+        current.claim_resume_status
+        if current.claim_resume_status in ("ok", "timeout")
+        else resume_status
+    )
+    claim_reason = current.claim_reason or reason
+    duplicate = False
+
+    # 1) Publish resume (or recover stored event id after crash).
+    #    Idempotency key is resume:{wait_id}:{claimed_by} so re-publish is a no-op.
+    if current.resume_published and current.resume_event_id is not None:
+        class _Evt:
+            event_id = int(current.resume_event_id)
+
+        event = _Evt()
+        duplicate = True
+    else:
+        event, duplicate = _publish_resume(
+            store,
+            current,
+            fulfilled_by=claimed_by,
+            status=resume_status,
+            reason=claim_reason,
+        )
+        current.resume_event_id = int(event.event_id)
+        current.resume_published = True
+        waits.save_progress(current)
+
+    # 2) Deliver intake at most once (O_EXCL marker + progress flag).
+    if not current.intake_delivered:
+        if _try_claim_intake_marker(waits, current.wait_id):
+            try:
+                chain_causation = int(current.chain_key)
+            except (TypeError, ValueError):
+                chain_causation = current.origin_event_id
+            deliver_resume_intake(
+                workspace,
+                current,
+                resume_event_id=int(event.event_id),
+                payload=build_resume_payload(
+                    current,
+                    fulfilled_by=claimed_by,
+                    status=resume_status,
+                    reason=claim_reason,
+                ),
+                causation_id=chain_causation,
+            )
+        current.intake_delivered = True
+        waits.save_progress(current)
+
+    # 3) Terminal — no further ticks will claim this wait.
     waits.mark_terminal(
         current,
         status=_wait_terminal_status(resume_status),
-        fulfilled_by=fulfilled_by,
+        fulfilled_by=claimed_by,
     )
-
-    if not duplicate:
-        try:
-            chain_causation = int(current.chain_key)
-        except (TypeError, ValueError):
-            chain_causation = current.origin_event_id
-        deliver_resume_intake(
-            workspace,
-            current,
-            resume_event_id=event.event_id,
-            payload=build_resume_payload(
-                current,
-                fulfilled_by=fulfilled_by,
-                status=resume_status,
-                reason=reason,
-            ),
-            causation_id=chain_causation,
-        )
 
     return {
         "wait_id": current.wait_id,
         "status": resume_status,
         "wait_status": _wait_terminal_status(resume_status),
-        "fulfilled_by": fulfilled_by,
-        "resume_event_id": event.event_id,
+        "fulfilled_by": claimed_by,
+        "resume_event_id": int(event.event_id),
         "duplicate": duplicate,
     }
 
@@ -258,6 +325,21 @@ def tick_waits(
     wait_store = waits or WaitStore(workspace, now_fn=(lambda: now) if now else None)
     clock = now or utc_now()
     results: list[dict[str, Any]] = []
+
+    # 0) Crash recovery: finish in-flight claims (publish/intake/terminal).
+    for wait in wait_store.list_waits(status="fulfilling"):
+        outcome = fulfill_wait(
+            workspace,
+            store,
+            wait_store,
+            wait,
+            fulfilled_by=int(wait.fulfilled_by or wait.origin_event_id or 0),
+            status=wait.claim_resume_status or "ok",
+            reason=wait.claim_reason or "resume incomplete claim",
+        )
+        if outcome:
+            results.append(outcome)
+
     pending = wait_store.list_waits(status="pending")
     if not pending:
         # Still advance cursor if events exist so we don't re-scan forever later
@@ -291,7 +373,14 @@ def tick_waits(
         return results
 
     cursor = wait_store.get_cursor()
-    scan_topics = topics or ["okf/handoff"]
+    # Derive scan topics from the pending waits themselves so custom-topic waits
+    # actually resume; fall back to the default handoff topic.
+    if topics:
+        scan_topics = topics
+    else:
+        scan_topics = sorted(
+            {(w.predicate.topic or "okf/handoff") for w in pending}
+        ) or ["okf/handoff"]
     # Also consider min origin so pre-cursor fulfillments for new waits resolve
     min_origin = min((w.origin_event_id for w in pending), default=cursor)
     since = min(cursor, max(0, min_origin - 1))
@@ -328,8 +417,11 @@ def tick_waits(
                 eid = int(ev.get("event_id") or 0)
             except (TypeError, ValueError):
                 continue
-            # Only events at or after wait registration origin matter for
-            # lost-wakeup; allow any event_id > 0 that matches predicate.
+            # Enforce the per-wait scan boundary captured at suspend time so a
+            # from_any-only wait cannot fulfill from unrelated stale history.
+            # (Boundary 0 = unset → no lower bound, preserves legacy behavior.)
+            if wait.scan_from_event_id and eid <= wait.scan_from_event_id:
+                continue
             if not match_predicate(
                 wait.predicate, ev, waiter_producer_id=wait.producer_id
             ):
@@ -365,6 +457,7 @@ def register_wait_from_await_drop(
     origin_event_id: int,
     await_data: dict[str, Any],
     intake_hint: dict[str, Any] | None = None,
+    scan_from_event_id: int | None = None,
     waits: WaitStore | None = None,
 ) -> WaitRegistration:
     """Upsert WaitRegistration from CLI await.json drop (or create defaults)."""
@@ -401,6 +494,17 @@ def register_wait_from_await_drop(
         if isinstance(await_data.get("task_snapshot"), dict)
         else None
     )
+    # Prefer drop-provided boundary; else runner-supplied store snapshot; else
+    # None so WaitStore.create defaults to origin_event_id.
+    if "scan_from_event_id" in await_data and await_data.get(
+        "scan_from_event_id"
+    ) is not None:
+        try:
+            resolved_scan: int | None = int(await_data["scan_from_event_id"])
+        except (TypeError, ValueError):
+            resolved_scan = scan_from_event_id
+    else:
+        resolved_scan = scan_from_event_id
     return store.create(
         runner_id=str(await_data.get("runner_id") or runner_id),
         producer_id=str(await_data.get("producer_id") or producer_id),
@@ -412,4 +516,5 @@ def register_wait_from_await_drop(
         wait_id=wait_id or None,
         intake_hint=hint,
         task_snapshot=snapshot,
+        scan_from_event_id=resolved_scan,
     )

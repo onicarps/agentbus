@@ -168,7 +168,9 @@ def agentbus_publish(
         return json.dumps({"error": str(exc), "code": 401})
 
     def _run() -> str:
-        validated = validate_payload(topic, payload)
+        validated = validate_payload(
+            topic, payload, producer_id=_producer_id(producer_id)
+        )
         try:
             event, duplicate = _get_store().publish(
                 topic=topic,
