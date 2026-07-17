@@ -49,7 +49,13 @@ def get_adapter(
         if workspace is None:
             raise ValueError("agy adapter requires workspace")
         return AgyAdapter(workspace=workspace, options=options)
+    if kind == "aider":
+        from agentbus.runner.adapters.aider import AiderAdapter
+
+        if workspace is None:
+            raise ValueError("aider adapter requires workspace")
+        return AiderAdapter(workspace=workspace, options=options)
     raise ValueError(
         f"unknown adapter type {adapter_type!r} "
-        f"(supported: echo, hermes, factory, grok, agy)"
+        f"(supported: echo, hermes, factory, grok, agy, aider)"
     )

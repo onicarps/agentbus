@@ -1,0 +1,30 @@
+# Aider SRE runner example (copy to .agentbus/runner.aider.yaml)
+version: "1.0"
+runner_id: aider-runner-1
+producer_id: aider
+intake:
+  mode: wake_file
+  wake_file: .agentbus/WAKE.aider.json
+adapter:
+  type: aider
+  command: aider
+  timeout_seconds: 600
+  yes_always: true
+  # Yolo-Auto OpenAI-compatible (keys in ~/.aider.env only)
+  model: openai/qwen3.6-35b-a3b
+  extra_args:
+    - --env-file
+    - /home/oni/.aider.env
+    - --openai-api-base
+    - https://yolo-auto.com/v1
+    - --no-git
+    - --no-auto-commits
+accept_to:
+  - aider
+  - sre
+  - health
+allow_broadcast: false
+budget:
+  max_turns_per_chain: 8
+poll_interval_ms: 2000
+runs_dir: .agentbus/runs

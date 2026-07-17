@@ -153,6 +153,7 @@ agentbus run --config examples/runner.hermes.yaml --once
 | `factory` | `droid exec -f prompt.md --auto medium -o text` subprocess |
 | `grok` | `grok --prompt-file … --always-approve --max-turns N` (Phase E) |
 | `agy` | `agy --print … --print-timeout …` (Phase E) |
+| `aider` | `aider --message …` SRE/health (optional) |
 
 ```bash
 # Factory / Grok / Agy
