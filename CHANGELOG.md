@@ -5,7 +5,8 @@
 ### Added — headless reason-plane runner (Phases B–F)
 
 - **`agentbus run --config runner.<id>.yaml [--once]`:** headless TurnAdapter loop with dual intake (bus poll + wake file), budget, and RUNNER_ACK/ERROR publish
-- **Adapters:** Hermes, Factory (droid + auto high), Grok, Agy, Echo — isolated CLI oneshot processes (no interactive TUI mutation)
+- **Adapters:** Hermes, Factory (droid + auto high), Grok, Agy, Aider (SRE), Echo — isolated CLI oneshot processes (no interactive TUI mutation)
+- **CI:** PATH binary preflight skipped when adapters receive injected `run_fn` (mocked unit tests green without vendor CLIs on PATH)
 - **Runner package:** `agentbus.runner` (config, loop, intake, budget, types, adapters)
 - **Example configs:** `examples/runner.{hermes,factory,grok,agy}.yaml`
 - **Swarm composition (Phase F):** `enabled: false` on services; `agentbus up` skips disabled runners and reports `skipped[]`; example swarm documents opt-in headless services

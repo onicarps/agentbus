@@ -71,6 +71,8 @@ class AgyAdapter:
         self.workspace = workspace.resolve()
         self.options = dict(options or {})
         self._run_fn = run_fn or subprocess.run
+        # Injected run_fn (unit tests) skips PATH binary preflight.
+        self._skip_bin_check = run_fn is not None
 
     def start_turn(
         self, wake: WakeEnvelope, *, budget_remaining: int
@@ -86,7 +88,7 @@ class AgyAdapter:
         if not isinstance(extra, list):
             raise ValueError("adapter.extra_args must be a list")
 
-        if not dry_run:
+        if not dry_run and not self._skip_bin_check:
             if agy_bin == "agy" and shutil.which("agy") is None:
                 return TurnResult(
                     ok=False,

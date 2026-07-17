@@ -89,6 +89,8 @@ class HermesAdapter:
         self.workspace = workspace.resolve()
         self.options = dict(options or {})
         self._run_fn = run_fn or subprocess.run
+        # Injected run_fn (unit tests) skips PATH binary preflight.
+        self._skip_bin_check = run_fn is not None
 
     def start_turn(
         self, wake: WakeEnvelope, *, budget_remaining: int
@@ -104,25 +106,26 @@ class HermesAdapter:
         if not isinstance(extra, list):
             raise ValueError("adapter.extra_args must be a list")
 
-        if hermes_bin != "hermes" and not Path(hermes_bin).is_file():
-            # allow bare name on PATH
-            if shutil.which(hermes_bin) is None and not dry_run:
+        if not dry_run and not self._skip_bin_check:
+            if hermes_bin != "hermes" and not Path(hermes_bin).is_file():
+                # allow bare name on PATH
+                if shutil.which(hermes_bin) is None:
+                    return TurnResult(
+                        ok=False,
+                        summary=(
+                            f"RUNNER_ERROR: hermes binary not found: {hermes_bin!r} "
+                            f"event_id={wake.event_id}"
+                        ),
+                        detail={"hermes_bin": hermes_bin},
+                    )
+            elif hermes_bin == "hermes" and shutil.which("hermes") is None:
                 return TurnResult(
                     ok=False,
                     summary=(
-                        f"RUNNER_ERROR: hermes binary not found: {hermes_bin!r} "
-                        f"event_id={wake.event_id}"
+                        f"RUNNER_ERROR: hermes not on PATH event_id={wake.event_id}"
                     ),
                     detail={"hermes_bin": hermes_bin},
                 )
-        elif hermes_bin == "hermes" and not dry_run and shutil.which("hermes") is None:
-            return TurnResult(
-                ok=False,
-                summary=(
-                    f"RUNNER_ERROR: hermes not on PATH event_id={wake.event_id}"
-                ),
-                detail={"hermes_bin": hermes_bin},
-            )
 
         prompt = build_hermes_prompt(wake, budget_remaining=budget_remaining)
         cmd = build_hermes_command(
