@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.15.0] - 2026-07-17
+
+### Added — headless reason-plane runner (Phases B–F)
+
+- **`agentbus run --config runner.<id>.yaml [--once]`:** headless TurnAdapter loop with dual intake (bus poll + wake file), budget, and RUNNER_ACK/ERROR publish
+- **Adapters:** Hermes, Factory (droid + auto high), Grok, Agy, Echo — isolated CLI oneshot processes (no interactive TUI mutation)
+- **Runner package:** `agentbus.runner` (config, loop, intake, budget, types, adapters)
+- **Example configs:** `examples/runner.{hermes,factory,grok,agy}.yaml`
+- **Swarm composition (Phase F):** `enabled: false` on services; `agentbus up` skips disabled runners and reports `skipped[]`; example swarm documents opt-in headless services
+- **Docs:** `docs/WAKE.md` headless runner plane
+
+### Product decisions
+
+- Headless runners are parallel processes; interactive sessions remain HITL
+- Runners off by default in swarm; dogfood flips one bit per agent
+
 ## [0.14.0] - 2026-07-16
 
 ### Added — monitor from/to columns (Agy #210)

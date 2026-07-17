@@ -1339,5 +1339,36 @@ def wake_ingress_cmd(
         raise click.ClickException(str(exc)) from exc
 
 
+@main.command("run")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--config",
+    "config_path",
+    required=True,
+    type=click.Path(path_type=str),
+    help="Path to runner.<id>.yaml (relative to workspace or absolute)",
+)
+@click.option(
+    "--once",
+    is_flag=True,
+    help="Drain pending wake items once and exit (CI / dogfood)",
+)
+def run_cmd(workspace: str | None, config_path: str, once: bool) -> None:
+    """Headless reason-plane runner (v0.15 Phase B) — TurnAdapter + dual intake."""
+    from agentbus.runner import load_runner_config, run_loop
+
+    ws = _cli_workspace(workspace)
+    cfg_path = Path(config_path)
+    if not cfg_path.is_absolute():
+        candidate = ws / cfg_path
+        cfg_path = candidate if candidate.is_file() else Path(config_path).resolve()
+    try:
+        cfg = load_runner_config(cfg_path)
+        code = run_loop(ws, cfg, once=once)
+    except (FileNotFoundError, ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    raise SystemExit(code)
+
+
 if __name__ == "__main__":
     main()

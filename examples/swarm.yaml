@@ -1,5 +1,5 @@
 # Example AgentBus swarm (copy to <workspace>/.agentbus/swarm.yaml)
-# Docs: PRD v0.10.0 Orchestration DX
+# Docs: PRD v0.10 Orchestration DX · v0.15 headless runners (enabled: false)
 version: "1.0"
 services:
   watch:
@@ -12,3 +12,26 @@ services:
   #   command: "agentbus mcp-serve --wiretap"
   #   env:
   #     AGENTBUS_PRODUCER_ID: "mcp-local"
+
+  # v0.15 Phase F — headless reason-plane (opt-in)
+  # Copy runner.*.yaml into .agentbus/ first, then set enabled: true.
+  hermes-runner:
+    enabled: false
+    command: "agentbus run --config .agentbus/runner.hermes.yaml"
+    env:
+      AGENTBUS_PRODUCER_ID: "hermes"
+  factory-runner:
+    enabled: false
+    command: "agentbus run --config .agentbus/runner.factory.yaml"
+    env:
+      AGENTBUS_PRODUCER_ID: "factory"
+  grok-runner:
+    enabled: false
+    command: "agentbus run --config .agentbus/runner.grok.yaml"
+    env:
+      AGENTBUS_PRODUCER_ID: "grok"
+  agy-runner:
+    enabled: false
+    command: "agentbus run --config .agentbus/runner.agy.yaml"
+    env:
+      AGENTBUS_PRODUCER_ID: "agy"

@@ -35,6 +35,7 @@ class ServiceSpec:
     command: str
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
+    enabled: bool = True
 
 
 @dataclass
@@ -84,7 +85,10 @@ def load_swarm_config(workspace: Path) -> SwarmConfig:
             command = defn
             env: dict[str, str] = {}
             cwd = None
+            enabled = True
         elif isinstance(defn, dict):
+            # enabled: false → defined but not started by `agentbus up` (v0.15 Phase F)
+            enabled = bool(defn.get("enabled", True))
             command = defn.get("command")
             if not command or not isinstance(command, str):
                 raise ValueError(f"service '{name}' requires string 'command'")
@@ -94,7 +98,14 @@ def load_swarm_config(workspace: Path) -> SwarmConfig:
                 cwd = str(cwd)
         else:
             raise ValueError(f"service '{name}' must be a string command or mapping")
-        services[name] = ServiceSpec(name=name, command=command, env=env, cwd=cwd)
+        services[name] = ServiceSpec(
+            name=name, command=command, env=env, cwd=cwd, enabled=enabled
+        )
+    if not any(s.enabled for s in services.values()):
+        raise ValueError(
+            "swarm.yaml has no enabled services "
+            "(all entries set enabled: false — flip at least one to true)"
+        )
     return SwarmConfig(version=version, services=services, path=path)
 
 
@@ -374,7 +385,11 @@ def swarm_up(
 
     state = _read_state(workspace)
     started: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     for name, spec in cfg.services.items():
+        if not spec.enabled:
+            skipped.append({"name": name, "reason": "enabled:false"})
+            continue
         rec = start_service(workspace, spec)
         state.setdefault("services", {})[name] = rec
         started.append(rec)
@@ -384,6 +399,7 @@ def swarm_up(
 
     result: dict[str, Any] = {
         "started": [{"name": r["name"], "pid": r["pid"]} for r in started],
+        "skipped": skipped,
         "detach": detach,
         "state": str(state_path(workspace)),
     }
@@ -482,19 +498,34 @@ def write_example_swarm(workspace: Path, *, force: bool = False) -> Path:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        """# AgentBus swarm — declarative multi-service DX (v0.10)
+        """# AgentBus swarm — declarative multi-service DX
+# v0.15: headless runners support enabled: false (skipped by agentbus up)
 version: "1.0"
 services:
   watch:
     command: "agentbus watch --no-shell"
-  # Uncomment when obs monologue paths exist:
-  # tail:
-  #   command: "agentbus tail --agents grok,hermes --lines 5"
-  # Example MCP wiretap server (usually IDE-managed; optional here):
-  # mcp:
-  #   command: "agentbus mcp-serve --wiretap"
+  # --- v0.15 headless reason-plane (opt-in) ---
+  # Requires runner configs under .agentbus/runner.*.yaml
+  # hermes-runner:
+  #   enabled: false
+  #   command: "agentbus run --config .agentbus/runner.hermes.yaml"
   #   env:
-  #     AGENTBUS_PRODUCER_ID: "wiretap-serve"
+  #     AGENTBUS_PRODUCER_ID: "hermes"
+  # factory-runner:
+  #   enabled: false
+  #   command: "agentbus run --config .agentbus/runner.factory.yaml"
+  #   env:
+  #     AGENTBUS_PRODUCER_ID: "factory"
+  # grok-runner:
+  #   enabled: false
+  #   command: "agentbus run --config .agentbus/runner.grok.yaml"
+  #   env:
+  #     AGENTBUS_PRODUCER_ID: "grok"
+  # agy-runner:
+  #   enabled: false
+  #   command: "agentbus run --config .agentbus/runner.agy.yaml"
+  #   env:
+  #     AGENTBUS_PRODUCER_ID: "agy"
 """,
         encoding="utf-8",
     )

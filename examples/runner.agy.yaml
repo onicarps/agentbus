@@ -1,0 +1,26 @@
+# Agy headless runner (v0.15 Phase E)
+# Dogfood:
+#   export AGENTBUS_WORKSPACE=/home/oni/okf_agent_workspace
+#   agentbus run --config examples/runner.agy.yaml --once
+version: "1.0"
+runner_id: agy-runner-1
+producer_id: agy
+intake:
+  mode: wake_file
+  wake_file: .agentbus/WAKE.agy.json
+adapter:
+  type: agy
+  command: agy
+  timeout_seconds: 900
+  print_timeout: 15m
+  skip_permissions: true
+  # dry_run: true
+accept_to:
+  - agy
+  - architect
+allow_broadcast: false
+budget:
+  max_turns_per_chain: 10
+  max_event_age_hours: 24
+poll_interval_ms: 1500
+runs_dir: .agentbus/runs

@@ -95,6 +95,21 @@ MCP does **not** push into chat. Bridges:
 
 Prints one line per new wake event for tmux / Grok `monitor` / human paste.
 
+### Anti-pattern (v0.15 Phase A): tmux send-keys for autonomy
+
+**Unsupported for autonomous agent-to-agent work.** Do **not** use `tmux send-keys`
+(or similar stdin injection) to drive interactive CLIs as background workers.
+
+| Why | Effect |
+|-----|--------|
+| Concurrency collisions | Human typing / model generation races with injected keys |
+| Structure loss | Drops `causation_id` / `trace_id` into raw terminal text |
+| UX mismatch | Interactive TUI ≠ headless daemon |
+
+**Supported path:** durable log + wake (file/webhook) + **headless runner**  
+(`agentbus run` — Phase B skeleton; Hermes/Factory adapters Phase C/D).  
+tmux notify scripts remain **human attention** only.
+
 ## Ack convention
 
 When replying to a handoff that woke you:
@@ -119,9 +134,52 @@ Do **not** invent a separate `okf/wake-receipt` topic (product decision 2026-07-
 | max_event_age | 24h |
 | Multi-worker | per-agent config + role-scoped lease |
 
+## Headless runner (v0.15 Phase B/C)
+
+```bash
+# Echo adapter (CI-safe)
+# adapter.type: echo
+
+# Hermes adapter (Phase C) — isolated oneshot LLM turn
+export AGENTBUS_WORKSPACE=/home/oni/okf_agent_workspace
+agentbus run --config examples/runner.hermes.yaml --once
+# or: agentbus run --config .agentbus/runner.hermes.yaml --once
+```
+
+| Adapter | Mechanism |
+|---------|-----------|
+| `echo` | No LLM — run log + ACK (CI) |
+| `hermes` | `hermes chat -q … -Q --max-turns N` subprocess |
+| `factory` | `droid exec -f prompt.md --auto medium -o text` subprocess |
+| `grok` | `grok --prompt-file … --always-approve --max-turns N` (Phase E) |
+| `agy` | `agy --print … --print-timeout …` (Phase E) |
+
+```bash
+# Factory / Grok / Agy
+agentbus run --config examples/runner.factory.yaml --once
+agentbus run --config examples/runner.grok.yaml --once   # wake_file default
+agentbus run --config examples/runner.agy.yaml --once
+```
+
+Tech design: Phase B–F under `initiatives/agentbus/decisions/v0.15-*.md`  
+Dual intake: `webhook_queue` | `wake_file`.
+
+### Swarm composition (Phase F)
+
+`.agentbus/swarm.yaml` may declare runners with **`enabled: false`** (default off):
+
+```yaml
+hermes-runner:
+  enabled: false   # set true to dogfood
+  command: "agentbus run --config .agentbus/runner.hermes.yaml"
+```
+
+`agentbus up` skips disabled services (listed in `skipped`). Wake plane stays on.
+
 ## Anti-patterns
 
 - Cron a full coding agent to `poll` an empty bus every minute  
 - Put the bus on `/mnt/c` and expect reliable wake  
 - Assume `WAKE.json` injects an IDE turn without a bridge  
 - Dual workspaces (`projects/agentbus` vs OKF root) for the same swarm  
+- **`tmux send-keys` / stdin injection for autonomous multi-agent turns**  

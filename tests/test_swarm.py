@@ -53,6 +53,36 @@ def test_load_swarm_config(tmp_path: Path):
     assert "python" in cfg.services["sleeper"].command or sys.executable in cfg.services[
         "sleeper"
     ].command
+    assert cfg.services["watch"].enabled is True
+
+
+def test_load_enabled_false_skipped_on_up(tmp_path: Path):
+    cmd = _py_cmd("import time", "time.sleep(60)")
+    _write_swarm(
+        tmp_path,
+        {
+            "runner": {"command": cmd, "enabled": False},
+            "sleeper": {"command": cmd, "enabled": True},
+        },
+    )
+    cfg = load_swarm_config(tmp_path)
+    assert cfg.services["runner"].enabled is False
+    assert cfg.services["sleeper"].enabled is True
+
+    result = swarm_up(tmp_path, detach=True, run_monitor=False)
+    names = {s["name"] for s in result["started"]}
+    assert names == {"sleeper"}
+    assert any(s["name"] == "runner" for s in result.get("skipped") or [])
+    stop_all(tmp_path)
+
+
+def test_load_all_disabled_raises(tmp_path: Path):
+    _write_swarm(
+        tmp_path,
+        {"only": {"command": "true", "enabled": False}},
+    )
+    with pytest.raises(ValueError, match="no enabled services"):
+        load_swarm_config(tmp_path)
 
 
 def test_load_missing_raises(tmp_path: Path):

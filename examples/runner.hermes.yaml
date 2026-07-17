@@ -1,0 +1,30 @@
+# Hermes headless runner (v0.15 Phase C)
+# Dogfood:
+#   export AGENTBUS_WORKSPACE=/home/oni/okf_agent_workspace
+#   agentbus run --config examples/runner.hermes.yaml --once
+#
+# CI / offline: set adapter.dry_run: true
+version: "1.0"
+runner_id: hermes-runner-1
+producer_id: hermes
+intake:
+  mode: webhook_queue
+  runtime: hermes
+adapter:
+  type: hermes
+  command: hermes
+  timeout_seconds: 600
+  max_turns: 8
+  # dry_run: true
+  # model: null
+  # provider: null
+  # extra_args: []
+accept_to:
+  - hermes
+  - devops
+allow_broadcast: false
+budget:
+  max_turns_per_chain: 10
+  max_event_age_hours: 24
+poll_interval_ms: 1000
+runs_dir: .agentbus/runs

@@ -1,0 +1,28 @@
+# Grok headless runner (v0.15 Phase E)
+# Dogfood:
+#   export AGENTBUS_WORKSPACE=/home/oni/okf_agent_workspace
+#   agentbus run --config examples/runner.grok.yaml --once
+version: "1.0"
+runner_id: grok-runner-1
+producer_id: grok
+intake:
+  mode: wake_file
+  wake_file: .agentbus/WAKE.grok.json
+adapter:
+  type: grok
+  command: grok
+  timeout_seconds: 900
+  max_turns: 12
+  always_approve: true
+  output_format: plain
+  # dry_run: true
+accept_to:
+  - grok
+  - engineer
+  - implementer
+allow_broadcast: false
+budget:
+  max_turns_per_chain: 10
+  max_event_age_hours: 24
+poll_interval_ms: 1500
+runs_dir: .agentbus/runs
