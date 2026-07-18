@@ -186,6 +186,9 @@ def test_escape_markup_neutralizes_brackets():
 def test_fetch_monitor_state_survives_concurrent_writers(tmp_path):
     """Read-only monitor snapshot should not fail when peers publish rapidly."""
     set_validation_workspace(tmp_path)
+    # Warm schema once so concurrent EventStore opens are not racing first migrate.
+    warm = EventStore(tmp_path)
+    warm.close()
     stop = threading.Event()
 
     def writer() -> None:

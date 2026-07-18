@@ -178,45 +178,63 @@ class EventStore:
         )
         self._conn.commit()
 
+    def _add_column_if_missing(self, column: str, ddl: str) -> bool:
+        """Idempotent ADD COLUMN; tolerate concurrent migrators (duplicate column)."""
+        cols = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        if column in cols:
+            return False
+        try:
+            self._conn.execute(ddl)
+            return True
+        except sqlite3.OperationalError as exc:
+            # Concurrent EventStore opens can both pass the PRAGMA check.
+            if "duplicate column" in str(exc).lower():
+                return False
+            raise
+
     def _migrate_trace_columns(self) -> None:
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
-        if "trace_id" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN trace_id TEXT")
-        if "span_id" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN span_id TEXT")
-        if "parent_span_id" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN parent_span_id TEXT")
+        self._add_column_if_missing("trace_id", "ALTER TABLE events ADD COLUMN trace_id TEXT")
+        self._add_column_if_missing("span_id", "ALTER TABLE events ADD COLUMN span_id TEXT")
+        self._add_column_if_missing(
+            "parent_span_id", "ALTER TABLE events ADD COLUMN parent_span_id TEXT"
+        )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id)"
         )
         self._conn.commit()
 
     def _migrate_sla_columns(self) -> None:
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
-        if "sla_timeout_minutes" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN sla_timeout_minutes INTEGER")
-        if "sla_deadline" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN sla_deadline TEXT")
-        if "sla_cleared" not in cols:
-            self._conn.execute(
-                "ALTER TABLE events ADD COLUMN sla_cleared INTEGER NOT NULL DEFAULT 0"
-            )
+        self._add_column_if_missing(
+            "sla_timeout_minutes",
+            "ALTER TABLE events ADD COLUMN sla_timeout_minutes INTEGER",
+        )
+        self._add_column_if_missing(
+            "sla_deadline", "ALTER TABLE events ADD COLUMN sla_deadline TEXT"
+        )
+        self._add_column_if_missing(
+            "sla_cleared",
+            "ALTER TABLE events ADD COLUMN sla_cleared INTEGER NOT NULL DEFAULT 0",
+        )
         self._conn.commit()
 
     def _migrate_hitl_columns(self) -> None:
-        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(events)").fetchall()}
-        if "status" not in cols:
-            self._conn.execute(
-                f"ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT '{STATUS_PUBLISHED}'"
-            )
-        if "pending_until" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN pending_until TEXT")
-        if "rejection_reason" not in cols:
-            self._conn.execute("ALTER TABLE events ADD COLUMN rejection_reason TEXT")
-        if "projected_to_log" not in cols:
-            self._conn.execute(
-                "ALTER TABLE events ADD COLUMN projected_to_log INTEGER NOT NULL DEFAULT 0"
-            )
+        self._add_column_if_missing(
+            "status",
+            f"ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT '{STATUS_PUBLISHED}'",
+        )
+        self._add_column_if_missing(
+            "pending_until", "ALTER TABLE events ADD COLUMN pending_until TEXT"
+        )
+        self._add_column_if_missing(
+            "rejection_reason", "ALTER TABLE events ADD COLUMN rejection_reason TEXT"
+        )
+        added_proj = self._add_column_if_missing(
+            "projected_to_log",
+            "ALTER TABLE events ADD COLUMN projected_to_log INTEGER NOT NULL DEFAULT 0",
+        )
+        if added_proj:
             self._conn.execute("UPDATE events SET projected_to_log = 1")
         self._conn.execute(
             f"UPDATE events SET status = '{STATUS_PUBLISHED}' WHERE status IS NULL OR status = ''"

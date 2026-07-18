@@ -6,6 +6,7 @@
 
 - **`EventStore(..., auto_prune=False)`:** monitor/TUI snapshots skip open-time `prune_expired()` DELETE so the 1s refresh never takes a write lock.
 - Entire `refresh_data` body wrapped in try/except (including header/dark-bar updates) so unmount races cannot crash Textual.
+- **Idempotent migrations:** concurrent `EventStore` opens tolerate `duplicate column` races during ADD COLUMN.
 - Tests assert `prune_expired` is not called on monitor fetch.
 
 ## [0.16.2] - 2026-07-18
