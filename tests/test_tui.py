@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 import threading
 import time
@@ -224,48 +223,35 @@ def test_fetch_monitor_state_survives_concurrent_writers(tmp_path):
         t.join(timeout=5)
 
 
-def test_refresh_data_swallows_fetch_errors(tmp_path):
-    """Unhandled refresh exceptions crash Textual — verify the guard path."""
-    from textual.app import App
-    from textual.widgets import Static
+def test_refresh_data_swallows_fetch_errors():
+    """Unhandled refresh exceptions crash Textual — verify the guard pattern.
 
+    Pure unit test (no Textual install required in CI; textual is optional
+    ``devex`` extra). Mirrors ``_MonitorApp.refresh_data`` error handling.
+    """
     from agentbus import tui as tui_mod
 
     fetch_calls = {"n": 0}
+    banners: list[str] = []
 
     def boom_fetch(*_a, **_k):
         fetch_calls["n"] += 1
         raise sqlite3.OperationalError("database is locked")
 
-    class Mini(App):
-        def __init__(self) -> None:
-            super().__init__()
-            self._last_refresh_error: str | None = None
+    def refresh_data() -> None:
+        try:
+            boom_fetch()
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            banners.append(
+                f"[b red]Monitor refresh error[/] "
+                f"{tui_mod._escape_markup(err)}  "
+                f"(will retry)"
+            )
 
-        def compose(self):
-            yield Static("", id="header-bar")
-
-        def refresh_data(self) -> None:
-            try:
-                boom_fetch(tmp_path)
-            except Exception as exc:
-                self._last_refresh_error = f"{type(exc).__name__}: {exc}"
-                header = self.query_one("#header-bar", Static)
-                header.update(
-                    f"[b red]Monitor refresh error[/] "
-                    f"{tui_mod._escape_markup(self._last_refresh_error)}  "
-                    f"(will retry)"
-                )
-
-    async def _run():
-        app = Mini()
-        async with app.run_test(size=(80, 10)) as pilot:
-            app.refresh_data()
-            await pilot.pause(0.05)
-            assert app._last_refresh_error is not None
-            assert "database is locked" in app._last_refresh_error
-            assert fetch_calls["n"] == 1
-            app.refresh_data()
-            assert fetch_calls["n"] == 2
-
-    asyncio.run(_run())
+    refresh_data()
+    refresh_data()
+    assert fetch_calls["n"] == 2
+    assert len(banners) == 2
+    assert "database is locked" in banners[0]
+    assert "OperationalError" in banners[0]
