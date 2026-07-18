@@ -177,6 +177,19 @@ hermes-runner:
 
 `agentbus up` skips disabled services (listed in `skipped`). Wake plane stays on.
 
+### Ingress ↔ runner pairing (required — #682)
+
+`wake-ingress` only **enqueues** (Mode A JSONL under `.agentbus/ingress/<runtime>_wake_queue.jsonl`). A headless runner must **drain** that queue. Pair worker wake mode, ingress service, and runner intake together:
+
+| Worker | Ingress service | Runner intake |
+|--------|-----------------|---------------|
+| `wake_mode: webhook` + `webhook_url` | `<runtime>-wake-ingress` **enabled** | `intake.mode: webhook_queue` + `runtime: <runtime>` |
+| `wake_mode: file` (default) | ingress **disabled** / absent | `intake.mode: wake_file` |
+
+**Anti-patterns (queue stagnation):**
+- **`wake-ingress` on + matching runner `enabled: false`** — JSONL grows with no consumer (e.g. hermes-runner off while hermes-wake-ingress was left on).
+- **Worker `wake_mode: webhook` + runner `intake.mode: wake_file`** — dual-signal still updates `WAKE.*.json`, but the ingress queue never drains (factory audit #682).
+
 ## Async suspend / await (v0.16)
 
 Cooperative **continuation-passing** waits (no LLM session freeze).
@@ -209,3 +222,4 @@ Design: `initiatives/agentbus/decisions/v0.16-async-suspend-design.md`
 - Assume `WAKE.json` injects an IDE turn without a bridge  
 - Dual workspaces (`projects/agentbus` vs OKF root) for the same swarm  
 - **`tmux send-keys` / stdin injection for autonomous multi-agent turns**  
+- **Webhook worker + `wake_file` runner** or **ingress without consumer** — see Ingress ↔ runner pairing (#682)

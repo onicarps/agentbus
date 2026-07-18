@@ -1,5 +1,9 @@
 # Example AgentBus swarm (copy to <workspace>/.agentbus/swarm.yaml)
 # Docs: PRD v0.10 Orchestration DX · v0.15 headless runners (enabled: false)
+#
+# Ingress pairing (bug #682):
+#   Only enable *-wake-ingress when the matching *-runner is enabled and
+#   runner intake.mode is webhook_queue. Otherwise JSONL queues stagnate.
 version: "1.0"
 services:
   watch:
@@ -13,8 +17,17 @@ services:
   #   env:
   #     AGENTBUS_PRODUCER_ID: "mcp-local"
 
+  # Webhook Mode A ingress — pair with webhook_queue runners only.
+  # hermes-wake-ingress:
+  #   enabled: false   # keep false while hermes-runner is disabled
+  #   command: "agentbus wake-ingress --runtime hermes --host 127.0.0.1 --port 18787"
+  # factory-wake-ingress:
+  #   enabled: false   # set true only with factory-runner + intake webhook_queue
+  #   command: "agentbus wake-ingress --runtime factory --host 127.0.0.1 --port 18788"
+
   # v0.15 Phase F — headless reason-plane (opt-in)
   # Copy runner.*.yaml into .agentbus/ first, then set enabled: true.
+  # examples/runner.hermes.yaml + examples/runner.factory.yaml use webhook_queue.
   hermes-runner:
     enabled: false
     command: "agentbus run --config .agentbus/runner.hermes.yaml"
