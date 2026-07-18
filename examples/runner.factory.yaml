@@ -8,6 +8,7 @@ version: "1.0"
 runner_id: factory-runner-1
 producer_id: factory
 intake:
+  # Pair with worker.factory.yaml wake_mode: webhook + factory-wake-ingress
   mode: webhook_queue
   runtime: factory
 adapter:

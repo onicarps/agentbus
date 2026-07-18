@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Docs / examples — ingress ↔ runner coupling (#682)
+
+- **WAKE.md:** document that `wake-ingress` must pair with headless `intake.mode: webhook_queue`, and disable ingress when the matching runner is off (queue stagnation).
+- **examples/swarm.yaml:** comments for `*-wake-ingress` + runner enablement coupling.
+- **examples/runner.factory.yaml:** comment that intake pairs with factory webhook worker + ingress.
+- **tests/test_examples_ingress_pairing.py:** lock example factory/hermes runners on `webhook_queue`; hermes-runner stays `enabled: false` by default.
+- Ops (live OKF workspace, not a package release): align `runner.factory.yaml` to `webhook_queue`; `hermes-wake-ingress` `enabled: false` while hermes-runner is off; hermes worker `wake_mode: file`.
+
 ## [0.16.3] - 2026-07-18
 
 ### Fixed — monitor open-path prune write (follow-up Agy #601)
