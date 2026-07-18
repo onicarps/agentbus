@@ -35,11 +35,15 @@ class TurnResult:
     ``status`` is the v0.16 primary field. ``ok`` keyword remains accepted for
     back-compat (maps True→ok, False→error). Property ``ok`` is True for both
     ``ok`` and ``suspended`` (suspend is not a failure path).
+
+    ``suppress_ack`` (v0.16.1): when True, the outer runner must not publish a
+    companion RUNNER_ACK / RUNNER_ERROR handoff (busy-wait circuit breaker).
     """
 
     summary: str
     detail: dict[str, Any] | None = None
     status: TurnStatus = "ok"
+    suppress_ack: bool = False
 
     def __init__(
         self,
@@ -48,6 +52,7 @@ class TurnResult:
         *,
         status: TurnStatus | None = None,
         ok: bool | None = None,
+        suppress_ack: bool = False,
     ) -> None:
         # Prefer explicit status; else map legacy ok= bool; default ok.
         if status is not None:
@@ -58,6 +63,7 @@ class TurnResult:
             self.status = "ok"
         self.summary = summary
         self.detail = detail
+        self.suppress_ack = bool(suppress_ack)
 
     @property
     def ok(self) -> bool:

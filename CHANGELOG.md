@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.16.1] - 2026-07-18
+
+### Fixed — busy-wait / companion-ACK circuit breaker (Agy #597)
+
+- **`TurnResult.suppress_ack`:** adapters may signal the outer runner to skip companion handoff publish
+- **CLI markers:** `CHAIN_BREAK`, `TERMINAL_IDLE`, or `NO-OP` in CLI stdout/stderr set `suppress_ack=True` via `turn_result_from_cli_exit` (suspend/exit-75 path still publishes `RUNNER_SUSPEND`)
+- **`process_envelope`:** when `suppress_ack`, still writes run log, records chain budget, marks wake done — **does not** publish `okf/handoff` RUNNER_ACK/ERROR (stops factory↔grok ping-pong after idle/spurious wakes)
+- **Return dict:** `circuit_break: true|false` for runner logs
+- **Tests:** `tests/test_busy_wait_breaker.py`
+
 ## [0.16.0] - 2026-07-17
 
 ### Added — async suspend / await MVP (Agy #467)

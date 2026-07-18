@@ -8,6 +8,20 @@ from typing import Any
 
 from agentbus.runner.types import AWAIT_EXIT_CODE, TurnResult, WakeEnvelope
 
+# v0.16.1 busy-wait circuit breaker: exact substrings in CLI stdout/stderr.
+# When present, outer loop must not publish companion RUNNER_ACK/ERROR.
+CIRCUIT_BREAK_MARKERS: tuple[str, ...] = (
+    "CHAIN_BREAK",
+    "TERMINAL_IDLE",
+    "NO-OP",
+)
+
+
+def preview_suppresses_ack(preview: str | None) -> bool:
+    """True if CLI output contains a reserved circuit-breaker keyword."""
+    text = preview or ""
+    return any(marker in text for marker in CIRCUIT_BREAK_MARKERS)
+
 
 def runner_subprocess_env(
     workspace: Path,
@@ -41,16 +55,26 @@ def turn_result_from_cli_exit(
     preview: str,
     detail: dict[str, Any] | None = None,
 ) -> TurnResult:
-    """Map CLI exit codes to TurnResult; exit 75 → suspended (v0.16 await)."""
+    """Map CLI exit codes to TurnResult; exit 75 → suspended (v0.16 await).
+
+    v0.16.1: if preview contains CHAIN_BREAK / TERMINAL_IDLE / NO-OP, set
+    ``suppress_ack=True`` so the outer loop does not republish a companion ACK.
+    """
     body = dict(detail or {})
     body["adapter"] = adapter
     body["returncode"] = returncode
     preview_one = " ".join((preview or "").split())
+    suppress = preview_suppresses_ack(preview)
+    if suppress:
+        body["suppress_ack"] = True
+        body["circuit_break"] = True
     if returncode == AWAIT_EXIT_CODE:
         return TurnResult(
             status="suspended",
             summary=f"RUNNER_SUSPEND: event_id={event_id} adapter={adapter}",
             detail=body,
+            # Suspend ACK is intentional coordination; do not suppress.
+            suppress_ack=False,
         )
     if returncode != 0:
         return TurnResult(
@@ -60,6 +84,7 @@ def turn_result_from_cli_exit(
                 f"event_id={event_id} out={preview_one[:400]}"
             ),
             detail=body,
+            suppress_ack=suppress,
         )
     return TurnResult(
         ok=True,
@@ -68,6 +93,7 @@ def turn_result_from_cli_exit(
             f"out={preview_one[:500]}"
         ),
         detail=body,
+        suppress_ack=suppress,
     )
 
 

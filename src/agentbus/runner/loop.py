@@ -350,10 +350,33 @@ def process_envelope(
                 "chain_key": chain,
             }
 
-    # ok / error path (unchanged semantics)
+    # ok / error path
     # Persist the finalized result (covers the registration-failed error case,
     # so the durable run record never contradicts the published RUNNER_ERROR).
     _write_run_log(workspace, cfg, wake, result)
+
+    # v0.16.1 busy-wait circuit breaker: adapter/LLM signalled CHAIN_BREAK /
+    # TERMINAL_IDLE / NO-OP — mark done + budget but do not publish companion ACK.
+    if result.suppress_ack:
+        budget.record(chain)
+        append_done_id(done_path, wake.event_id)
+        done.add(wake.event_id)
+        log.info(
+            "circuit_break event_id=%s suppress_ack=1 summary=%s",
+            wake.event_id,
+            (result.summary or "")[:200],
+        )
+        return {
+            "event_id": wake.event_id,
+            "status": "processed",
+            "ok": result.ok,
+            "turn_status": result.status,
+            "ack_event_id": None,
+            "duplicate_ack": False,
+            "summary": result.summary,
+            "circuit_break": True,
+        }
+
     event, duplicate = store.publish(
         topic="okf/handoff",
         producer_id=cfg.producer_id,
@@ -382,6 +405,7 @@ def process_envelope(
         "ack_event_id": event.event_id,
         "duplicate_ack": duplicate,
         "summary": result.summary,
+        "circuit_break": False,
     }
 
 
