@@ -136,7 +136,8 @@ def fetch_monitor_state(
     an unhandled ``sqlite3.OperationalError: database is locked`` would crash
     the Textual refresh loop. Expiry still runs on poll/publish/status paths.
     """
-    store = EventStore(workspace, retention_days=retention_days)
+    # auto_prune=False: opening EventStore must not DELETE on the UI hot path.
+    store = EventStore(workspace, retention_days=retention_days, auto_prune=False)
     try:
         rows = store._conn.execute(
             """
@@ -315,8 +316,36 @@ def run_monitor_tui(
             """Periodic bus snapshot. Must never raise — unhandled errors kill Textual."""
             try:
                 state = fetch_monitor_state(ws, retention_days=retention_days)
+                self._last_refresh_error = None
+                self._cached_events = state["events"]
+                header = self.query_one("#header-bar", Static)
+                header.update(
+                    f"Workspace: {ws}  |  MCP configs: {state['mcp_configs']}  |  "
+                    f"Active producers: {state['active_producers']}  |  "
+                    f"Pending: {len(state['pending'])}  |  "
+                    f"System: {len(state['system_events'])}"
+                )
+                dark_bar = self.query_one("#dark-bar", Static)
+                dark = state.get("dark_agents") or []
+                if dark:
+                    parts = [
+                        f"{_escape_markup(str(d['producer_id']))}: "
+                        f"{_escape_markup(str(d['reason']))}"
+                        for d in dark[:4]
+                    ]
+                    dark_bar.update("[b]DARK AGENT[/b] " + " · ".join(parts))
+                else:
+                    dark_bar.update("[dim]No dark agents detected[/dim]")
+
+                fingerprint = _state_fingerprint(state)
+                if fingerprint == self._last_fingerprint:
+                    return
+                self._last_fingerprint = fingerprint
+                self._rebuild_tables(state)
             except Exception as exc:
                 self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+                # Force rebuild next tick even if data unchanged.
+                self._last_fingerprint = None
                 try:
                     header = self.query_one("#header-bar", Static)
                     header.update(
@@ -326,48 +355,6 @@ def run_monitor_tui(
                     )
                 except Exception:
                     pass
-                return
-
-            self._last_refresh_error = None
-            self._cached_events = state["events"]
-            header = self.query_one("#header-bar", Static)
-            header.update(
-                f"Workspace: {ws}  |  MCP configs: {state['mcp_configs']}  |  "
-                f"Active producers: {state['active_producers']}  |  "
-                f"Pending: {len(state['pending'])}  |  "
-                f"System: {len(state['system_events'])}"
-            )
-            dark_bar = self.query_one("#dark-bar", Static)
-            dark = state.get("dark_agents") or []
-            if dark:
-                parts = [
-                    f"{_escape_markup(str(d['producer_id']))}: "
-                    f"{_escape_markup(str(d['reason']))}"
-                    for d in dark[:4]
-                ]
-                dark_bar.update("[b]DARK AGENT[/b] " + " · ".join(parts))
-            else:
-                dark_bar.update("[dim]No dark agents detected[/dim]")
-
-            fingerprint = _state_fingerprint(state)
-            if fingerprint == self._last_fingerprint:
-                return
-            self._last_fingerprint = fingerprint
-
-            try:
-                self._rebuild_tables(state)
-            except Exception as exc:
-                self._last_refresh_error = f"{type(exc).__name__}: {exc}"
-                try:
-                    header.update(
-                        f"[b red]Monitor render error[/] "
-                        f"{_escape_markup(self._last_refresh_error)}  "
-                        f"(will retry)"
-                    )
-                except Exception:
-                    pass
-                # Force rebuild next tick even if data unchanged.
-                self._last_fingerprint = None
 
         def _rebuild_tables(self, state: dict[str, Any]) -> None:
             stream = self.query_one("#stream", DataTable)
@@ -485,7 +472,9 @@ def run_monitor_tui(
                 )
                 return
             try:
-                store = EventStore(ws, retention_days=retention_days)
+                store = EventStore(
+                    ws, retention_days=retention_days, auto_prune=False
+                )
                 try:
                     events = store.fetch_trace_events(trace_id)
                 finally:

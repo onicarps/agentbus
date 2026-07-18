@@ -126,11 +126,13 @@ def test_fetch_monitor_state_is_read_only(tmp_path):
         patch.object(EventStore, "expire_pending", autospec=True) as exp_p,
         patch.object(EventStore, "expire_sla_breaches", autospec=True) as exp_s,
         patch.object(EventStore, "review_pending", autospec=True) as rev,
+        patch.object(EventStore, "prune_expired", autospec=True) as prune,
     ):
         state = fetch_monitor_state(tmp_path)
         exp_p.assert_not_called()
         exp_s.assert_not_called()
         rev.assert_not_called()
+        prune.assert_not_called()
     assert len(state["events"]) == 5
     assert state["pending"] == []
 

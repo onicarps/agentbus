@@ -76,7 +76,13 @@ class Event:
 
 
 class EventStore:
-    def __init__(self, workspace: Path, retention_days: int = 7) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        retention_days: int = 7,
+        *,
+        auto_prune: bool = True,
+    ) -> None:
         from agentbus.workspace_guard import assert_workspace_supported
 
         self.workspace = assert_workspace_supported(workspace)
@@ -89,7 +95,10 @@ class EventStore:
         self._conn.row_factory = sqlite3.Row
         self._configure_pragmas()
         self._init_schema()
-        self.prune_expired()
+        # Monitor/TUI hot paths pass auto_prune=False so a 1s refresh never
+        # competes for a write lock (DELETE) under publish storms.
+        if auto_prune:
+            self.prune_expired()
 
     def set_mcpsafe(self, enforcer: PolicyEnforcer | None) -> None:
         """Attach or clear optional mcpsafe PolicyEnforcer."""

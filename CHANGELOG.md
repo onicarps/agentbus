@@ -1,16 +1,24 @@
 # Changelog
 
+## [0.16.3] - 2026-07-18
+
+### Fixed — monitor open-path prune write (follow-up Agy #601)
+
+- **`EventStore(..., auto_prune=False)`:** monitor/TUI snapshots skip open-time `prune_expired()` DELETE so the 1s refresh never takes a write lock.
+- Entire `refresh_data` body wrapped in try/except (including header/dark-bar updates) so unmount races cannot crash Textual.
+- Tests assert `prune_expired` is not called on monitor fetch.
+
 ## [0.16.2] - 2026-07-18
 
 ### Fixed — monitor TUI crash under event storm (Agy #601)
 
-- **Root cause:** `fetch_monitor_state` called `expire_pending` / `expire_sla_breaches` / `review_pending` (writes) on every 1s Textual refresh. Under concurrent publish load (companion-ACK storm #543–#590) SQLite raised `OperationalError: database is locked`; unhandled exception in `set_interval` **crashed the God View TUI**.
+- **Root cause:** `fetch_monitor_state` called `expire_pending` / `expire_sla_breaches` / `review_pending` on every 1s Textual refresh. Under concurrent publish load (companion-ACK storm #543–#590) SQLite raised `OperationalError: database is locked`; unhandled exception in `set_interval` **crashed the God View TUI**.
 - **Read-only snapshot:** monitor fetch uses pure SELECTs only; expiry remains on poll/publish/status paths.
-- **Crash-proof refresh:** `refresh_data` catches all errors, shows a red banner, retries next tick.
+- **Crash-proof refresh:** `refresh_data` catches errors, shows a red banner, retries next tick.
 - **Skip no-op rebuilds:** fingerprint max/min event id + pending set so unchanged data does not `DataTable.clear()` thrash.
 - **Markup safety:** escape dark-agent / payload / trace text so brackets in summaries cannot break Rich render.
 - **Row key guards:** invalid/stale keys during clear no longer raise in highlight/select handlers.
-- **Tests:** `tests/test_tui.py` — read-only fetch, storm volume, concurrent writers, refresh error swallow.
+- **Tests:** `tests/test_tui.py` — read-only fetch, storm volume, concurrent writers, refresh error swallow (CI-safe without textual).
 
 ## [0.16.1] - 2026-07-18
 
