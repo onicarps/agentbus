@@ -193,7 +193,7 @@ def _test_content_dedup(store: EventStore, prev_id: int) -> int:
     if dup2:
         print(f"  Content dedup triggered: both point to #{event1.event_id}")
     else:
-        print(f"  Content dedup did NOT trigger (outside window or policy)")
+        print("  Content dedup did NOT trigger (outside window or policy)")
     return event2.event_id
 
 
@@ -251,15 +251,24 @@ def main() -> None:
         results = {}
         eid = 0
 
-        eid = _test_basic_handoff(store); results["basic_handoff"] = eid
-        eid = _test_broadcast(store, eid); results["broadcast"] = eid
-        eid = _test_traced_chain(store, eid); results["traced_chain"] = eid
-        eid = _test_artifact_transfer(store, eid); results["artifact_transfer"] = eid
-        eid = _test_sla_timeout(store, eid); results["sla_timeout"] = eid
-        eid = _test_idempotency(store, eid); results["idempotency"] = eid
-        eid = _test_content_dedup(store, eid); results["content_dedup"] = eid
-        eid = _test_approval_flow(store, eid); results["approval_flow"] = eid
-        summary = _test_multi_topic_poll(store); results["topic_summary"] = summary
+        eid = _test_basic_handoff(store)
+        results["basic_handoff"] = eid
+        eid = _test_broadcast(store, eid)
+        results["broadcast"] = eid
+        eid = _test_traced_chain(store, eid)
+        results["traced_chain"] = eid
+        eid = _test_artifact_transfer(store, eid)
+        results["artifact_transfer"] = eid
+        eid = _test_sla_timeout(store, eid)
+        results["sla_timeout"] = eid
+        eid = _test_idempotency(store, eid)
+        results["idempotency"] = eid
+        eid = _test_content_dedup(store, eid)
+        results["content_dedup"] = eid
+        eid = _test_approval_flow(store, eid)
+        results["approval_flow"] = eid
+        summary = _test_multi_topic_poll(store)
+        results["topic_summary"] = summary
 
         banner("SUMMARY")
         print(json.dumps(results, indent=2, default=str))

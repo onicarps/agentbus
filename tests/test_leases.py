@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import agentbus.leases as leases_mod
 from agentbus.auth import check_publish_token, write_workspace_token
 from agentbus.leases import (
-    DEFAULT_TTL_SECONDS,
     LeaseStore,
     MAX_TTL_SECONDS,
     normalize_resource,
@@ -77,13 +76,36 @@ def test_release_idempotent_when_missing(ws, leases):
     assert result["released"] is True
 
 
-def test_ttl_expiry(ws, leases):
+def test_ttl_expiry(ws, leases, monkeypatch):
+    """TTL expiry must not depend on wall-clock sleep (second-precision _fmt flakes).
+
+    Lease timestamps are stored as whole UTC seconds. A real sleep(1.1) near a
+    second boundary can purge the lease before the first lock_status assert, or
+    under load leave it still active after a short sleep. Drive _utc_now instead.
+    """
     resource = str(ws / "e.txt")
     (ws / "e.txt").write_text("x")
+    t0 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    clock = {"now": t0}
+
+    monkeypatch.setattr(leases_mod, "_utc_now", lambda: clock["now"])
+
     leases.lock_acquire(resource, "hermes", ttl_seconds=1)
     assert leases.lock_status(resource)["locked"] is True
-    time.sleep(1.1)
+    assert leases.lock_status(resource)["current_owner"] == "hermes"
+
+    # Still inside the 1s window (same second as acquire → not yet expired).
+    clock["now"] = t0 + timedelta(milliseconds=500)
+    assert leases.lock_status(resource)["locked"] is True
+
+    # At/after expires_at second boundary, purge drops the lease.
+    clock["now"] = t0 + timedelta(seconds=1)
     assert leases.lock_status(resource)["locked"] is False
+
+    # Resource is free for a different owner after expiry.
+    got = leases.lock_acquire(resource, "grok", ttl_seconds=60)
+    assert got["acquired"] is True
+    assert got["lease_id"]
 
 
 def test_resource_outside_workspace(ws, leases):

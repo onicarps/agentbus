@@ -39,7 +39,7 @@ def register_schema(
 ) -> dict:
     from datetime import datetime, timezone
 
-    from agentbus.schemas import TOPIC_PATTERN, validate_topic_name
+    from agentbus.schemas import validate_topic_name
 
     validate_topic_name(topic_name)
     if not isinstance(json_schema, dict):
