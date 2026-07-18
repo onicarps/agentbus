@@ -9,7 +9,7 @@ from typing import Any
 
 from agentbus.devex import discover_config_targets, format_event_row
 from agentbus.schemas import SYSTEM_TOPICS
-from agentbus.store import EventStore
+from agentbus.store import STATUS_PENDING, EventStore
 from agentbus.tracing import build_trace_tree, format_trace_tree_plain
 
 DARK_AGENT_MINUTES = 5
@@ -17,6 +17,16 @@ DARK_AGENT_MINUTES = 5
 
 def _reviewer_id() -> str:
     return os.environ.get("AGENTBUS_PRODUCER_ID", "monitor")
+
+
+def _escape_markup(text: str) -> str:
+    """Escape Rich/Textual markup so event payloads cannot crash the TUI."""
+    try:
+        from rich.markup import escape
+
+        return escape(text)
+    except Exception:
+        return text.replace("[", "\\[")
 
 
 def _parse_ts(ts: str | None) -> datetime | None:
@@ -29,6 +39,27 @@ def _parse_ts(ts: str | None) -> datetime | None:
         return datetime.fromisoformat(ts)
     except ValueError:
         return None
+
+
+def _state_fingerprint(state: dict[str, Any]) -> tuple[Any, ...]:
+    """Cheap signature so refresh can skip full DataTable rebuilds."""
+    events = state.get("events") or []
+    pending = state.get("pending") or []
+    system_events = state.get("system_events") or []
+    max_id = events[-1]["event_id"] if events else 0
+    min_id = events[0]["event_id"] if events else 0
+    pend_ids = tuple(p.get("event_id") for p in pending)
+    dark_n = len(state.get("dark_agents") or [])
+    return (
+        max_id,
+        min_id,
+        len(events),
+        len(system_events),
+        pend_ids,
+        dark_n,
+        state.get("active_producers"),
+        state.get("mcp_configs"),
+    )
 
 
 def detect_dark_agents(
@@ -96,11 +127,17 @@ def fetch_monitor_state(
     *,
     retention_days: int = 7,
     limit: int = 200,
+    pending_limit: int = 50,
 ) -> dict[str, Any]:
+    """Snapshot events for the monitor TUI.
+
+    **Read-only:** does not call ``expire_pending`` / ``expire_sla_breaches``.
+    Those take write locks; under high publish load (e.g. companion-ACK storms)
+    an unhandled ``sqlite3.OperationalError: database is locked`` would crash
+    the Textual refresh loop. Expiry still runs on poll/publish/status paths.
+    """
     store = EventStore(workspace, retention_days=retention_days)
     try:
-        store.expire_pending()
-        store.expire_sla_breaches()
         rows = store._conn.execute(
             """
             SELECT * FROM events
@@ -110,9 +147,24 @@ def fetch_monitor_state(
             (limit,),
         ).fetchall()
         events = [store._row_to_event(r).to_dict() for r in reversed(rows)]
-        pending = store.review_pending()
+        # Read-only pending query — avoid review_pending() which expires/writes.
+        pending_rows = store._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE status = ?
+            ORDER BY event_id ASC
+            LIMIT ?
+            """,
+            (STATUS_PENDING, pending_limit),
+        ).fetchall()
+        pending = [store._row_to_event(r).to_dict() for r in pending_rows]
         producers = {e.get("producer_id") for e in events if e.get("producer_id")}
-        system_events = [e for e in events if e.get("topic") in SYSTEM_TOPICS or str(e.get("topic", "")).startswith("system/")]
+        system_events = [
+            e
+            for e in events
+            if e.get("topic") in SYSTEM_TOPICS
+            or str(e.get("topic", "")).startswith("system/")
+        ]
         dark = detect_dark_agents(events)
         return {
             "events": events,
@@ -226,6 +278,8 @@ def run_monitor_tui(
             self._selected_event: dict[str, Any] | None = None
             self._focused_pending_id: int | None = None
             self._cached_events: list[dict[str, Any]] = []
+            self._last_fingerprint: tuple[Any, ...] | None = None
+            self._last_refresh_error: str | None = None
 
         def compose(self) -> ComposeResult:
             yield Static("", id="header-bar")
@@ -258,10 +312,25 @@ def run_monitor_tui(
             self.refresh_data()
 
         def refresh_data(self) -> None:
-            state = fetch_monitor_state(ws, retention_days=retention_days)
+            """Periodic bus snapshot. Must never raise — unhandled errors kill Textual."""
+            try:
+                state = fetch_monitor_state(ws, retention_days=retention_days)
+            except Exception as exc:
+                self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    header = self.query_one("#header-bar", Static)
+                    header.update(
+                        f"[b red]Monitor refresh error[/] "
+                        f"{_escape_markup(self._last_refresh_error)}  "
+                        f"(will retry)"
+                    )
+                except Exception:
+                    pass
+                return
+
+            self._last_refresh_error = None
             self._cached_events = state["events"]
             header = self.query_one("#header-bar", Static)
-
             header.update(
                 f"Workspace: {ws}  |  MCP configs: {state['mcp_configs']}  |  "
                 f"Active producers: {state['active_producers']}  |  "
@@ -272,12 +341,35 @@ def run_monitor_tui(
             dark = state.get("dark_agents") or []
             if dark:
                 parts = [
-                    f"{d['producer_id']}: {d['reason']}" for d in dark[:4]
+                    f"{_escape_markup(str(d['producer_id']))}: "
+                    f"{_escape_markup(str(d['reason']))}"
+                    for d in dark[:4]
                 ]
                 dark_bar.update("[b]DARK AGENT[/b] " + " · ".join(parts))
             else:
                 dark_bar.update("[dim]No dark agents detected[/dim]")
 
+            fingerprint = _state_fingerprint(state)
+            if fingerprint == self._last_fingerprint:
+                return
+            self._last_fingerprint = fingerprint
+
+            try:
+                self._rebuild_tables(state)
+            except Exception as exc:
+                self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+                try:
+                    header.update(
+                        f"[b red]Monitor render error[/] "
+                        f"{_escape_markup(self._last_refresh_error)}  "
+                        f"(will retry)"
+                    )
+                except Exception:
+                    pass
+                # Force rebuild next tick even if data unchanged.
+                self._last_fingerprint = None
+
+        def _rebuild_tables(self, state: dict[str, Any]) -> None:
             stream = self.query_one("#stream", DataTable)
             cursor = stream.cursor_row
             stream.clear()
@@ -295,7 +387,7 @@ def run_monitor_tui(
                     row["summary"],
                     key=str(ev["event_id"]),
                 )
-            if stream.row_count and 0 <= cursor < stream.row_count:
+            if stream.row_count and isinstance(cursor, int) and 0 <= cursor < stream.row_count:
                 stream.move_cursor(row=cursor)
 
             hitl = self.query_one("#hitl", DataTable)
@@ -311,7 +403,7 @@ def run_monitor_tui(
                     row["summary"],
                     key=str(ev["event_id"]),
                 )
-            if hitl.row_count and 0 <= hitl_cursor < hitl.row_count:
+            if hitl.row_count and isinstance(hitl_cursor, int) and 0 <= hitl_cursor < hitl.row_count:
                 hitl.move_cursor(row=hitl_cursor)
 
             wire = self.query_one("#wiretap", DataTable)
@@ -320,29 +412,56 @@ def run_monitor_tui(
             for ev in reversed(state["system_events"][-80:]):
                 eid, ts, topic, detail = _format_system_row(ev)
                 wire.add_row(eid, ts, topic, detail, key=f"sys-{ev['event_id']}")
-            if wire.row_count and 0 <= wire_cursor < wire.row_count:
+            if (
+                wire.row_count
+                and isinstance(wire_cursor, int)
+                and 0 <= wire_cursor < wire.row_count
+            ):
                 wire.move_cursor(row=wire_cursor)
+
+        @staticmethod
+        def _row_key_int(row_key: Any) -> int | None:
+            if row_key is None:
+                return None
+            try:
+                value = row_key.value if hasattr(row_key, "value") else row_key
+                if value is None:
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
 
         def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
             table = event.data_table
             if table.id == "stream":
-                event_id = int(event.row_key.value)
-                state = fetch_monitor_state(ws, retention_days=retention_days)
-                selected = next(
-                    (e for e in state["events"] if e["event_id"] == event_id),
-                    None,
-                )
+                event_id = self._row_key_int(event.row_key)
+                if event_id is None:
+                    return
+                try:
+                    state = fetch_monitor_state(ws, retention_days=retention_days)
+                    selected = next(
+                        (e for e in state["events"] if e["event_id"] == event_id),
+                        None,
+                    )
+                except Exception as exc:
+                    self.notify(f"Refresh failed: {exc}", severity="error")
+                    selected = next(
+                        (e for e in self._cached_events if e["event_id"] == event_id),
+                        None,
+                    )
                 self._selected_event = selected
                 self._update_trace(selected)
             elif table.id == "hitl":
-                self._focused_pending_id = int(event.row_key.value)
+                self._focused_pending_id = self._row_key_int(event.row_key)
 
         def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
             table = event.data_table
-            if table.id == "hitl" and event.row_key is not None:
-                self._focused_pending_id = int(event.row_key.value)
-            elif table.id == "stream" and event.row_key is not None:
-                event_id = int(event.row_key.value)
+            event_id = self._row_key_int(event.row_key)
+            if event_id is None:
+                return
+            if table.id == "hitl":
+                self._focused_pending_id = event_id
+            elif table.id == "stream":
                 selected = next(
                     (e for e in self._cached_events if e["event_id"] == event_id),
                     None,
@@ -362,16 +481,23 @@ def run_monitor_tui(
                 payload_str = json.dumps(selected.get("payload", {}), indent=2)
                 trace_widget.update(
                     f"Event {selected['event_id']} (No Trace)\n\n"
-                    f"[dim]Payload Detail:[/dim]\n{payload_str}"
+                    f"[dim]Payload Detail:[/dim]\n{_escape_markup(payload_str)}"
                 )
                 return
-            store = EventStore(ws, retention_days=retention_days)
             try:
-                events = store.fetch_trace_events(trace_id)
-            finally:
-                store.close()
-            roots = build_trace_tree(events)
-            trace_widget.update(format_trace_tree_plain(trace_id, roots))
+                store = EventStore(ws, retention_days=retention_days)
+                try:
+                    events = store.fetch_trace_events(trace_id)
+                finally:
+                    store.close()
+                roots = build_trace_tree(events)
+                text = format_trace_tree_plain(trace_id, roots)
+                trace_widget.update(_escape_markup(text))
+            except Exception as exc:
+                trace_widget.update(
+                    f"Event {selected['event_id']} trace error: "
+                    f"{_escape_markup(f'{type(exc).__name__}: {exc}')}"
+                )
 
         def action_approve_pending(self) -> None:
             event_id = self._focused_pending_id

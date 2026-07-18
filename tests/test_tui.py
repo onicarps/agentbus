@@ -1,12 +1,23 @@
-"""Textual TUI helpers — PDD v0.8 acceptance."""
+"""Textual TUI helpers — PDD v0.8 acceptance + monitor crash resilience."""
 
 from __future__ import annotations
+
+import asyncio
+import sqlite3
+import threading
+import time
+from unittest.mock import patch
 
 from agentbus.intercepts import InterceptRule, add_rule
 from agentbus.rbac import ensure_default_roles
 from agentbus.schemas import validate_payload, set_validation_workspace
 from agentbus.store import STATUS_PUBLISHED, EventStore
-from agentbus.tui import approve_pending_event, fetch_monitor_state
+from agentbus.tui import (
+    _escape_markup,
+    _state_fingerprint,
+    approve_pending_event,
+    fetch_monitor_state,
+)
 from agentbus.tracing import build_trace_tree, format_trace_tree_plain
 
 
@@ -90,3 +101,171 @@ def test_format_trace_tree_plain():
     assert "trace-1" in text
     assert "grok" in text
     assert "hermes" in text
+
+
+def test_fetch_monitor_state_is_read_only(tmp_path):
+    """Monitor snapshot must not call expire_* (write locks crash TUI under load)."""
+    set_validation_workspace(tmp_path)
+    store = EventStore(tmp_path)
+    try:
+        for i in range(5):
+            payload = validate_payload(
+                "okf/handoff",
+                {"from": "grok", "to": "all", "summary": f"event {i}"},
+            )
+            store.publish(
+                topic="okf/handoff",
+                producer_id="grok",
+                schema_version="1.0",
+                payload=payload,
+                skip_rbac=True,
+            )
+    finally:
+        store.close()
+
+    with (
+        patch.object(EventStore, "expire_pending", autospec=True) as exp_p,
+        patch.object(EventStore, "expire_sla_breaches", autospec=True) as exp_s,
+        patch.object(EventStore, "review_pending", autospec=True) as rev,
+    ):
+        state = fetch_monitor_state(tmp_path)
+        exp_p.assert_not_called()
+        exp_s.assert_not_called()
+        rev.assert_not_called()
+    assert len(state["events"]) == 5
+    assert state["pending"] == []
+
+
+def test_fetch_monitor_state_handles_storm_volume(tmp_path):
+    """Hundreds of events (ACK-storm scale) still return a bounded snapshot."""
+    set_validation_workspace(tmp_path)
+    store = EventStore(tmp_path)
+    try:
+        for i in range(350):
+            payload = validate_payload(
+                "okf/handoff",
+                {
+                    "from": "factory" if i % 2 == 0 else "grok",
+                    "to": "grok" if i % 2 == 0 else "factory",
+                    "summary": f"RUNNER_ACK storm {i} " + ("x" * 120),
+                },
+            )
+            store.publish(
+                topic="okf/handoff",
+                producer_id="factory" if i % 2 == 0 else "grok",
+                schema_version="1.0",
+                payload=payload,
+                skip_rbac=True,
+                idempotency_key=f"storm-{i}",
+            )
+    finally:
+        store.close()
+
+    state = fetch_monitor_state(tmp_path, limit=200)
+    assert len(state["events"]) == 200
+    assert state["events"][-1]["event_id"] == 350
+    assert state["active_producers"] >= 2
+    fp1 = _state_fingerprint(state)
+    fp2 = _state_fingerprint(state)
+    assert fp1 == fp2
+
+
+def test_escape_markup_neutralizes_brackets():
+    raw = "status [error] with [b]bold[/b]"
+    escaped = _escape_markup(raw)
+    assert escaped != raw
+    try:
+        from rich.markup import render
+
+        render(escaped)
+    except ImportError:
+        pass
+
+
+def test_fetch_monitor_state_survives_concurrent_writers(tmp_path):
+    """Read-only monitor snapshot should not fail when peers publish rapidly."""
+    set_validation_workspace(tmp_path)
+    stop = threading.Event()
+
+    def writer() -> None:
+        n = 0
+        while not stop.is_set() and n < 80:
+            try:
+                store = EventStore(tmp_path)
+                try:
+                    payload = validate_payload(
+                        "okf/handoff",
+                        {"from": "stress", "to": "all", "summary": f"w{n}"},
+                    )
+                    store.publish(
+                        topic="okf/handoff",
+                        producer_id="stress",
+                        schema_version="1.0",
+                        payload=payload,
+                        skip_rbac=True,
+                        idempotency_key=f"conc-w-{n}-{time.time()}",
+                    )
+                finally:
+                    store.close()
+            except Exception:
+                pass
+            n += 1
+            time.sleep(0.005)
+
+    t = threading.Thread(target=writer)
+    t.start()
+    try:
+        for _ in range(30):
+            state = fetch_monitor_state(tmp_path)
+            assert "events" in state
+            time.sleep(0.01)
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+
+def test_refresh_data_swallows_fetch_errors(tmp_path):
+    """Unhandled refresh exceptions crash Textual — verify the guard path."""
+    from textual.app import App
+    from textual.widgets import Static
+
+    from agentbus import tui as tui_mod
+
+    fetch_calls = {"n": 0}
+
+    def boom_fetch(*_a, **_k):
+        fetch_calls["n"] += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    class Mini(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self._last_refresh_error: str | None = None
+
+        def compose(self):
+            yield Static("", id="header-bar")
+
+        def refresh_data(self) -> None:
+            try:
+                boom_fetch(tmp_path)
+            except Exception as exc:
+                self._last_refresh_error = f"{type(exc).__name__}: {exc}"
+                header = self.query_one("#header-bar", Static)
+                header.update(
+                    f"[b red]Monitor refresh error[/] "
+                    f"{tui_mod._escape_markup(self._last_refresh_error)}  "
+                    f"(will retry)"
+                )
+
+    async def _run():
+        app = Mini()
+        async with app.run_test(size=(80, 10)) as pilot:
+            app.refresh_data()
+            await pilot.pause(0.05)
+            assert app._last_refresh_error is not None
+            assert "database is locked" in app._last_refresh_error
+            assert fetch_calls["n"] == 1
+            app.refresh_data()
+            assert fetch_calls["n"] == 2
+
+    asyncio.run(_run())
