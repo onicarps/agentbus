@@ -47,6 +47,13 @@ from agentbus.swarm import (
 )
 
 def _cli_workspace(workspace: str | None) -> Path:
+    """Resolve CLI workspace with explicit flag / env precedence (no parent-walk).
+
+    Priority:
+    1. ``--workspace`` flag → exact path (``resolve_workspace`` does not walk)
+    2. ``AGENTBUS_WORKSPACE`` → exact path (no ancestor walk)
+    3. Discovery from cwd → parent-walk to ``.git`` / ``.agentbus``
+    """
     from agentbus.workspace_guard import assert_workspace_supported
 
     if workspace:
@@ -54,7 +61,11 @@ def _cli_workspace(workspace: str | None) -> Path:
     env = os.environ.get("AGENTBUS_WORKSPACE")
     if env:
         # Env may point at an absolute tree that is not a git root; still guard FS.
-        return assert_workspace_supported(Path(env).expanduser())
+        # Do not parent-walk: honor the env value as the workspace root.
+        resolved = Path(env).expanduser().resolve()
+        if not resolved.is_dir():
+            raise click.ClickException(f"Workspace not found: {resolved}")
+        return assert_workspace_supported(resolved)
     return resolve_workspace()
 
 

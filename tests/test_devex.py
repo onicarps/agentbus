@@ -67,17 +67,41 @@ def test_init_dry_run_and_apply(tmp_path):
     assert (cfg_path.with_suffix(".json.agentbus.bak")).exists()
 
 
-def test_resolve_workspace_explicit_and_git(tmp_path):
+def test_resolve_workspace_explicit_and_git(tmp_path, monkeypatch):
     explicit = tmp_path / "ws"
     explicit.mkdir()
     assert resolve_workspace(explicit) == explicit.resolve()
 
+    # Explicit path is exact — no walk to ancestor git root.
     git_root = tmp_path / "repo"
     git_root.mkdir()
     (git_root / ".git").mkdir()
     sub = git_root / "pkg"
     sub.mkdir()
-    assert resolve_workspace(sub) == git_root.resolve()
+    assert resolve_workspace(sub) == sub.resolve()
+
+    # Discovery mode (path=None) still walks from cwd to git root.
+    monkeypatch.chdir(sub)
+    assert resolve_workspace() == git_root.resolve()
+
+
+def test_resolve_workspace_explicit_ignores_ancestor_agentbus(tmp_path):
+    """Regression: stray parent .agentbus must not hijack explicit workspaces.
+
+    Factory QA and pytest basetemps under /tmp failed when /tmp/.agentbus
+    existed — parent-walk treated /tmp as the workspace.
+    """
+    polluted = tmp_path / "tmpfake"
+    polluted.mkdir()
+    (polluted / ".agentbus").mkdir()
+    (polluted / ".agentbus" / "events.db").write_text("pollution", encoding="utf-8")
+
+    basetemp = polluted / "pytest-basetemp" / "test0"
+    basetemp.mkdir(parents=True)
+
+    assert resolve_workspace(basetemp) == basetemp.resolve()
+    # Confirm pollution would have won under the old walk-on-explicit behavior.
+    assert (polluted / ".agentbus").is_dir()
 
 
 def test_format_event_row_extracts_from_to():

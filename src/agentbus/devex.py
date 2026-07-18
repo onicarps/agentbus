@@ -36,13 +36,31 @@ class InitResult:
 
 
 def resolve_workspace(path: str | Path | None = None) -> Path:
-    """Resolve workspace root: walk up to git root or .agentbus from path or cwd.
+    """Resolve workspace root with explicit-path precedence.
+
+    * **Explicit** ``path`` (CLI ``--workspace`` or caller-supplied): use that
+      directory as-is after expand/resolve. **No ancestor parent-walk.**
+      This prevents stray ancestor ``.agentbus`` dirs (e.g. ``/tmp/.agentbus``)
+      from hijacking pytest basetemps or intentional temp workspaces.
+    * **Discovery** (``path is None``): walk from cwd upward to the nearest
+      ``.git`` root or ``.agentbus`` workspace (optional ``.agentbus/workspace``
+      marker may redirect).
+
+    ``AGENTBUS_WORKSPACE`` is honored by the CLI layer (``_cli_workspace``)
+    without walking; callers that already hold an absolute workspace should
+    pass it explicitly.
 
     Enforces native-FS constraint (rejects WSL DrvFS ``/mnt/c`` etc.).
     """
     from agentbus.workspace_guard import assert_workspace_supported
 
-    start = Path(path).expanduser().resolve() if path else Path.cwd().resolve()
+    if path is not None:
+        start = Path(path).expanduser().resolve()
+        if not start.is_dir():
+            raise ValueError(f"Workspace not found: {start}")
+        return assert_workspace_supported(start)
+
+    start = Path.cwd().resolve()
     if not start.is_dir():
         raise ValueError(f"Workspace not found: {start}")
     resolved = start

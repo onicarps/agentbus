@@ -7,6 +7,9 @@ htmlcov/
 .agentbus/
 dist/
 go-core/bin/
+# Local uv lock (project packages via hatch/pip; do not commit accidental locks)
+uv.lock
+
 # Local webhook dogfood artifacts (mock_webhook.py)
 webhook_received.json
 webhook_received.jsonl
