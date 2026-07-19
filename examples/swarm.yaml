@@ -48,7 +48,7 @@ services:
     command: "agentbus run --config .agentbus/runner.agy.yaml"
     env:
       AGENTBUS_PRODUCER_ID: "agy"
-  # Aider SRE wake (prefer enabled in live OKF swarm.yaml)
+  # Aider ops wake (devops + SRE; prefer enabled in live OKF swarm.yaml)
   # aider-wake:
   #   command: "agentbus worker up --config .agentbus/worker.aider.yaml"
   #   env:

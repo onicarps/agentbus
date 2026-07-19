@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Docs / examples — role restructure hermes=bridge / aider=ops (2026-07-19)
+
+- **Adapters:** Hermes headless prompt is **bridge** (swarm↔human, external docs); Aider prompt is **ops (devops + SRE)** with expanded standing orders.
+- **examples/runner.hermes.yaml:** `accept_to: hermes, bridge` (was `devops`).
+- **examples/runner.aider.yaml:** `accept_to` includes `ops` + legacy `sre`/`devops`/`health`.
+- **examples/swarm.yaml** / **docs/WAKE.md:** Aider described as ops (devops + SRE), not SRE-only.
+- No version bump — prompts/examples only; live coordination RBAC already aligned.
+
 ### Docs / examples — ingress ↔ runner coupling (#682)
 
 - **WAKE.md:** document that `wake-ingress` must pair with headless `intake.mode: webhook_queue`, and disable ingress when the matching runner is off (queue stagnation).

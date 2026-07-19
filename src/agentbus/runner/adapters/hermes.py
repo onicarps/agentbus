@@ -23,7 +23,9 @@ RunFn = Callable[..., subprocess.CompletedProcess[str]]
 def build_hermes_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
     """Task-only prompt for an isolated Hermes turn (no interactive transcript)."""
     lines = [
-        "You are Hermes running as an AgentBus headless runner turn (devops role).",
+        "You are Hermes running as an AgentBus headless runner turn (bridge role).",
+        "Scope: swarm↔human bridge, Telegram/webhooks, Linear/Notion external docs.",
+        "Do not own DevOps/SRE/releases — escalate ops work to Aider (ops).",
         "This is an isolated turn — do not wait for a human in a TUI.",
         f"Wake event_id={wake.event_id} topic={wake.topic} source={wake.source}",
         f"from={wake.from_agent} to={wake.to}",

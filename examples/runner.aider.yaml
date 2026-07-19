@@ -1,4 +1,5 @@
-# Aider SRE runner example (copy to .agentbus/runner.aider.yaml)
+# Aider ops runner example (devops + SRE; copy to .agentbus/runner.aider.yaml)
+# Role restructure 2026-07-19: accepter ops + legacy sre/devops/health aliases
 version: "1.0"
 runner_id: aider-runner-1
 producer_id: aider
@@ -21,7 +22,9 @@ adapter:
     - --no-auto-commits
 accept_to:
   - aider
+  - ops
   - sre
+  - devops
   - health
 allow_broadcast: false
 budget:

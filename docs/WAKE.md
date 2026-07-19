@@ -153,7 +153,7 @@ agentbus run --config examples/runner.hermes.yaml --once
 | `factory` | `droid exec -f prompt.md --skip-permissions-unsafe -o text` (default; or `--auto high` when `skip_permissions: false`) |
 | `grok` | `grok --prompt-file … --always-approve --max-turns N` (Phase E) |
 | `agy` | `agy --print … --print-timeout …` (Phase E) |
-| `aider` | `aider --message …` SRE/health (optional) |
+| `aider` | `aider --message …` ops (devops + SRE/health; optional) |
 
 ```bash
 # Factory / Grok / Agy

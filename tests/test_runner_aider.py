@@ -37,7 +37,9 @@ def _wake(eid: int = 9) -> WakeEnvelope:
 
 def test_build_aider_prompt_and_command():
     p = build_aider_prompt(_wake(3), budget_remaining=2)
+    assert "ops" in p.lower()
     assert "SRE" in p or "sre" in p.lower()
+    assert "devops" in p.lower()
     assert "event_id: 3" in p
     assert "swarm_health_check" in p
     cmd = build_aider_command(

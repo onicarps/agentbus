@@ -21,7 +21,7 @@ adapter:
   # extra_args: []
 accept_to:
   - hermes
-  - devops
+  - bridge
 allow_broadcast: false
 budget:
   max_turns_per_chain: 10

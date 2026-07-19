@@ -37,6 +37,8 @@ def test_build_hermes_prompt_includes_event():
     assert "check disk" in p
     assert "budget_remaining_turns_on_chain=7" in p
     assert "causation_id=99" in p
+    assert "bridge" in p.lower()
+    assert "devops role" not in p
 
 
 def test_build_hermes_command_shape():

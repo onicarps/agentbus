@@ -1,4 +1,4 @@
-"""Aider TurnAdapter — headless SRE oneshot via `aider --message`."""
+"""Aider TurnAdapter — headless ops oneshot via `aider --message` (devops + SRE)."""
 
 from __future__ import annotations
 
@@ -22,19 +22,20 @@ RunFn = Callable[..., subprocess.CompletedProcess[str]]
 def build_aider_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
     base = build_cli_role_prompt(
         role_name="Aider",
-        role_hint="SRE / swarm health",
+        role_hint="ops (devops + SRE)",
         wake=wake,
         budget_remaining=budget_remaining,
     )
     extra = """
 
-## SRE standing orders
+## Ops standing orders (devops + SRE)
 
 1. Prefer read-only checks: `./scripts/swarm_health_check.sh`, `agentbus status`, `agentbus ps`.
 2. Grep `.agentbus/logs/*.stderr.log` for ERROR/panic before restarting.
 3. Restart only with `agentbus down` / `agentbus up -d` after announcing SRE_ACTION.
-4. Do not implement product features — escalate to Grok.
-5. Final line of your reply should support an outer RUNNER_ACK summary.
+4. DevOps is in scope (deploy, release ops, OKF alignment, profile health) — do not implement product features; escalate code to Grok.
+5. External human/docs bridge is Hermes — do not own Telegram/Linear/Notion comms.
+6. Final line of your reply should support an outer RUNNER_ACK summary.
 """
     return base + extra
 
@@ -64,7 +65,7 @@ def build_aider_command(
 
 class AiderAdapter:
     """
-    Spawn isolated Aider turn for SRE/health wakes.
+    Spawn isolated Aider turn for ops wakes (devops + SRE/health).
 
     Config: command, timeout_seconds, yes_always, model, extra_args,
             dry_run, cwd, runs_dir
@@ -150,7 +151,7 @@ class AiderAdapter:
                 ok=True,
                 summary=(
                     f"RUNNER_ACK: aider dry_run event_id={wake.event_id} "
-                    f"sre_prompt_written"
+                    f"ops_prompt_written"
                 ),
                 detail={
                     "adapter": "aider",
