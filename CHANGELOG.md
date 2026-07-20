@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added — `agentbus metrics` (P1 ops telemetry)
+
+- **CLI:** `agentbus metrics [--workspace] [--text] [--no-health] [--no-waits]` unified read-only telemetry for SRE/Aider.
+- **Package:** `agentbus.metrics.collect_workspace_metrics` — bus status + active SLA + `okf/dead-letter` by reason + per-ingress queue `line_count` / true `undrained` backlog + optional HTTP `/health` + open wait counts.
+- **Semantics:** HTTP `queue_depth` remains total JSONL lines; `undrained` = queue event_ids not in the done set (fixes the factory-line-count smell called out in the ops review).
+- **Tests:** `tests/test_metrics.py` (status, undrained, disabled ingress, health probe, dead-letter, waits, CLI).
+- No version bump — stay **0.16.3** until labeled release.
+
 ### Added — `agentbus validate-config` (pairing #682 class)
 
 - **CLI:** `agentbus validate-config [--workspace] [--strict] [--text]` pre-flight for swarm ↔ runner ↔ worker pairing and roles.

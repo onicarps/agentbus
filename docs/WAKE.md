@@ -199,6 +199,24 @@ agentbus validate-config --workspace "$AGENTBUS_WORKSPACE" --text
 
 Catches #682-class mismatches (ingress without consumer, webhook triad incomplete, runner config/roles issues).
 
+**Telemetry (ops):** unified status + SLA + ingress queue depths:
+
+```bash
+agentbus metrics --workspace "$AGENTBUS_WORKSPACE" --text
+# JSON default; --no-health skips HTTP /health; --no-waits omits wait_store
+```
+
+| Field | Meaning |
+|-------|---------|
+| `status.*` | Same core counts as `agentbus status` (events, pending, sla_active) |
+| `sla.active` / `sla.dead_letter` | Active deadlines + `okf/dead-letter` by reason (`SLA_BREACH`, `WAIT_TIMEOUT`) |
+| `ingress[].queue.line_count` | Total JSONL lines (matches HTTP `queue_depth`; historical) |
+| `ingress[].queue.undrained` | True backlog: queue event_ids not in the done set |
+| `ingress[].health` | Live GET `/agentbus/wake/health` when service is enabled |
+| `ingress[].note` | e.g. `disabled_by_config` when ingress is off (Mode A) |
+
+Read-only — safe to poll. Prefer edge-triggered SRE publish (state transitions only); do not bus-publish `SRE_STATUS: healthy` every tick.
+
 ## Async suspend / await (v0.16)
 
 Cooperative **continuation-passing** waits (no LLM session freeze).

@@ -1297,6 +1297,65 @@ def validate_config_cmd(
         raise SystemExit(1)
 
 
+@main.command("metrics")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--retention-days", default=7, show_default=True)
+@click.option(
+    "--text",
+    "as_text",
+    is_flag=True,
+    help="Human-readable summary instead of JSON.",
+)
+@click.option(
+    "--no-health",
+    is_flag=True,
+    help="Skip HTTP /health probes on enabled wake-ingress services.",
+)
+@click.option(
+    "--no-waits",
+    is_flag=True,
+    help="Omit async-suspend wait_store open-wait counts.",
+)
+@click.option(
+    "--health-timeout",
+    type=float,
+    default=1.5,
+    show_default=True,
+    help="Seconds per ingress health probe.",
+)
+def metrics_cmd(
+    workspace: str | None,
+    retention_days: int,
+    as_text: bool,
+    no_health: bool,
+    no_waits: bool,
+    health_timeout: float,
+) -> None:
+    """Aggregated telemetry: bus status + SLA/dead-letter + ingress queues.
+
+    Read-only. Prefer for Aider/ops polling over separate status/sla/curl calls.
+    Exit 0 when core bus status is available; exit 1 if status collection fails.
+    Ingress probe failures are soft (listed under ingress[].health / errors).
+    """
+    from agentbus.metrics import collect_workspace_metrics, format_metrics_text
+
+    ws = _cli_workspace(workspace)
+    report = collect_workspace_metrics(
+        ws,
+        retention_days=retention_days,
+        probe_health=not no_health,
+        include_waits=not no_waits,
+        health_timeout_s=health_timeout,
+    )
+    if as_text:
+        click.echo(format_metrics_text(report))
+    else:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+    if not report.ok:
+        raise SystemExit(1)
+
+
+
 @main.group()
 def worker() -> None:
     """Wake plane — classical non-LLM worker (Go binary; PRD v0.12)."""
