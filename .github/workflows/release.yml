@@ -181,6 +181,56 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
   # ---------------------------------------------------------------------------
+  # okf-agentbus-ops (independent version train; pure Python, no Go embed)
+  # ---------------------------------------------------------------------------
+  build-ops-python:
+    name: Build okf-agentbus-ops
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build ops sdist + wheel
+        working-directory: packages/python/agentbus-ops
+        run: |
+          python -m build
+          ls -la dist/
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-ops-distributions
+          path: packages/python/agentbus-ops/dist/*
+          if-no-files-found: error
+
+      - name: Attach ops artifacts to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packages/python/agentbus-ops/dist/*
+          fail_on_unmatched_files: true
+
+  publish-ops-pypi:
+    name: Publish okf-agentbus-ops to PyPI
+    needs: build-ops-python
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/okf-agentbus-ops
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-ops-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+
+  # ---------------------------------------------------------------------------
   # npm: main package + platform optionalDependencies (esbuild style)
   # ---------------------------------------------------------------------------
   publish-npm-platforms:

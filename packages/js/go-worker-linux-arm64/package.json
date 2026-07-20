@@ -1,6 +1,6 @@
 {
   "name": "@agentbus/go-worker-linux-arm64",
-  "version": "0.12.1",
+  "version": "0.17.0",
   "description": "Prebuilt agentbus-go-worker + agentbus-go-serve for linux-arm64 (optionalDependency of @agentbus/agentbus-client)",
   "license": "MIT",
   "os": [

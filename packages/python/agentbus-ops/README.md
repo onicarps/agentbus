@@ -8,20 +8,19 @@ Opinionated **SRE ops** for [AgentBus](https://github.com/onicarps/agentbus): ed
 | Import | `agentbus_ops` |
 | CLI | `agentbus-ops` |
 | Core dependency | `okf-agentbus>=0.16.3` |
-| Version train | **Independent** of core `0.16.x` |
+| Version train | **Independent** of core (`0.1.0` ops vs `0.17.x` core) |
 
 ## Why a separate package
 
 Core (`okf-agentbus`) stays pure: routing, metrics, validate-config.  
 Opinionated policy (level transitions, cooldown, idempotency, hooks) lives here.
 
-## Install (dogfood)
-
-Until a public v1 release, path-install from the monorepo:
+## Install
 
 ```bash
-export AGENTBUS_WORKSPACE=/home/oni/okf_agent_workspace
-pip install -e "$AGENTBUS_WORKSPACE/projects/agentbus/packages/python/agentbus-ops"
+pip install okf-agentbus-ops
+# or path-install from monorepo during development:
+# pip install -e packages/python/agentbus-ops
 ```
 
 ## CLI (parity with bash P2)
@@ -84,7 +83,6 @@ Same contract as [sre-edge-triggered](https://github.com/onicarps/agentbus) runb
 - Autonomous restart daemon
 - Default-on LLM every tick
 - TypeScript package
-- Public PyPI release (dogfood first)
 
 ## License
 

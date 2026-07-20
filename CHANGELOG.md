@@ -2,14 +2,19 @@
 
 ## [Unreleased]
 
-### Added — `okf-agentbus-ops` 0.1.0 (monorepo sibling package)
+## [0.17.0] - 2026-07-20
+
+Core train **0.17.0** + first public **`okf-agentbus-ops` 0.1.0** (independent ops train). Tag `v0.17.0` ships both via `release.yml`.
+
+### Added — `okf-agentbus-ops` 0.1.0 (monorepo sibling package → PyPI)
 
 - **Path:** `packages/python/agentbus-ops/` — independent version train (`okf-agentbus-ops` / import `agentbus_ops`).
 - **CLI:** `agentbus-ops watchdog` — edge-triggered `SRE_STATUS` publish (bash `sre_edge_watchdog.sh` parity): bootstrap seed silent, cooldown, idempotency_key, `--dry-run` / `--json` / `--include-metrics`.
 - **Library:** `SREWatchdogAgent` with pure `decide()` policy, state file contract `.agentbus/sre_last_state.json`, subclass hooks `on_transition` / `on_critical_alert` (default critical = no-op).
 - **Probe (MVP):** wraps coordination-root `scripts/swarm_health_check.sh --json` (pure-Python probe deferred).
-- **Depends on:** `okf-agentbus>=0.16.3`. Core package **unchanged** (stay **0.16.3**). No public PyPI ops release yet (dogfood path-install).
+- **Depends on:** `okf-agentbus>=0.16.3`.
 - **Tests:** package `tests/` (policy/state/probe/agent) — 27 unit tests.
+- **Release:** `release.yml` builds and publishes ops sdist/wheel to PyPI (OIDC env `pypi`) on `v*` tags.
 
 ### Added — `agentbus metrics` (P1 ops telemetry)
 
@@ -17,14 +22,12 @@
 - **Package:** `agentbus.metrics.collect_workspace_metrics` — bus status + active SLA + `okf/dead-letter` by reason + per-ingress queue `line_count` / true `undrained` backlog + optional HTTP `/health` + open wait counts.
 - **Semantics:** HTTP `queue_depth` remains total JSONL lines; `undrained` = queue event_ids not in the done set (fixes the factory-line-count smell called out in the ops review).
 - **Tests:** `tests/test_metrics.py` (status, undrained, disabled ingress, health probe, dead-letter, waits, CLI).
-- No version bump — stay **0.16.3** until labeled release.
 
 ### Added — `agentbus validate-config` (pairing #682 class)
 
 - **CLI:** `agentbus validate-config [--workspace] [--strict] [--text]` pre-flight for swarm ↔ runner ↔ worker pairing and roles.
 - **Package:** `agentbus.config_validate.validate_workspace_config` — hard errors for ingress-on/runner-off, intake mode mismatch, and incomplete webhook triad; warnings for webhook_queue without ingress, residual queues, unmapped producers.
 - **Tests:** `tests/test_config_validate.py` (synthetic fixtures + CLI).
-- No version bump — stay **0.16.3** until labeled release.
 
 ### Docs / examples — role restructure hermes=bridge / aider=ops (2026-07-19)
 
@@ -32,7 +35,6 @@
 - **examples/runner.hermes.yaml:** `accept_to: hermes, bridge` (was `devops`).
 - **examples/runner.aider.yaml:** `accept_to` includes `ops` + legacy `sre`/`devops`/`health`.
 - **examples/swarm.yaml** / **docs/WAKE.md:** Aider described as ops (devops + SRE), not SRE-only.
-- No version bump — prompts/examples only; live coordination RBAC already aligned.
 
 ### Docs / examples — ingress ↔ runner coupling (#682)
 

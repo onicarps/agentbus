@@ -1,6 +1,6 @@
 {
   "name": "@agentbus/go-worker-win32-x64",
-  "version": "0.12.1",
+  "version": "0.17.0",
   "description": "Prebuilt agentbus-go-worker + agentbus-go-serve for win32-x64 (optionalDependency of @agentbus/agentbus-client)",
   "license": "MIT",
   "os": [
