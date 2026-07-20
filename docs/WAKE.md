@@ -215,7 +215,7 @@ agentbus metrics --workspace "$AGENTBUS_WORKSPACE" --text
 | `ingress[].health` | Live GET `/agentbus/wake/health` when service is enabled |
 | `ingress[].note` | e.g. `disabled_by_config` when ingress is off (Mode A) |
 
-Read-only — safe to poll. Prefer edge-triggered SRE publish (state transitions only); do not bus-publish `SRE_STATUS: healthy` every tick.
+Read-only — safe to poll. Prefer edge-triggered SRE publish (state transitions only); do not bus-publish `SRE_STATUS: healthy` every tick. Coordination scripts: `scripts/sre_edge_watchdog.sh` + `scripts/swarm_health_check.sh --json` (state `.agentbus/sre_last_state.json`); Python package `okf-agentbus-ops` (`agentbus-ops watchdog`, monorepo `packages/python/agentbus-ops/`); runbook `/runbooks/sre-edge-triggered.md`.
 
 ## Async suspend / await (v0.16)
 

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added — `okf-agentbus-ops` 0.1.0 (monorepo sibling package)
+
+- **Path:** `packages/python/agentbus-ops/` — independent version train (`okf-agentbus-ops` / import `agentbus_ops`).
+- **CLI:** `agentbus-ops watchdog` — edge-triggered `SRE_STATUS` publish (bash `sre_edge_watchdog.sh` parity): bootstrap seed silent, cooldown, idempotency_key, `--dry-run` / `--json` / `--include-metrics`.
+- **Library:** `SREWatchdogAgent` with pure `decide()` policy, state file contract `.agentbus/sre_last_state.json`, subclass hooks `on_transition` / `on_critical_alert` (default critical = no-op).
+- **Probe (MVP):** wraps coordination-root `scripts/swarm_health_check.sh --json` (pure-Python probe deferred).
+- **Depends on:** `okf-agentbus>=0.16.3`. Core package **unchanged** (stay **0.16.3**). No public PyPI ops release yet (dogfood path-install).
+- **Tests:** package `tests/` (policy/state/probe/agent) — 27 unit tests.
+
 ### Added — `agentbus metrics` (P1 ops telemetry)
 
 - **CLI:** `agentbus metrics [--workspace] [--text] [--no-health] [--no-waits]` unified read-only telemetry for SRE/Aider.
