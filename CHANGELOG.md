@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added — `agentbus validate-config` (pairing #682 class)
+
+- **CLI:** `agentbus validate-config [--workspace] [--strict] [--text]` pre-flight for swarm ↔ runner ↔ worker pairing and roles.
+- **Package:** `agentbus.config_validate.validate_workspace_config` — hard errors for ingress-on/runner-off, intake mode mismatch, and incomplete webhook triad; warnings for webhook_queue without ingress, residual queues, unmapped producers.
+- **Tests:** `tests/test_config_validate.py` (synthetic fixtures + CLI).
+- No version bump — stay **0.16.3** until labeled release.
+
 ### Docs / examples — role restructure hermes=bridge / aider=ops (2026-07-19)
 
 - **Adapters:** Hermes headless prompt is **bridge** (swarm↔human, external docs); Aider prompt is **ops (devops + SRE)** with expanded standing orders.

@@ -190,6 +190,15 @@ hermes-runner:
 - **`wake-ingress` on + matching runner `enabled: false`** — JSONL grows with no consumer (e.g. hermes-runner off while hermes-wake-ingress was left on).
 - **Worker `wake_mode: webhook` + runner `intake.mode: wake_file`** — dual-signal still updates `WAKE.*.json`, but the ingress queue never drains (factory audit #682).
 
+**Pre-flight (ops):** before `agentbus down` / `up`, run:
+
+```bash
+agentbus validate-config --workspace "$AGENTBUS_WORKSPACE" --text
+# exit 0 = no hard errors (warnings OK); --strict fails on warnings too
+```
+
+Catches #682-class mismatches (ingress without consumer, webhook triad incomplete, runner config/roles issues).
+
 ## Async suspend / await (v0.16)
 
 Cooperative **continuation-passing** waits (no LLM session freeze).

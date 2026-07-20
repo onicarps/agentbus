@@ -1246,6 +1246,55 @@ def swarm_config_cmd(workspace: str | None) -> None:
         raise click.ClickException(f"invalid swarm.yaml: {exc}") from exc
 
 
+@main.command("validate-config")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Treat warnings as errors (non-zero exit if any warning).",
+)
+@click.option(
+    "--text",
+    "as_text",
+    is_flag=True,
+    help="Human-readable lines instead of JSON.",
+)
+def validate_config_cmd(
+    workspace: str | None,
+    strict: bool,
+    as_text: bool,
+) -> None:
+    """Pre-flight: swarm ↔ runner ↔ worker pairing (#682) + roles checks.
+
+    Exit 0 if no errors (warnings alone are OK unless --strict).
+    Exit 1 on hard mismatches (ingress on / runner off, webhook triad broken, …).
+    """
+    from agentbus.config_validate import validate_workspace_config
+
+    ws = _cli_workspace(workspace)
+    report = validate_workspace_config(ws)
+    failed = (not report.ok) or (strict and bool(report.warnings))
+
+    if as_text:
+        status = "FAIL" if failed else "OK"
+        click.echo(f"validate-config: {status}  workspace={report.workspace}")
+        for f in report.findings:
+            loc = f.service or f.path or f.runtime or ""
+            prefix = f"  [{f.severity.upper()}] {f.code}"
+            if loc:
+                click.echo(f"{prefix} ({loc}): {f.message}")
+            else:
+                click.echo(f"{prefix}: {f.message}")
+        if not report.findings:
+            click.echo("  (no findings)")
+        click.echo(
+            f"  errors={len(report.errors)} warnings={len(report.warnings)}"
+        )
+    else:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+
+    if failed:
+        raise SystemExit(1)
 
 
 @main.group()
