@@ -11,8 +11,14 @@ from pathlib import Path
 
 from agentbus.artifacts import extract_artifacts
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
-from agentbus.mcpsafe import AccessDeniedError, PolicyEnforcer
-from agentbus.rbac import ForbiddenError, check_approve_rbac, check_publish_rbac
+from agentbus.mcpsafe import PolicyEnforcer
+from agentbus.rbac import check_approve_rbac, check_publish_rbac
+from agentbus.retry import (
+    RetryExhaustedError,
+    call_with_retry,
+    default_publish_policy,
+    is_transient_sqlite_error,
+)
 from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
 from agentbus.tracing import generate_span_id, normalize_parent_span_id, normalize_trace_id
 
@@ -436,37 +442,68 @@ class EventStore:
         if sla_timeout_minutes is not None and event_status == STATUS_PUBLISHED:
             sla_deadline = self._sla_deadline_from_now(sla_timeout_minutes)
 
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        cur = self._conn.execute(
-            """
-            INSERT INTO events
-                (topic, producer_id, timestamp, schema_version, payload,
-                 causation_id, idempotency_key, status, pending_until,
-                 sla_timeout_minutes, sla_deadline, sla_cleared,
-                 trace_id, span_id, parent_span_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-            """,
-            (
-                topic,
-                producer_id,
-                ts,
-                schema_version,
-                json.dumps(stored_payload),
-                causation_id,
-                idempotency_key,
-                event_status,
-                event_pending_until,
-                sla_timeout_minutes,
-                sla_deadline,
-                trace_id,
-                span_id,
-                parent_span_id,
-            ),
-        )
-        event_id = cur.lastrowid
-        self._save_artifacts(event_id, artifacts)
-        self._conn.commit()
-        self.prune_expired()
+        # Insert+commit under retry with exp backoff + jitter so lock storms
+        # (companion-ACK / concurrent writers) do not fail the first busy_timeout.
+        # Only the write is retried — never re-INSERT after a successful commit
+        # (would duplicate when idempotency_key is absent).
+        def _insert_commit() -> int:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO events
+                        (topic, producer_id, timestamp, schema_version, payload,
+                         causation_id, idempotency_key, status, pending_until,
+                         sla_timeout_minutes, sla_deadline, sla_cleared,
+                         trace_id, span_id, parent_span_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    """,
+                    (
+                        topic,
+                        producer_id,
+                        ts,
+                        schema_version,
+                        json.dumps(stored_payload),
+                        causation_id,
+                        idempotency_key,
+                        event_status,
+                        event_pending_until,
+                        sla_timeout_minutes,
+                        sla_deadline,
+                        trace_id,
+                        span_id,
+                        parent_span_id,
+                    ),
+                )
+                event_id = int(cur.lastrowid)
+                self._save_artifacts(event_id, artifacts)
+                self._conn.commit()
+                return event_id
+            except sqlite3.OperationalError:
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                raise
+
+        try:
+            event_id = call_with_retry(
+                _insert_commit,
+                policy=default_publish_policy(),
+                is_retryable=is_transient_sqlite_error,
+            )
+        except RetryExhaustedError as exc:
+            # Re-raise the underlying SQLite error for API compatibility; callers
+            # that want DLQ escalation should use agentbus.resilience helpers.
+            if exc.last_error is not None:
+                raise exc.last_error from exc
+            raise
+
+        # Prune is best-effort; lock on prune must not fail a successful insert.
+        try:
+            self.prune_expired()
+        except sqlite3.OperationalError:
+            pass
         row = self._conn.execute(
             "SELECT * FROM events WHERE event_id = ?", (event_id,)
         ).fetchone()

@@ -16,11 +16,38 @@ CIRCUIT_BREAK_MARKERS: tuple[str, ...] = (
     "NO-OP",
 )
 
+# Inbound wake summaries that must never spawn an LLM turn or re-ACK.
+# Companion RUNNER_ACK storms (hermes↔aider #1518–#1527) buried user-visible
+# substance inside ops prefixes; Hermes standing orders correctly suppress
+# Telegram for those prefixes — so the human never sees the answer unless
+# agents publish a separate substance handoff. Structural skip stops the storm.
+OPS_SUMMARY_PREFIXES: tuple[str, ...] = (
+    "RUNNER_ACK",
+    "RUNNER_ERROR",
+    "RUNNER_SUSPEND",
+    "NO-OP",
+    "TERMINAL_IDLE",
+    "CHAIN_BREAK",
+    "SUPPRESS ACK",
+)
+
 
 def preview_suppresses_ack(preview: str | None) -> bool:
     """True if CLI output contains a reserved circuit-breaker keyword."""
     text = preview or ""
     return any(marker in text for marker in CIRCUIT_BREAK_MARKERS)
+
+
+def is_ops_noise_summary(summary: str | None) -> bool:
+    """True if handoff summary is ops/companion noise (skip LLM + no re-ACK)."""
+    text = (summary or "").strip()
+    if not text:
+        return False
+    upper = text.upper()
+    for prefix in OPS_SUMMARY_PREFIXES:
+        if upper.startswith(prefix.upper()):
+            return True
+    return False
 
 
 def runner_subprocess_env(
@@ -151,6 +178,11 @@ def build_cli_role_prompt(
         f"  / RUNNER_SUSPEND with causation_id={wake.event_id}. Prefer finishing the task.",
         "- If you must publish yourself, use full okf/handoff fields",
         f"  (from, to, summary) and causation_id={wake.event_id}.",
+        "- **Human-visible answers (Telegram bridge):** companion RUNNER_ACK is",
+        "  ops-only and is **not** relayed to Telegram. When the human should see",
+        "  your result, publish a separate substance handoff to `hermes` or `human`",
+        "  whose summary does **not** start with RUNNER_ACK/ERROR/SUSPEND/NO-OP/",
+        "  TERMINAL_IDLE/CHAIN_BREAK (plain language answer or CLOSED/status).",
         "",
         "## Cooperative await (do not busy-wait)",
         "",

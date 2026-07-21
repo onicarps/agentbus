@@ -226,7 +226,7 @@ func (s *Service) drain() (int, error) {
 				// Dispatch failures are non-fatal by default (PRD on_task):
 				// log, advance cursor, keep lease as short tombstone (no early release
 				// on success — factory-droid CR #1 poison-pill + #3 crash window).
-				dres, err := Dispatch(s.cfg, s.workspace, ev)
+				dres, err := DispatchWithStore(s.cfg, s.workspace, ev, s.store)
 				if err != nil {
 					log.Printf("dispatch event_id=%d: %v (advancing cursor)", ev.EventID, err)
 					if err := SaveCursor(s.cursorPath(), ev.EventID); err != nil {

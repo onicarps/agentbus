@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added — resilient messaging retry (Agy GO #1705 / #1698)
+
+- **`agentbus.retry`:** exponential backoff + full jitter `RetryPolicy`, `call_with_retry`, SQLite lock classifier; env overrides `AGENTBUS_PUBLISH_*` / `AGENTBUS_DELIVERY_*`
+- **`agentbus.resilience`:** `okf/dead-letter` reason **`RETRY_EXHAUSTED`**, file spillover DLQ at `.agentbus/dead-letter/spillover.jsonl`, `publish_or_spill` / `escalate_retry_exhausted`
+- **`EventStore.publish`:** retries transient `database is locked` / busy with backoff+jitter (rollback-safe; no re-INSERT after commit)
+- **Runner ACK path:** `publish_or_spill` so exhausted ACK publish marks done + spillover instead of crashing or hammering SQLite
+- **Go webhook:** full-jitter backoff; on final failure publish `okf/dead-letter` + spillover JSONL
+- **Structural ACK-storm breaker:** inbound `RUNNER_ACK`/`RUNNER_ERROR`/… prefixes skip LLM + re-ACK (`ops_noise`); Hermes bridge standing orders locked in prompt
+- **Tests:** `tests/test_retry.py`, `tests/test_resilience.py`, busy-wait ops_noise gates
+
 ## [0.16.3] - 2026-07-18
 
 ### Fixed — monitor open-path prune write (follow-up Agy #601)

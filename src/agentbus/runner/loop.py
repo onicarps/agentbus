@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from agentbus.resilience import publish_or_spill
 from agentbus.runner.adapters import get_adapter
+from agentbus.runner.adapters.prompt_common import is_ops_noise_summary
 from agentbus.runner.budget import ChainBudget
 from agentbus.runner.config import (
     RunnerConfig,
@@ -159,6 +161,10 @@ def should_skip(wake: WakeEnvelope, cfg: RunnerConfig) -> str | None:
         return "broadcast"
     if to not in cfg.accept_to:
         return f"to_not_accepted:{to}"
+    # Structural companion-ACK breaker: never re-process ops noise wakes.
+    # Prompt-only CHAIN_BREAK was insufficient (hermes↔aider storm 2026-07-21).
+    if is_ops_noise_summary(wake.summary):
+        return "ops_noise"
     max_age = int(cfg.budget.max_event_age_hours or 0)
     if max_age > 0:
         received = wake_received_at(wake)
@@ -319,20 +325,53 @@ def process_envelope(
         if result.status == "suspended":
             # Persist the finalized suspended record (matches the published ACK).
             _write_run_log(workspace, cfg, wake, result)
-            event, duplicate = store.publish(
-                topic="okf/handoff",
-                producer_id=cfg.producer_id,
-                schema_version="1.0",
-                payload={
-                    "from": cfg.producer_id,
-                    "to": reply_to if reply_to not in BROADCAST_TO else "agy",
-                    "summary": result.summary,
+            pub = publish_or_spill(
+                store,
+                workspace=workspace,
+                publish_kwargs={
+                    "topic": "okf/handoff",
+                    "producer_id": cfg.producer_id,
+                    "schema_version": "1.0",
+                    "payload": {
+                        "from": cfg.producer_id,
+                        "to": reply_to if reply_to not in BROADCAST_TO else "agy",
+                        "summary": result.summary,
+                    },
+                    "causation_id": wake.event_id,
+                    "idempotency_key": suspend_ack_idempotency_key(
+                        cfg.runner_id, wake.event_id
+                    ),
                 },
-                causation_id=wake.event_id,
-                idempotency_key=suspend_ack_idempotency_key(
-                    cfg.runner_id, wake.event_id
-                ),
+                spill_context={
+                    "kind": "runner_suspend_ack",
+                    "runner_id": cfg.runner_id,
+                    "wake_event_id": wake.event_id,
+                },
             )
+            if not pub.get("ok"):
+                log.error(
+                    "suspend ack publish failed event_id=%s spill=%s err=%s",
+                    wake.event_id,
+                    pub.get("path"),
+                    pub.get("error"),
+                )
+                budget.record(chain)
+                append_done_id(done_path, wake.event_id)
+                done.add(wake.event_id)
+                return {
+                    "event_id": wake.event_id,
+                    "status": "suspended",
+                    "ok": True,
+                    "turn_status": "suspended",
+                    "ack_event_id": None,
+                    "duplicate_ack": False,
+                    "summary": result.summary,
+                    "wait_id": wait_id,
+                    "chain_key": chain,
+                    "ack_spillover": pub.get("path"),
+                }
+            event = pub["event"]
+            duplicate = bool(pub.get("duplicate"))
             # Suspend turn counts as 1 (LLM already ran); idle wait = 0
             if not duplicate:
                 budget.record(chain)
@@ -377,18 +416,51 @@ def process_envelope(
             "circuit_break": True,
         }
 
-    event, duplicate = store.publish(
-        topic="okf/handoff",
-        producer_id=cfg.producer_id,
-        schema_version="1.0",
-        payload={
-            "from": cfg.producer_id,
-            "to": reply_to if reply_to not in BROADCAST_TO else "agy",
-            "summary": result.summary,
+    pub = publish_or_spill(
+        store,
+        workspace=workspace,
+        publish_kwargs={
+            "topic": "okf/handoff",
+            "producer_id": cfg.producer_id,
+            "schema_version": "1.0",
+            "payload": {
+                "from": cfg.producer_id,
+                "to": reply_to if reply_to not in BROADCAST_TO else "agy",
+                "summary": result.summary,
+            },
+            "causation_id": wake.event_id,
+            "idempotency_key": f"runner-ack:{cfg.runner_id}:{wake.event_id}",
         },
-        causation_id=wake.event_id,
-        idempotency_key=f"runner-ack:{cfg.runner_id}:{wake.event_id}",
+        spill_context={
+            "kind": "runner_ack",
+            "runner_id": cfg.runner_id,
+            "wake_event_id": wake.event_id,
+        },
     )
+    if not pub.get("ok"):
+        log.error(
+            "runner ack publish failed event_id=%s spill=%s err=%s",
+            wake.event_id,
+            pub.get("path"),
+            pub.get("error"),
+        )
+        budget.record(chain)
+        append_done_id(done_path, wake.event_id)
+        done.add(wake.event_id)
+        return {
+            "event_id": wake.event_id,
+            "status": "processed",
+            "ok": result.ok,
+            "turn_status": result.status,
+            "ack_event_id": None,
+            "duplicate_ack": False,
+            "summary": result.summary,
+            "circuit_break": False,
+            "ack_spillover": pub.get("path"),
+        }
+
+    event = pub["event"]
+    duplicate = bool(pub.get("duplicate"))
 
     # Count every executed turn (success or error) toward chain budget.
     if not duplicate:

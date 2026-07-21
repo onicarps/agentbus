@@ -23,7 +23,9 @@ RunFn = Callable[..., subprocess.CompletedProcess[str]]
 def build_hermes_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
     """Task-only prompt for an isolated Hermes turn (no interactive transcript)."""
     lines = [
-        "You are Hermes running as an AgentBus headless runner turn (devops role).",
+        "You are Hermes running as an AgentBus headless runner turn (bridge role).",
+        "Scope: swarm↔human bridge, Telegram/webhooks, Linear/Notion external docs.",
+        "Do not own DevOps/SRE/releases — escalate ops work to Aider (ops).",
         "This is an isolated turn — do not wait for a human in a TUI.",
         f"Wake event_id={wake.event_id} topic={wake.topic} source={wake.source}",
         f"from={wake.from_agent} to={wake.to}",
@@ -31,6 +33,13 @@ def build_hermes_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
         "When you finish, your final reply should be a short operational summary.",
         "If the task asks you to publish on the bus, use agentbus MCP/tools with",
         f"causation_id={wake.event_id} when acknowledging.",
+        "",
+        "Telegram Relay Standing Orders:",
+        "- Suppress Telegram relay for inbound summaries starting with: RUNNER_ACK, RUNNER_ERROR, RUNNER_SUSPEND, NO-OP, TERMINAL_IDLE, CHAIN_BREAK.",
+        "- Treat RESUME: as non-human by default.",
+        "- Relay substance handoffs (addressed to hermes, bridge, or human) to Telegram, including explicit questions, closed status, or ship announcements.",
+        "- Companion RUNNER_ACK is ops-only (runner may skip it before this turn). Never re-ACK an ACK to peer agents (prevents hermes↔peer storms).",
+        "- When you originate a human question to the swarm, require agents to reply with a substance handoff (not only outer RUNNER_ACK) so you can relay it.",
         "",
         "Task summary:",
         wake.summary or "(empty summary)",

@@ -29,7 +29,13 @@ KNOWN_TOPICS: dict[str, dict] = {
         "required": ["reason", "original_event_id", "original_event", "summary"],
         "additionalProperties": False,
         "properties": {
-            "reason": {"enum": ["SLA_BREACH", "WAIT_TIMEOUT"]},
+            "reason": {
+                "enum": [
+                    "SLA_BREACH",
+                    "WAIT_TIMEOUT",
+                    "RETRY_EXHAUSTED",
+                ]
+            },
             "original_event_id": {"type": "integer", "minimum": 1},
             "original_event": {"type": "object"},
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},

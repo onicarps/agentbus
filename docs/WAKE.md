@@ -202,6 +202,20 @@ agentbus await \
 
 Design: `initiatives/agentbus/decisions/v0.16-async-suspend-design.md`
 
+## Resilient messaging (retry + DLQ)
+
+Product-side protection against lock storms and failed push delivery (Agy GO 2026-07-22).
+
+| Layer | Behavior |
+|-------|----------|
+| **Publish retry** | `EventStore.publish` retries transient SQLite `locked`/`busy` with exponential backoff + full jitter (`agentbus.retry`; env `AGENTBUS_PUBLISH_*`) |
+| **Runner ACK** | `publish_or_spill` — on exhaust, mark wake done + write spillover (no crash, no infinite hammer) |
+| **Webhook** | Go worker: 3 tries, full-jitter backoff; final fail → `okf/dead-letter` **`RETRY_EXHAUSTED`** + spillover |
+| **Spillover file** | `.agentbus/dead-letter/spillover.jsonl` (JSONL) when bus publish cannot accept DLQ |
+| **ACK storm breaker** | Inbound summaries starting `RUNNER_ACK` / `RUNNER_ERROR` / `RUNNER_SUSPEND` / `NO-OP` / `TERMINAL_IDLE` / `CHAIN_BREAK` → skip LLM + no re-ACK (`ops_noise`) |
+
+Decision: `initiatives/agentbus/decisions/agy-resilient-messaging-go-2026-07-22.md`
+
 ## Anti-patterns
 
 - Cron a full coding agent to `poll` an empty bus every minute  

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -32,16 +33,23 @@ type WakeFile struct {
 type DispatchResult struct {
 	WebhookAttempted bool
 	WebhookOK        bool
+	DeadLetterOK     bool
 }
 
-// Webhook delivery policy (PRD v0.13 + WEBHOOK_SPEC_GO).
+// Webhook delivery policy (PRD v0.13 + resilient messaging GO 2026-07-22).
 const (
 	webhookTimeout     = 5 * time.Second
 	webhookMaxTries    = 3
 	webhookBackoffBase = 200 * time.Millisecond
+	webhookBackoffMax  = 2 * time.Second
 )
 
 func Dispatch(cfg *Config, workspace string, ev store.Event) (DispatchResult, error) {
+	return DispatchWithStore(cfg, workspace, ev, nil)
+}
+
+// DispatchWithStore is Dispatch plus optional EventStore for dead-letter escalate.
+func DispatchWithStore(cfg *Config, workspace string, ev store.Event, es *store.EventStore) (DispatchResult, error) {
 	var res DispatchResult
 	wroteFile := false
 	for _, action := range cfg.OnTask {
@@ -63,6 +71,10 @@ func Dispatch(cfg *Config, workspace string, ev store.Event) (DispatchResult, er
 		res.WebhookAttempted = true
 		if err := postWebhookWithRetry(cfg, ev); err != nil {
 			log.Printf("webhook failed after retries event_id=%d: %v", ev.EventID, err)
+			// Escalate to okf/dead-letter (RETRY_EXHAUSTED) + spillover file.
+			if escalateWebhookDeadLetter(es, workspace, cfg, ev, err) {
+				res.DeadLetterOK = true
+			}
 			if !wroteFile {
 				return res, fmt.Errorf("webhook: %w", err)
 			}
@@ -100,10 +112,110 @@ func postWebhookWithRetry(cfg *Config, ev store.Event) error {
 			return nil
 		}
 		if attempt < webhookMaxTries {
-			time.Sleep(webhookBackoffBase * time.Duration(1<<(attempt-1)))
+			time.Sleep(webhookBackoff(attempt - 1))
 		}
 	}
 	return last
+}
+
+// webhookBackoff returns full-jitter delay for zero-based failure index.
+// delay = uniform(0, min(max, base * 2^attempt))
+func webhookBackoff(attempt int) time.Duration {
+	if attempt < 0 {
+		attempt = 0
+	}
+	raw := webhookBackoffBase * time.Duration(1<<attempt)
+	if raw > webhookBackoffMax {
+		raw = webhookBackoffMax
+	}
+	if raw <= 0 {
+		return 0
+	}
+	// Full jitter: [0, raw]
+	return time.Duration(rand.Int63n(int64(raw) + 1))
+}
+
+// escalateWebhookDeadLetter publishes okf/dead-letter RETRY_EXHAUSTED and
+// always appends a spillover JSONL line for ops recovery.
+func escalateWebhookDeadLetter(es *store.EventStore, workspace string, cfg *Config, ev store.Event, last error) bool {
+	summary := fmt.Sprintf(
+		"Webhook delivery retry exhausted worker=%s event_id=%d url=%s err=%v",
+		cfg.WorkerID, ev.EventID, cfg.WebhookUrl, last,
+	)
+	if len(summary) > 2000 {
+		summary = summary[:2000]
+	}
+	original := map[string]any{
+		"event_id":    ev.EventID,
+		"topic":       ev.Topic,
+		"producer_id": ev.ProducerID,
+		"payload":     ev.Payload,
+		"worker_id":   cfg.WorkerID,
+		"webhook_url": cfg.WebhookUrl,
+		"error":       fmt.Sprintf("%v", last),
+	}
+	// File spillover always (even when bus publish works) for audit trail under load.
+	_ = appendSpillover(workspace, map[string]any{
+		"reason":             "RETRY_EXHAUSTED",
+		"original_event_id":  ev.EventID,
+		"original_event":     original,
+		"summary":            summary,
+		"spilled_at":         time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		"kind":               "webhook_delivery",
+	})
+
+	if es == nil {
+		return false
+	}
+	// original_event_id schema requires >= 1
+	oid := ev.EventID
+	if oid < 1 {
+		oid = 1
+	}
+	idem := fmt.Sprintf("webhook-retry-exhausted:%s:%d", cfg.WorkerID, ev.EventID)
+	causation := ev.EventID
+	payload := map[string]any{
+		"reason":             "RETRY_EXHAUSTED",
+		"original_event_id":  oid,
+		"original_event":     original,
+		"summary":            summary,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, err := es.Publish(ctx, store.PublishRequest{
+		Topic:          "okf/dead-letter",
+		ProducerID:     "agentbus",
+		SchemaVersion:  "1.0",
+		Payload:        payload,
+		CausationID:    &causation,
+		IdempotencyKey: &idem,
+	})
+	if err != nil {
+		log.Printf("dead-letter publish failed event_id=%d: %v", ev.EventID, err)
+		return false
+	}
+	return true
+}
+
+func appendSpillover(workspace string, record map[string]any) error {
+	dir := filepath.Join(workspace, ".agentbus", "dead-letter")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "spillover.jsonl")
+	b, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return nil
 }
 
 func postWebhookOnce(cfg *Config, ev store.Event) error {

@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import yaml
 
 from agentbus.runner import load_runner_config, run_once
 from agentbus.runner.adapters.prompt_common import (
+    is_ops_noise_summary,
     preview_suppresses_ack,
     turn_result_from_cli_exit,
 )
@@ -78,6 +78,69 @@ def test_preview_suppresses_ack_markers():
     # case-sensitive exact substrings
     assert preview_suppresses_ack("chain_break lower") is False
     assert preview_suppresses_ack("no-op lower hyphen") is False
+
+
+def test_is_ops_noise_summary_prefixes():
+    """Structural skip must catch companion ACK / error / suspend prefixes."""
+    assert is_ops_noise_summary("RUNNER_ACK: aider completed event_id=1516 out=...") is True
+    assert is_ops_noise_summary("RUNNER_ERROR: hermes exit=1 event_id=9") is True
+    assert is_ops_noise_summary("RUNNER_SUSPEND: event_id=10 wait_id=w_x") is True
+    assert is_ops_noise_summary("NO-OP/TERMINAL_IDLE CHAIN_BREAK") is True
+    assert is_ops_noise_summary("TERMINAL_IDLE") is True
+    assert is_ops_noise_summary("CHAIN_BREAK: done") is True
+    assert is_ops_noise_summary("SUPPRESS ACK: relay skipped") is True
+    # case-insensitive prefix
+    assert is_ops_noise_summary("runner_ack: peer") is True
+    # substance must NOT be treated as ops noise
+    assert is_ops_noise_summary("Wake mechanism: timer-poll ~5s") is False
+    assert is_ops_noise_summary("TELEGRAM_SMOKE_SUBSTANCE: please relay") is False
+    assert is_ops_noise_summary("SRE_STATUS: healthy") is False
+    assert is_ops_noise_summary("") is False
+    assert is_ops_noise_summary(None) is False
+
+
+def test_loop_skips_ops_noise_without_llm_or_ack(tmp_path: Path, monkeypatch):
+    """Inbound RUNNER_ACK must not spawn adapter or publish a re-ACK (storm fix)."""
+    cfg_path = _write_runner_yaml(tmp_path / "runner.yaml")
+    _enqueue(
+        tmp_path,
+        1518,
+        to="grok",
+        frm="aider",
+        summary=(
+            "RUNNER_ACK: aider completed event_id=1516 out="
+            "Wake mechanism: Timer-poll (default 5s)"
+        ),
+    )
+
+    called: list[int] = []
+
+    class _MustNotRun:
+        def start_turn(self, wake, budget_remaining: int = 0) -> TurnResult:
+            called.append(wake.event_id)
+            return TurnResult(ok=True, summary="should not run")
+
+    monkeypatch.setattr(
+        "agentbus.runner.loop.get_adapter",
+        lambda *a, **k: _MustNotRun(),
+    )
+
+    cfg = load_runner_config(cfg_path)
+    results = run_once(tmp_path, cfg)
+    assert len(results) == 1
+    assert results[0]["status"] == "skipped"
+    assert results[0]["reason"] == "ops_noise"
+    assert called == []
+
+    done = (tmp_path / ".agentbus" / "ingress" / "grok_wake_done.ids").read_text()
+    assert "1518" in done
+
+    store = EventStore(tmp_path)
+    try:
+        polled = store.poll("okf/handoff", since_id=0)
+        assert polled["events"] == []
+    finally:
+        store.close()
 
 
 def test_turn_result_chain_break_sets_suppress_ack():

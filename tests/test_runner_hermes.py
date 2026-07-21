@@ -39,6 +39,24 @@ def test_build_hermes_prompt_includes_event():
     assert "causation_id=99" in p
 
 
+def test_build_hermes_prompt_includes_telegram_standing_orders():
+    """Lock Mode A standing orders so suppress list cannot be silently trimmed."""
+    p = build_hermes_prompt(_wake(99), budget_remaining=7)
+    assert "Telegram Relay Standing Orders" in p
+    for prefix in (
+        "RUNNER_ACK",
+        "RUNNER_ERROR",
+        "RUNNER_SUSPEND",
+        "NO-OP",
+        "TERMINAL_IDLE",
+        "CHAIN_BREAK",
+    ):
+        assert prefix in p, f"standing-order suppress list missing {prefix}"
+    assert "RESUME:" in p
+    assert "Relay substance" in p or "substance handoffs" in p.lower()
+    assert "bridge role" in p
+
+
 def test_build_hermes_command_shape():
     cmd = build_hermes_command(
         hermes_bin="hermes",
