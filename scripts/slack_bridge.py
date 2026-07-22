@@ -234,7 +234,10 @@ def should_post_outbound(payload: dict[str, Any]) -> bool:
     """Outbound: only explicit to=slack, never ops noise."""
     if (payload.get("to") or "").strip().lower() != "slack":
         return False
-    if is_ops_noise_summary(payload.get("summary")):
+    summary = payload.get("summary") or ""
+    if summary.startswith("RUNNER_ACK") and "out=" in summary:
+        return True
+    if is_ops_noise_summary(summary):
         return False
     return True
 
@@ -242,6 +245,8 @@ def should_post_outbound(payload: dict[str, Any]) -> bool:
 def format_outbound_message(payload: dict[str, Any]) -> str:
     sender = (payload.get("from") or "system").strip()
     summary = (payload.get("summary") or "").strip()
+    if summary.startswith("RUNNER_ACK") and "out=" in summary:
+        summary = summary.split("out=", 1)[1].strip()
     return f"*{sender}*\n{summary}"
 
 

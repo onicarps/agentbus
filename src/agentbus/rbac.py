@@ -129,11 +129,23 @@ def default_rbac_config() -> RbacConfig:
             "observer": RoleDef(
                 can_publish_topics=["system/*"],
             ),
+            "bridge": RoleDef(
+                can_publish_topics=["okf/handoff", "okf/dead-letter"],
+            ),
+            "qa": RoleDef(
+                can_publish_topics=["okf/handoff"],
+            ),
+            "ops": RoleDef(
+                can_publish_topics=["okf/handoff", "system/*"],
+            ),
         },
         producers={
             "grok": "engineer",
             "agy": "architect",
-            "hermes": "qa_droid",
+            "hermes": "bridge",
+            "factory": "qa",
+            "aider": "ops",
+            "slack": "bridge",
             "wiretap": "observer",
             "os-watcher": "observer",
             "swarm-tail": "observer",
