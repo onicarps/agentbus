@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from agentbus.runner.types import AWAIT_EXIT_CODE, TurnResult, WakeEnvelope
+
+# okf/handoff summary maxLength — keep companion ACK/ERROR under schema limit.
+HANDOFF_SUMMARY_MAX = 2000
 
 # v0.16.1 busy-wait circuit breaker: exact substrings in CLI stdout/stderr.
 # When present, outer loop must not publish companion RUNNER_ACK/ERROR.
@@ -74,6 +78,29 @@ def runner_subprocess_env(
     return env
 
 
+def format_cli_out_preview(preview: str | None, max_len: int) -> str:
+    """Format CLI stdout for companion ACK ``out=`` (Slack-readable).
+
+    Historically collapsed *all* whitespace to a single 500-char line, which
+    destroyed markdown/code and made the Slack ``out=`` safety-net unusable.
+    Preserve newlines (soft-collapse horizontal runs only) and fill up to
+    ``max_len`` (caller should reserve room so full summary ≤ schema max).
+    """
+    text = (preview or "").strip()
+    if not text:
+        return ""
+    # Collapse horizontal whitespace; keep newlines for multi-line Slack posts.
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len <= 3:
+        return text[:max_len]
+    return text[: max_len - 3].rstrip() + "..."
+
+
 def turn_result_from_cli_exit(
     *,
     adapter: str,
@@ -90,7 +117,6 @@ def turn_result_from_cli_exit(
     body = dict(detail or {})
     body["adapter"] = adapter
     body["returncode"] = returncode
-    preview_one = " ".join((preview or "").split())
     suppress = preview_suppresses_ack(preview)
     if suppress:
         body["suppress_ack"] = True
@@ -104,21 +130,23 @@ def turn_result_from_cli_exit(
             suppress_ack=False,
         )
     if returncode != 0:
+        prefix = (
+            f"RUNNER_ERROR: {adapter} exit={returncode} event_id={event_id} out="
+        )
+        out = format_cli_out_preview(
+            preview, HANDOFF_SUMMARY_MAX - len(prefix)
+        )
         return TurnResult(
             ok=False,
-            summary=(
-                f"RUNNER_ERROR: {adapter} exit={returncode} "
-                f"event_id={event_id} out={preview_one[:400]}"
-            ),
+            summary=prefix + out,
             detail=body,
             suppress_ack=suppress,
         )
+    prefix = f"RUNNER_ACK: {adapter} completed event_id={event_id} out="
+    out = format_cli_out_preview(preview, HANDOFF_SUMMARY_MAX - len(prefix))
     return TurnResult(
         ok=True,
-        summary=(
-            f"RUNNER_ACK: {adapter} completed event_id={event_id} "
-            f"out={preview_one[:500]}"
-        ),
+        summary=prefix + out,
         detail=body,
         suppress_ack=suppress,
     )
@@ -178,11 +206,14 @@ def build_cli_role_prompt(
         f"  / RUNNER_SUSPEND with causation_id={wake.event_id}. Prefer finishing the task.",
         "- If you must publish yourself, use full okf/handoff fields",
         f"  (from, to, summary) and causation_id={wake.event_id}.",
-        "- **Human-visible answers (Telegram bridge):** companion RUNNER_ACK is",
-        "  ops-only and is **not** relayed to Telegram. When the human should see",
-        "  your result, publish a separate substance handoff to `hermes` or `human`",
-        "  whose summary does **not** start with RUNNER_ACK/ERROR/SUSPEND/NO-OP/",
-        "  TERMINAL_IDLE/CHAIN_BREAK (plain language answer or CLOSED/status).",
+        "- **Human-visible answers (primary UI = Slack):** companion RUNNER_ACK is",
+        "  ops-only. When the human should see your result, publish a separate",
+        "  substance handoff to `slack` and **preserve** wake `links`",
+        "  (`slack://{channel}/{ts}`) so the bridge can thread the reply.",
+        "  Hermes is **legacy Telegram only** — do not default Slack-origin work",
+        "  to `hermes`/`human`. Substance summaries must **not** start with",
+        "  RUNNER_ACK/ERROR/SUSPEND/NO-OP/TERMINAL_IDLE/CHAIN_BREAK",
+        "  (plain language answer or CLOSED/status).",
         "",
         "## Cooperative await (do not busy-wait)",
         "",

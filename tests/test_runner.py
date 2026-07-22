@@ -212,3 +212,58 @@ def test_idempotent_ack(tmp_path: Path):
         assert len(events) == 1
     finally:
         store.close()
+
+
+def test_companion_ack_copies_slack_links(tmp_path: Path):
+    """P0: Slack-origin wakes must put slack:// links on companion RUNNER_ACK."""
+    cfg_path = _write_runner_yaml(
+        tmp_path / "runner.yaml",
+        producer_id="grok",
+        intake={"mode": "webhook_queue", "runtime": "grok"},
+        accept_to=["grok"],
+    )
+    qdir = tmp_path / ".agentbus" / "ingress"
+    qdir.mkdir(parents=True, exist_ok=True)
+    link = "slack://C123/1710000000.000100"
+    rec = {
+        "received_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event_id": 1877,
+        "runtime": "grok",
+        "from": "slack",
+        "to": "grok",
+        "summary": "please fix",
+        "topic": "okf/handoff",
+        "raw": {
+            "event_id": 1877,
+            "topic": "okf/handoff",
+            "payload": {
+                "from": "slack",
+                "to": "grok",
+                "summary": "please fix",
+                "links": [link],
+            },
+        },
+        "payload": {
+            "from": "slack",
+            "to": "grok",
+            "summary": "please fix",
+            "links": [link],
+        },
+    }
+    with (qdir / "grok_wake_queue.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec) + "\n")
+
+    cfg = load_runner_config(cfg_path)
+    results = run_once(tmp_path, cfg)
+    assert results[0]["status"] == "processed"
+
+    store = EventStore(tmp_path)
+    try:
+        events = store.poll("okf/handoff", since_id=0)["events"]
+        assert len(events) == 1
+        ack = events[0]
+        assert ack["payload"]["to"] == "slack"
+        assert ack["payload"]["links"] == [link]
+        assert "RUNNER_ACK" in ack["payload"]["summary"]
+    finally:
+        store.close()

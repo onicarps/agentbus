@@ -10,11 +10,14 @@ import yaml
 
 from agentbus.runner import load_runner_config, run_once
 from agentbus.runner.adapters.prompt_common import (
+    HANDOFF_SUMMARY_MAX,
+    build_cli_role_prompt,
+    format_cli_out_preview,
     is_ops_noise_summary,
     preview_suppresses_ack,
     turn_result_from_cli_exit,
 )
-from agentbus.runner.types import AWAIT_EXIT_CODE, TurnResult
+from agentbus.runner.types import AWAIT_EXIT_CODE, TurnResult, WakeEnvelope
 from agentbus.store import EventStore
 
 
@@ -177,6 +180,53 @@ def test_turn_result_normal_does_not_suppress():
     )
     assert r.suppress_ack is False
     assert "RUNNER_ACK" in r.summary
+
+
+def test_out_preview_preserves_newlines_and_fills_budget():
+    """P1: out= must not collapse multi-line answers to a 500-char single line."""
+    body = "line one\n\nline two\n" + ("word " * 400)
+    preview = format_cli_out_preview(body, 1800)
+    assert "\n" in preview
+    assert "line one" in preview
+    assert "line two" in preview
+    assert len(preview) <= 1800
+
+    r = turn_result_from_cli_exit(
+        adapter="grok",
+        event_id=99,
+        returncode=0,
+        preview="## Title\n\n" + ("paragraph text " * 200),
+    )
+    assert "RUNNER_ACK" in r.summary
+    assert "out=" in r.summary
+    assert len(r.summary) <= HANDOFF_SUMMARY_MAX
+    # Multi-line content preserved after out=
+    out = r.summary.split("out=", 1)[1]
+    assert "\n" in out or "Title" in out
+    # Larger than the historical 500-char collapse budget when input is long
+    assert len(out) > 500
+
+
+def test_prompt_common_slack_primary_guidance():
+    wake = WakeEnvelope(
+        event_id=1,
+        topic="okf/handoff",
+        from_agent="slack",
+        to="grok",
+        summary="hello",
+        payload={"from": "slack", "to": "grok", "summary": "hello"},
+        source="wake_file",
+    )
+    prompt = build_cli_role_prompt(
+        role_name="Grok",
+        role_hint="engineer",
+        wake=wake,
+        budget_remaining=5,
+    )
+    assert "primary UI = Slack" in prompt
+    assert "to `slack`" in prompt or "substance handoff to `slack`" in prompt
+    assert "legacy Telegram" in prompt
+    assert "Telegram bridge" not in prompt
 
 
 def test_turn_result_error_with_chain_break_still_suppresses():

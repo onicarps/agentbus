@@ -75,6 +75,9 @@ TARGET_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Slack app_mention text usually starts with <@UBOTID> before @agent routing.
+BOT_MENTION_RE = re.compile(r"^(?:\s*<@[A-Za-z0-9]+>)+")
+
 # Subtypes that are not fresh human chat (edits, joins, bot echoes, …)
 IGNORED_MESSAGE_SUBTYPES: frozenset[str] = frozenset(
     {
@@ -149,14 +152,29 @@ def channel_from_links(links: list[str] | None) -> tuple[str, str] | None:
     return None
 
 
+def correlation_ts(event: dict[str, Any]) -> str:
+    """Prefer thread root ts so replies stay in the human conversation."""
+    return str(event.get("thread_ts") or event.get("ts") or "")
+
+
+def strip_leading_bot_mentions(text: str) -> str:
+    """Remove leading Slack ``<@U…>`` tokens (app_mention prefix) before routing."""
+    raw = text or ""
+    stripped = BOT_MENTION_RE.sub("", raw)
+    return stripped.lstrip() if stripped != raw else raw
+
+
 def parse_target_agent(text: str, default_to: str = DEFAULT_TO) -> tuple[str, str]:
     """Parse routing from Slack text.
 
     Returns (to_agent, cleaned_summary).
     Never returns swarm as the *default* when no target is specified.
     Explicit `@swarm` / `swarm:` is still allowed if the human asks.
+
+    Leading bot user tokens (``<@UBOT>``) from ``app_mention`` are stripped so
+    ``@grok fix it`` still routes after ``@Bot @grok fix it``.
     """
-    raw = text or ""
+    raw = strip_leading_bot_mentions(text or "")
     m = TARGET_RE.match(raw)
     if not m:
         return default_to, raw.strip()
@@ -184,6 +202,7 @@ def build_inbound_payload(
     """Build schema-valid okf/handoff payload for Slack → bus.
 
     Channel metadata lives only in links (additionalProperties: false).
+    ``ts`` should be ``thread_ts or ts`` so outbound threads under the root.
     """
     to_agent, cleaned = parse_target_agent(text, default_to=default_to)
     # Safety: chat ingress must not stampede the swarm unless explicit
@@ -194,19 +213,81 @@ def build_inbound_payload(
 
     # Context engineering: explicit A2A reply directive so agents do not
     # guess routing (Slack is primary UI; do not default to Hermes).
-    summary = truncate_summary(
-        f"[slack:{user}] {cleaned}\n"
-        f"(SYSTEM: Reply directly to 'slack' on the bus. You MUST include \"links\": [\"{slack_uri(channel, ts)}\"] in your reply payload!)"
+    # Reserve budget so the SYSTEM directive is never truncated away.
+    uri = slack_uri(channel, ts)
+    system = (
+        f"(SYSTEM: Reply directly to 'slack' on the bus. "
+        f'You MUST include "links": ["{uri}"] in your reply payload!)'
     )
+    user_part = f"[slack:{user}] {cleaned}".strip()
+    reserved = len(system) + 1  # newline
+    body_budget = max(32, SUMMARY_MAX - reserved)
+    user_part = truncate_summary(user_part, max_len=body_budget)
+    summary = f"{user_part}\n{system}"
+    if len(summary) > SUMMARY_MAX:
+        summary = truncate_summary(summary, max_len=SUMMARY_MAX)
     payload: dict[str, Any] = {
         "from": PRODUCER_ID,
         "to": to_agent,
         "summary": summary,
-        "links": [slack_uri(channel, ts)],
+        "links": [uri],
     }
     if initiative:
         payload["initiative"] = initiative
     return payload
+
+
+def resolve_slack_channel_ts(
+    payload: dict[str, Any],
+    *,
+    causation_id: int | None = None,
+    fetch_event: Any | None = None,
+    max_hops: int = 20,
+) -> tuple[str, str] | None:
+    """Resolve (channel, ts) from payload.links or causation-chain backfill.
+
+    Soft links: agents / companion ACK often drop ``links``. Walk ancestors via
+    ``fetch_event(event_id) -> event dict | None`` until a ``slack://`` link is
+    found (P0 fix pack 2026-07-22).
+    """
+    ch_ts = channel_from_links(payload.get("links") if isinstance(payload, dict) else None)
+    if ch_ts:
+        return ch_ts
+    if fetch_event is None or causation_id is None:
+        return None
+    try:
+        cur: int | None = int(causation_id)
+    except (TypeError, ValueError):
+        return None
+    seen: set[int] = set()
+    hops = 0
+    while cur is not None and hops < max_hops and cur not in seen:
+        seen.add(cur)
+        hops += 1
+        try:
+            ev = fetch_event(cur)
+        except Exception:  # noqa: BLE001 — best-effort backfill
+            break
+        if not ev:
+            break
+        if not isinstance(ev, dict):
+            break
+        raw_pl = ev.get("payload")
+        if isinstance(raw_pl, str):
+            try:
+                raw_pl = json.loads(raw_pl)
+            except json.JSONDecodeError:
+                raw_pl = {}
+        pl = raw_pl if isinstance(raw_pl, dict) else {}
+        ch_ts = channel_from_links(pl.get("links"))
+        if ch_ts:
+            return ch_ts
+        next_c = ev.get("causation_id")
+        try:
+            cur = int(next_c) if next_c is not None else None
+        except (TypeError, ValueError):
+            cur = None
+    return None
 
 
 def inbound_idempotency_key(channel: str, ts: str) -> str:
@@ -445,12 +526,16 @@ def build_bolt_app(
         text = event.get("text") or ""
         user = event.get("user") or "user"
         channel = event["channel"]
-        ts = event["ts"]
+        # Prefer thread root so multi-reply threads stay coherent.
+        ts = correlation_ts(event) or event["ts"]
+        # Idempotency still keys on the specific message ts (not thread root)
+        # so app_mention + message dual-delivery for the same message collapses.
+        msg_ts = str(event["ts"])
 
         payload = build_inbound_payload(
             text=text, channel=channel, ts=ts, user=user
         )
-        key = inbound_idempotency_key(channel, ts)
+        key = inbound_idempotency_key(channel, msg_ts)
         print(
             f"[Slack→Bus] {user} ch={channel} ts={ts} "
             f"to={payload['to']}: {payload['summary'][:120]}"
@@ -485,49 +570,90 @@ def build_bolt_app(
             print(f"[AgentBus] FATAL cursor init: {exc}", file=sys.stderr)
             return
 
+        # Optional EventStore for causation-chain slack:// backfill (P0).
+        store = None
+        fetch_event = None
+        try:
+            from agentbus.store import EventStore
+
+            store = EventStore(workspace)
+
+            def fetch_event(event_id: int):  # type: ignore[no-redef]
+                ev = store.get_event(int(event_id))
+                return ev.to_dict() if ev is not None else None
+
+        except Exception as store_exc:  # noqa: BLE001
+            print(
+                f"[AgentBus] links backfill disabled (store open failed): {store_exc}"
+            )
+
         poll_s = float(os.environ.get("SLACK_BRIDGE_POLL_SECONDS", "2"))
-        while True:
-            try:
-                events, _page_latest, has_more = poll_handoffs(
-                    workspace=workspace, since_id=last_id
-                )
-                for ev in events:
-                    eid = int(ev.get("event_id") or 0)
-                    payload = normalize_payload(ev.get("payload"))
-                    if should_post_outbound(payload):
-                        ch_ts = channel_from_links(payload.get("links"))
-                        channel = ch_ts[0] if ch_ts else default_channel
-                        msg = format_outbound_message(payload)
-                        if not channel:
-                            print(
-                                f"[Warn] to=slack event {eid} has no "
-                                f"slack:// link and no SLACK_DEFAULT_CHANNEL: "
-                                f"{msg[:160]}"
-                            )
-                        elif dry_run:
-                            print(f"[dry-run Slack post] ch={channel} {msg[:200]}")
-                        else:
+        try:
+            while True:
+                try:
+                    events, _page_latest, has_more = poll_handoffs(
+                        workspace=workspace, since_id=last_id
+                    )
+                    for ev in events:
+                        eid = int(ev.get("event_id") or 0)
+                        payload = normalize_payload(ev.get("payload"))
+                        if should_post_outbound(payload):
+                            causation = ev.get("causation_id")
                             try:
-                                kwargs: dict[str, Any] = {
-                                    "channel": channel,
-                                    "text": msg,
-                                }
-                                if ch_ts:
-                                    # Thread under the original human message
-                                    kwargs["thread_ts"] = ch_ts[1]
-                                app.client.chat_postMessage(**kwargs)
-                                print(f"[Bus→Slack] posted event {eid} → {channel}")
-                            except Exception as post_err:  # noqa: BLE001
-                                print(f"[Slack Error] post event {eid}: {post_err}")
-                    if eid > last_id:
-                        last_id = eid
-                        save_cursor(workspace, last_id)
-                # Drain catch-up without sleeping if has_more
-                if has_more and events:
-                    continue
-            except Exception as exc:  # noqa: BLE001
-                print(f"[AgentBus] Poll error: {exc}")
-            time.sleep(poll_s)
+                                causation_id = (
+                                    int(causation) if causation is not None else None
+                                )
+                            except (TypeError, ValueError):
+                                causation_id = None
+                            ch_ts = resolve_slack_channel_ts(
+                                payload,
+                                causation_id=causation_id,
+                                fetch_event=fetch_event,
+                            )
+                            channel = ch_ts[0] if ch_ts else default_channel
+                            msg = format_outbound_message(payload)
+                            if not channel:
+                                print(
+                                    f"[Warn] to=slack event {eid} has no "
+                                    f"slack:// link and no SLACK_DEFAULT_CHANNEL: "
+                                    f"{msg[:160]}"
+                                )
+                            elif dry_run:
+                                print(
+                                    f"[dry-run Slack post] ch={channel} {msg[:200]}"
+                                )
+                            else:
+                                try:
+                                    kwargs: dict[str, Any] = {
+                                        "channel": channel,
+                                        "text": msg,
+                                    }
+                                    if ch_ts:
+                                        # Thread under the original human message
+                                        kwargs["thread_ts"] = ch_ts[1]
+                                    app.client.chat_postMessage(**kwargs)
+                                    print(
+                                        f"[Bus→Slack] posted event {eid} → {channel}"
+                                    )
+                                except Exception as post_err:  # noqa: BLE001
+                                    print(
+                                        f"[Slack Error] post event {eid}: {post_err}"
+                                    )
+                        if eid > last_id:
+                            last_id = eid
+                            save_cursor(workspace, last_id)
+                    # Drain catch-up without sleeping if has_more
+                    if has_more and events:
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[AgentBus] Poll error: {exc}")
+                time.sleep(poll_s)
+        finally:
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     return app, poll_loop
 

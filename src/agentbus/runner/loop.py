@@ -175,6 +175,40 @@ def should_skip(wake: WakeEnvelope, cfg: RunnerConfig) -> str | None:
     return None
 
 
+def slack_links_from_wake(wake: WakeEnvelope) -> list[str] | None:
+    """Return slack:// links from the wake payload for companion ACK threading.
+
+    Slack bridge outbound uses payload.links to set channel + thread_ts. Without
+    this copy, companion RUNNER_ACK (to=slack) posts unthreaded or to the default
+    channel only (P0 fix pack 2026-07-22).
+    """
+    payload = wake.payload if isinstance(wake.payload, dict) else {}
+    raw_links = payload.get("links")
+    if not isinstance(raw_links, list):
+        return None
+    slack = [str(link) for link in raw_links if str(link).startswith("slack://")]
+    return slack or None
+
+
+def companion_ack_payload(
+    *,
+    producer_id: str,
+    reply_to: str,
+    summary: str,
+    wake: WakeEnvelope,
+) -> dict[str, Any]:
+    """Build okf/handoff companion ACK/ERROR/SUSPEND payload (links preserved)."""
+    payload: dict[str, Any] = {
+        "from": producer_id,
+        "to": reply_to if reply_to not in BROADCAST_TO else "agy",
+        "summary": summary,
+    }
+    links = slack_links_from_wake(wake)
+    if links:
+        payload["links"] = links
+    return payload
+
+
 def detect_suspend(
     workspace: Path, wake: WakeEnvelope, result: TurnResult
 ) -> TurnResult:
@@ -332,11 +366,12 @@ def process_envelope(
                     "topic": "okf/handoff",
                     "producer_id": cfg.producer_id,
                     "schema_version": "1.0",
-                    "payload": {
-                        "from": cfg.producer_id,
-                        "to": reply_to if reply_to not in BROADCAST_TO else "agy",
-                        "summary": result.summary,
-                    },
+                    "payload": companion_ack_payload(
+                        producer_id=cfg.producer_id,
+                        reply_to=reply_to,
+                        summary=result.summary,
+                        wake=wake,
+                    ),
                     "causation_id": wake.event_id,
                     "idempotency_key": suspend_ack_idempotency_key(
                         cfg.runner_id, wake.event_id
@@ -423,11 +458,12 @@ def process_envelope(
             "topic": "okf/handoff",
             "producer_id": cfg.producer_id,
             "schema_version": "1.0",
-            "payload": {
-                "from": cfg.producer_id,
-                "to": reply_to if reply_to not in BROADCAST_TO else "agy",
-                "summary": result.summary,
-            },
+            "payload": companion_ack_payload(
+                producer_id=cfg.producer_id,
+                reply_to=reply_to,
+                summary=result.summary,
+                wake=wake,
+            ),
             "causation_id": wake.event_id,
             "idempotency_key": f"runner-ack:{cfg.runner_id}:{wake.event_id}",
         },

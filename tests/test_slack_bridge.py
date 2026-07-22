@@ -118,7 +118,7 @@ def test_inbound_payload_injects_a2a_routing_directive(sb):
         user="oni",
     )
     assert payload["summary"].startswith("[slack:oni]")
-    assert "(SYSTEM: Reply directly to 'slack' on the bus)" in payload["summary"]
+    assert "Reply directly to 'slack' on the bus" in payload["summary"]
     assert payload["links"] == ["slack://D456/99.1"]
 
 
@@ -141,7 +141,8 @@ def test_summary_truncated_to_2000(sb):
         text=long, channel="C1", ts="1.0", user="u"
     )
     assert len(payload["summary"]) <= 2000
-    assert payload["summary"].endswith("...")
+    # User body may ellipsize; SYSTEM directive is reserved and must remain.
+    assert "Reply directly to 'slack' on the bus" in payload["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +183,141 @@ def test_format_outbound_message(sb):
     )
     assert msg.startswith("*grok*")
     assert "Bridge rewrite complete." in msg
+
+
+def test_runner_ack_out_allow_and_extract(sb):
+    """RUNNER_ACK with out= is the Slack safety-net exception to ops suppress."""
+    ack = {
+        "to": "slack",
+        "from": "grok",
+        "summary": (
+            "RUNNER_ACK: grok completed event_id=1877 out="
+            "Fix pack closed.\nSecond line."
+        ),
+    }
+    assert sb.should_post_outbound(ack) is True
+    msg = sb.format_outbound_message(ack)
+    assert msg.startswith("*grok*")
+    assert "Fix pack closed." in msg
+    assert "Second line." in msg
+    assert "RUNNER_ACK" not in msg
+    # Pure ACK without out= still suppressed
+    pure = {
+        "to": "slack",
+        "summary": "RUNNER_ACK: grok completed event_id=1",
+    }
+    assert sb.should_post_outbound(pure) is False
+
+
+def test_strip_bot_mention_before_target_parse(sb):
+    """app_mention text is often '<@UBOT> @grok fix it' — must still route."""
+    to, cleaned = sb.parse_target_agent("<@U0BOTID> @grok fix the bridge")
+    assert to == "grok"
+    assert cleaned == "fix the bridge"
+    to2, cleaned2 = sb.parse_target_agent("<@U0BOTID> <@U0BOTID> /ask factory run QA")
+    assert to2 == "factory"
+    assert "run QA" in cleaned2
+    # Plain text without bot token unchanged
+    to3, cleaned3 = sb.parse_target_agent("@agy triage")
+    assert to3 == "agy"
+    assert cleaned3 == "triage"
+
+
+def test_correlation_ts_prefers_thread_root(sb):
+    assert sb.correlation_ts({"ts": "2.0", "thread_ts": "1.0"}) == "1.0"
+    assert sb.correlation_ts({"ts": "2.0"}) == "2.0"
+    assert sb.correlation_ts({}) == ""
+
+
+def test_inbound_uses_thread_ts_in_links(sb):
+    """When building from a thread reply, links should use thread root."""
+    payload = sb.build_inbound_payload(
+        text="@grok continue",
+        channel="C9",
+        ts="100.0",  # caller passes thread_ts or ts
+        user="U1",
+    )
+    assert payload["links"] == ["slack://C9/100.0"]
+
+
+def test_system_directive_survives_long_user_text(sb):
+    long = "x" * 5000
+    payload = sb.build_inbound_payload(
+        text=long, channel="C1", ts="1.0", user="u"
+    )
+    assert len(payload["summary"]) <= 2000
+    assert "Reply directly to 'slack' on the bus" in payload["summary"]
+    assert 'slack://C1/1.0' in payload["summary"]
+
+
+def test_resolve_slack_channel_ts_direct_links(sb):
+    assert sb.resolve_slack_channel_ts(
+        {"links": ["slack://C1/9.9"], "to": "slack"}
+    ) == ("C1", "9.9")
+
+
+def test_resolve_slack_channel_ts_causation_backfill(sb):
+    """When links absent, walk causation chain to nearest slack:// ancestor."""
+    chain = {
+        10: {
+            "event_id": 10,
+            "causation_id": None,
+            "payload": {
+                "from": "slack",
+                "to": "grok",
+                "summary": "hi",
+                "links": ["slack://C99/1.234"],
+            },
+        },
+        11: {
+            "event_id": 11,
+            "causation_id": 10,
+            "payload": {"from": "agy", "to": "grok", "summary": "forward"},
+        },
+        12: {
+            "event_id": 12,
+            "causation_id": 11,
+            "payload": {
+                "from": "grok",
+                "to": "slack",
+                "summary": "RUNNER_ACK: done out=ok",
+            },
+        },
+    }
+
+    def fetch(eid: int):
+        return chain.get(eid)
+
+    # Companion ACK: causation_id = wake event (11) → parent 10 has slack://
+    assert sb.resolve_slack_channel_ts(
+        {"to": "slack", "summary": "done", "links": []},
+        causation_id=11,
+        fetch_event=fetch,
+    ) == ("C99", "1.234")
+
+    # Deeper walk: start at 12 → 11 → 10
+    assert sb.resolve_slack_channel_ts(
+        {"to": "slack", "summary": "x", "links": []},
+        causation_id=12,
+        fetch_event=fetch,
+    ) == ("C99", "1.234")
+
+    # No fetch → no backfill
+    assert (
+        sb.resolve_slack_channel_ts(
+            {"to": "slack", "summary": "x", "links": []},
+            causation_id=11,
+            fetch_event=None,
+        )
+        is None
+    )
+
+
+def test_idempotency_key_stable_for_double_delivery(sb):
+    """message + app_mention share the same message ts → same key."""
+    ch, ts = "C1", "1710000000.000100"
+    assert sb.inbound_idempotency_key(ch, ts) == sb.inbound_idempotency_key(ch, ts)
+    assert sb.inbound_idempotency_key(ch, ts) == f"slack:{ch}:{ts}"
 
 
 # ---------------------------------------------------------------------------

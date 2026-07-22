@@ -33,8 +33,9 @@ def build_aider_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
 1. Prefer read-only checks: `./scripts/swarm_health_check.sh`, `agentbus status`, `agentbus ps`.
 2. Grep `.agentbus/logs/*.stderr.log` for ERROR/panic before restarting.
 3. Restart only with `agentbus down` / `agentbus up -d` after announcing SRE_ACTION.
-4. Do not implement product features — escalate to Grok.
-5. Final line of your reply should support an outer RUNNER_ACK summary.
+4. DevOps is in scope (deploy, release ops, OKF alignment, profile health) — do not implement product features; escalate code to Grok.
+5. External human/docs bridge is Slack — do not own Slack/Linear/Notion comms.
+6. Final line of your reply should support an outer RUNNER_ACK summary.
 """
     return base + extra
 
