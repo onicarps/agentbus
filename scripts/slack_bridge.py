@@ -192,7 +192,12 @@ def build_inbound_payload(
         # because parse_target_agent only returns swarm when matched.
         pass
 
-    summary = truncate_summary(f"[slack:{user}] {cleaned}")
+    # Context engineering: explicit A2A reply directive so agents do not
+    # guess routing (Slack is primary UI; do not default to Hermes).
+    summary = truncate_summary(
+        f"[slack:{user}] {cleaned}\n"
+        f"(SYSTEM: Reply directly to 'slack' on the bus)"
+    )
     payload: dict[str, Any] = {
         "from": PRODUCER_ID,
         "to": to_agent,

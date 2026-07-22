@@ -102,10 +102,24 @@ def test_build_inbound_payload_schema_shape(sb):
     assert "slack_channel" not in payload
     assert "[slack:U99]" in payload["summary"]
     assert "fix the bridge" in payload["summary"]
+    assert "Reply directly to 'slack' on the bus" in payload["summary"]
     assert (
         sb.inbound_idempotency_key("C123", "1710000000.000100")
         == "slack:C123:1710000000.000100"
     )
+
+
+def test_inbound_payload_injects_a2a_routing_directive(sb):
+    """Slack primary-comms: agents must see explicit to=slack reply context."""
+    payload = sb.build_inbound_payload(
+        text="plain question for triage",
+        channel="D456",
+        ts="99.1",
+        user="oni",
+    )
+    assert payload["summary"].startswith("[slack:oni]")
+    assert "(SYSTEM: Reply directly to 'slack' on the bus)" in payload["summary"]
+    assert payload["links"] == ["slack://D456/99.1"]
 
 
 def test_inbound_payload_passes_jsonschema(sb):
