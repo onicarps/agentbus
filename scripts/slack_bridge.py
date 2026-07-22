@@ -196,7 +196,7 @@ def build_inbound_payload(
     # guess routing (Slack is primary UI; do not default to Hermes).
     summary = truncate_summary(
         f"[slack:{user}] {cleaned}\n"
-        f"(SYSTEM: Reply directly to 'slack' on the bus)"
+        f"(SYSTEM: Reply directly to 'slack' on the bus. You MUST include \"links\": [\"{slack_uri(channel, ts)}\"] in your reply payload!)"
     )
     payload: dict[str, Any] = {
         "from": PRODUCER_ID,
@@ -436,6 +436,7 @@ def build_bolt_app(
     app = App(token=bot_token)
 
     @app.event("message")
+    @app.event("app_mention")
     def handle_message_events(body, logger, say):  # type: ignore[no-untyped-def]
         event = body.get("event") or {}
         if not should_accept_slack_message(event):
