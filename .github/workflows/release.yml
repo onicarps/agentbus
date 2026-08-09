@@ -185,6 +185,9 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-npm-platforms:
     name: npm platform pkg (${{ matrix.plat }})
+    # v0.16.4 is a Python-only MCP compatibility hotfix. Agy waived npm for
+    # this tag because npm already carries the newer 0.17.0 line.
+    if: github.ref_name != 'v0.16.4'
     needs: build-go
     runs-on: ubuntu-latest
     environment:
@@ -249,6 +252,7 @@ jobs:
 
   publish-npm:
     name: Publish @agentbus/agentbus-client
+    if: github.ref_name != 'v0.16.4'
     needs: publish-npm-platforms
     runs-on: ubuntu-latest
     environment:
