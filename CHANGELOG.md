@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-08-09
+
+### Fixed — MCP Python SDK 2.0 compatibility guard
+
+- Constrain the Python MCP dependency to `mcp>=1.29,<2`. AgentBus still uses
+  the MCP Python SDK v1 `FastMCP` API; fresh installs must not resolve the
+  incompatible v2 SDK until the separate MCP `2026-07-28` migration lands.
+- Add a packaging regression test for the dependency contract and bound the
+  MCP stdio round-trip test with an explicit timeout.
+- This patch stays on the canonical post-rollback 0.16.x source lineage and
+  does not restore the removed 0.17 ops package.
+
 ### Added — resilient messaging retry (Agy GO #1705 / #1698)
 
 - **`agentbus.retry`:** exponential backoff + full jitter `RetryPolicy`, `call_with_retry`, SQLite lock classifier; env overrides `AGENTBUS_PUBLISH_*` / `AGENTBUS_DELIVERY_*`

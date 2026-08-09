@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ from mcp.client.stdio import stdio_client
 
 ROOT = Path(__file__).resolve().parents[1]
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+
+
 @pytest.fixture
 def server_params(tmp_path):
     ws = tmp_path / "ws"
@@ -32,72 +35,73 @@ def server_params(tmp_path):
 @pytest.mark.asyncio
 async def test_mcp_publish_poll_roundtrip(server_params):
     ws, params = server_params
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
+    async with asyncio.timeout(90):
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
 
-            tools = await session.list_tools()
-            names = {t.name for t in tools.tools}
-            assert "agentbus_publish" in names
-            assert "agentbus_poll" in names
-            assert "agentbus_status" in names
-            assert "agentbus_lock_acquire" in names
-            assert "agentbus_lock_release" in names
-            assert "agentbus_lock_renew" in names
-            assert "agentbus_lock_status" in names
+                tools = await session.list_tools()
+                names = {t.name for t in tools.tools}
+                assert "agentbus_publish" in names
+                assert "agentbus_poll" in names
+                assert "agentbus_status" in names
+                assert "agentbus_lock_acquire" in names
+                assert "agentbus_lock_release" in names
+                assert "agentbus_lock_renew" in names
+                assert "agentbus_lock_status" in names
 
-            payload = {
-                "from": "grok",
-                "to": "agy",
-                "summary": "MCP stdio round-trip test",
-                "initiative": "agentbus",
-            }
-            pub = await session.call_tool(
-                "agentbus_publish",
-                {
-                    "topic": "okf/handoff",
-                    "payload": payload,
-                    "schema_version": "1.0",
-                },
-            )
-            pub_data = json.loads(pub.content[0].text)
-            assert pub_data["event_id"] == 1
-            assert pub_data["duplicate"] is False
+                payload = {
+                    "from": "grok",
+                    "to": "agy",
+                    "summary": "MCP stdio round-trip test",
+                    "initiative": "agentbus",
+                }
+                pub = await session.call_tool(
+                    "agentbus_publish",
+                    {
+                        "topic": "okf/handoff",
+                        "payload": payload,
+                        "schema_version": "1.0",
+                    },
+                )
+                pub_data = json.loads(pub.content[0].text)
+                assert pub_data["event_id"] == 1
+                assert pub_data["duplicate"] is False
 
-            poll = await session.call_tool(
-                "agentbus_poll",
-                {"topic": "okf/handoff", "since_id": 0},
-            )
-            poll_data = json.loads(poll.content[0].text)
-            assert len(poll_data["events"]) == 1
-            assert poll_data["events"][0]["payload"]["summary"] == payload["summary"]
+                poll = await session.call_tool(
+                    "agentbus_poll",
+                    {"topic": "okf/handoff", "since_id": 0},
+                )
+                poll_data = json.loads(poll.content[0].text)
+                assert len(poll_data["events"]) == 1
+                assert poll_data["events"][0]["payload"]["summary"] == payload["summary"]
 
-            status = await session.call_tool("agentbus_status", {})
-            status_data = json.loads(status.content[0].text)
-            assert status_data["event_count"] == 1
-            assert "okf/handoff" in status_data["topics"]
+                status = await session.call_tool("agentbus_status", {})
+                status_data = json.loads(status.content[0].text)
+                assert status_data["event_count"] == 1
+                assert "okf/handoff" in status_data["topics"]
 
-            resource = str(ws / "shared.md")
-            lock = await session.call_tool(
-                "agentbus_lock_acquire",
-                {"resource": resource, "owner_id": "pytest"},
-            )
-            lock_data = json.loads(lock.content[0].text)
-            assert lock_data["acquired"] is True
-            lease_id = lock_data["lease_id"]
+                resource = str(ws / "shared.md")
+                lock = await session.call_tool(
+                    "agentbus_lock_acquire",
+                    {"resource": resource, "owner_id": "pytest"},
+                )
+                lock_data = json.loads(lock.content[0].text)
+                assert lock_data["acquired"] is True
+                lease_id = lock_data["lease_id"]
 
-            lock_status = await session.call_tool(
-                "agentbus_lock_status",
-                {"resource": resource},
-            )
-            assert json.loads(lock_status.content[0].text)["locked"] is True
+                lock_status = await session.call_tool(
+                    "agentbus_lock_status",
+                    {"resource": resource},
+                )
+                assert json.loads(lock_status.content[0].text)["locked"] is True
 
-            release = await session.call_tool(
-                "agentbus_lock_release",
-                {
-                    "resource": resource,
-                    "lease_id": lease_id,
-                    "owner_id": "pytest",
-                },
-            )
-            assert json.loads(release.content[0].text)["released"] is True
+                release = await session.call_tool(
+                    "agentbus_lock_release",
+                    {
+                        "resource": resource,
+                        "lease_id": lease_id,
+                        "owner_id": "pytest",
+                    },
+                )
+                assert json.loads(release.content[0].text)["released"] is True
