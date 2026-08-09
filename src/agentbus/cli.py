@@ -781,7 +781,7 @@ def init(
 ) -> None:
     """Auto-discover MCP clients and wire agentbus (idempotent)."""
     try:
-        ws = resolve_workspace(workspace)
+        ws = _cli_workspace(workspace)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     pid = _producer_id(producer_id)
@@ -811,7 +811,7 @@ def monitor(
 ) -> None:
     """Mission-control TUI (Textual) or tail events.db."""
     try:
-        ws = resolve_workspace(workspace)
+        ws = _cli_workspace(workspace)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     run_monitor(

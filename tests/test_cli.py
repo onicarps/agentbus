@@ -46,6 +46,37 @@ def test_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
     assert (explicit / ".agentbus" / "events.db").is_file()
 
 
+def test_init_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
+    (tmp_path / ".agentbus").mkdir()
+    explicit = tmp_path / "init-isolated"
+    explicit.mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["init", "--workspace", str(explicit), "--producer-id", "agy"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"Workspace: {explicit.resolve()}" in result.output
+    assert (explicit / ".agentbus" / "token").is_file()
+    assert not (tmp_path / ".agentbus" / "token").exists()
+
+
+def test_monitor_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
+    (tmp_path / ".agentbus").mkdir()
+    explicit = tmp_path / "monitor-isolated"
+    explicit.mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["monitor", "--workspace", str(explicit), "--once", "--plain"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (explicit / ".agentbus" / "events.db").is_file()
+    assert not (tmp_path / ".agentbus" / "events.db").exists()
+
+
 def test_quiet_suppresses_noncritical_logger_output(capsys):
     import logging as lg
 
