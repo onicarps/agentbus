@@ -50,7 +50,10 @@ def _cli_workspace(workspace: str | None) -> Path:
     from agentbus.workspace_guard import assert_workspace_supported
 
     if workspace:
-        return resolve_workspace(workspace)
+        explicit = Path(workspace).expanduser().resolve()
+        if not explicit.is_dir():
+            raise ValueError(f"Workspace not found: {explicit}")
+        return assert_workspace_supported(explicit)
     env = os.environ.get("AGENTBUS_WORKSPACE")
     if env:
         # Env may point at an absolute tree that is not a git root; still guard FS.

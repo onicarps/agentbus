@@ -34,7 +34,7 @@ See [ROADMAP.md](ROADMAP.md) and [open issues](https://github.com/onicarps/agent
 | Module | Role |
 |--------|------|
 | `store.py` | SQLite event log, retention, idempotency |
-| `server.py` | FastMCP tool definitions |
+| `server.py` | MCPServer tool definitions |
 | `auth.py` | Workspace ephemeral token |
 | `schemas.py` | Topic registry + JSON Schema validation |
 | `leases.py` | Advisory lease store (SQLite `leases` table) |

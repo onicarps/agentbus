@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed — MCP Python SDK v2 migration
+
+- Migrate the high-level server from the removed v1 `FastMCP` API to the v2
+  `MCPServer` API.
+- Require `mcp>=2,<3` and move the development version to `0.18.0`.
+- Keep the existing stdio transport and low-level `ClientSession` integration;
+  both remain supported by MCP SDK v2.
+
 ## [0.16.4] - 2026-08-09
 
 ### Fixed — MCP Python SDK 2.0 compatibility guard

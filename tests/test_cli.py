@@ -30,6 +30,22 @@ def os_environ_quiet_cleared_or_restored() -> bool:
     return os.environ.get("AGENTBUS_QUIET") in (None, "0", "")
 
 
+def test_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
+    parent_bus = tmp_path / ".agentbus"
+    parent_bus.mkdir()
+    explicit = tmp_path / "isolated"
+    explicit.mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["status", "--workspace", str(explicit), "--producer-id", "agy"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["workspace"] == str(explicit.resolve())
+    assert (explicit / ".agentbus" / "events.db").is_file()
+
+
 def test_quiet_suppresses_noncritical_logger_output(capsys):
     import logging as lg
 

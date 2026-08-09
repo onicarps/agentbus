@@ -1,4 +1,4 @@
-"""FastMCP server exposing AgentBus tools."""
+"""MCPServer exposing AgentBus tools."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
 from agentbus.leases import LeaseStore
@@ -18,7 +18,7 @@ from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.store import EventStore
 from agentbus.wiretap import instrument_call
 
-mcp = FastMCP("agentbus")
+mcp = MCPServer("agentbus")
 
 _store: EventStore | None = None
 _lease_store: LeaseStore | None = None
