@@ -144,6 +144,7 @@ def default_rbac_config() -> RbacConfig:
             "agy": "architect",
             "hermes": "bridge",
             "factory": "qa",
+            "factory_droid": "qa_droid",
             "aider": "ops",
             "slack": "bridge",
             "wiretap": "observer",

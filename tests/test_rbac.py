@@ -45,11 +45,11 @@ def test_qa_droid_without_proof_blocked(store):
     with pytest.raises(ForbiddenError, match="droid_proof"):
         store.publish(
             topic="okf/handoff",
-            producer_id="hermes",
+            producer_id="factory_droid",
             schema_version="1.0",
             payload=validate_payload(
                 "okf/handoff",
-                {"from": "hermes", "to": "all", "summary": "QA complete"},
+                {"from": "factory_droid", "to": "all", "summary": "QA complete"},
             ),
         )
 
@@ -61,12 +61,12 @@ def test_valid_qa_publish_with_droid_proof(store, rbac_workspace):
 
     event, dup = store.publish(
         topic="okf/handoff",
-        producer_id="hermes",
+        producer_id="factory_droid",
         schema_version="1.0",
         payload=validate_payload(
             "okf/handoff",
             {
-                "from": "hermes",
+                "from": "factory_droid",
                 "to": "all",
                 "summary": "RBAC QA validation complete",
                 "droid_proof": proof,
@@ -127,7 +127,7 @@ def test_droid_proof_single_use(store, rbac_workspace):
     payload = validate_payload(
         "okf/handoff",
         {
-            "from": "hermes",
+            "from": "factory_droid",
             "to": "all",
             "summary": "first publish",
             "droid_proof": proof,
@@ -135,19 +135,19 @@ def test_droid_proof_single_use(store, rbac_workspace):
     )
     store.publish(
         topic="okf/handoff",
-        producer_id="hermes",
+        producer_id="factory_droid",
         schema_version="1.0",
         payload=payload,
     )
     with pytest.raises(ForbiddenError, match="droid_proof"):
         store.publish(
             topic="okf/handoff",
-            producer_id="hermes",
+            producer_id="factory_droid",
             schema_version="1.0",
             payload=validate_payload(
                 "okf/handoff",
                 {
-                    "from": "hermes",
+                    "from": "factory_droid",
                     "to": "all",
                     "summary": "reuse proof",
                     "droid_proof": proof,

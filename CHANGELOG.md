@@ -11,6 +11,8 @@
   incompatible v2 SDK until the separate MCP `2026-07-28` migration lands.
 - Add a packaging regression test for the dependency contract and bound the
   MCP stdio round-trip test with an explicit timeout.
+- Align the packaged default RBAC producer map and proof tests with the active
+  `factory_droid` identity; Hermes remains the legacy bridge role.
 - This patch stays on the canonical post-rollback 0.16.x source lineage and
   does not restore the removed 0.17 ops package.
 
