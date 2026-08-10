@@ -300,7 +300,7 @@ jobs:
 
       - name: Install, test, build
         run: |
-          npm ci
+          npm install
           npm test
           npm run build
 
