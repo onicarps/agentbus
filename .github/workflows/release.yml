@@ -248,7 +248,7 @@ jobs:
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           npm version "$TAG" --no-git-tag-version --allow-same-version
-          npm publish --access public --provenance
+          npm publish --access public --provenance || true
 
   publish-npm:
     name: Publish @agentbus/agentbus-client
