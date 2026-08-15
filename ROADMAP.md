@@ -1,40 +1,68 @@
 # AgentBus Roadmap
 
-**Status:** v0.11.0 on main (July 2026) — Phase 1 DX expansion
+**Current release:** v0.18.0 (August 2026)
 
-## Shipped (summary)
+**Next proposed milestone:** v0.19 — Product Hardening and Durable Consumers
 
-- [x] MCP stdio + SQLite event log, auth, leases, HITL, SLA, RBAC, schemas, TUI, God View, swarm `up/down`
-- [x] PyPI `okf-agentbus` (CLI: `agentbus`)
-- [x] **v0.11** TypeScript client package (`packages/js/agentbus-client`)
-- [x] **v0.11** Jupyter `AsyncAgentBus` + `%agentbus` magics
+The detailed cross-machine implementation handoff is:
 
-## Next
+- [AgentBus v0.19 Product Plan and Swarm Handoff](docs/plans/2026-08-15-agentbus-v0.19-handoff.md)
 
-### Phase 1–2 DX (active)
+## Shipped
 
-- [ ] Windows SQLite locking (single-writer + PRAGMA)
-- [ ] CI / headless `--quiet` MCP stdio logging
-- [ ] Tag + PyPI publish **0.11.0**
-- [ ] Optional npm publish `@agentbus/agentbus-client`
+- [x] SQLite-backed MCP event log, CLI, schemas, attachments, tracing and leases
+- [x] RBAC, HITL intercepts, SLA expiry and dead-letter handling
+- [x] Mission Control TUI and God View observability
+- [x] Workspace-scoped `up`, `down`, `ps` and `logs` process orchestration
+- [x] Jupyter async client and TypeScript client
+- [x] Go serve/worker spike, wake plane and platform wheel packaging
+- [x] Headless runner adapters, async suspend/resume and retry/spillover resilience
+- [x] MCP Python SDK v2 migration in v0.18
 
-### Later (gated)
+## v0.19 proposed scope
 
-- [ ] Strangler Bus Go `serve` sidecar spike (`--engine go`, pytest parity) — only after Phase 1–2 DX
-- [ ] GitHub Release assets on tag
-- [ ] Framework adapters / optional web UI (deferred)
+### P0 — release and product foundation
 
-### v1.0
+- [ ] Align README, changelog and release documentation with v0.18+
+- [ ] Make same-tag release reruns safe and verifiably idempotent
+- [ ] Add Linux, macOS and Windows test coverage plus Python, Go and TypeScript jobs
+- [ ] Define the v0.19 compatibility and deprecation policy
+- [ ] Add `agentbus doctor` diagnostics
+- [ ] Remove or classify repository debris and generated artifacts
+- [ ] Decide and document Go serve parity versus explicit feature deferral
 
-- [ ] SSE subscribe where MCP clients support it
-- [ ] Stable 1.0 API guarantee
+### P1 — durable consumers and contracts
 
-## How to influence the roadmap
+- [ ] Publish the durable-consumer semantics and state-machine design
+- [ ] Add named consumer groups, claim leases, ack/nack, retries and per-group DLQ
+- [ ] Add replay, contiguous acknowledgement watermark and lag reporting
+- [ ] Define a canonical versioned event envelope and schema evolution rules
+- [ ] Generate or validate Python, TypeScript and Go contract types
+- [ ] Add cross-language and failure-mode conformance tests
+- [ ] Replace Swarm's duplicate minimal store with the official package
+- [ ] Prove the Swarm to AgentBus to Telegram round trip with correlation
 
-Open an issue with:
+### P2 — operational depth
 
-1. **Use case** — what agents/clients you run
-2. **Pain** — what breaks with `log.md`, Redis, or ad-hoc files today
-3. **Proposal** — schema, tool, or behavior change
+- [ ] OpenTelemetry export and operational metrics
+- [ ] Backup, integrity check, export/import and replay tooling
+- [ ] Per-topic retention, compaction and redaction hooks
+- [ ] Better schema/RBAC/HITL rejection explanations in CLI and TUI
 
-Real-world dogfood reports beat theoretical features.
+## Explicitly deferred
+
+- Encrypted multi-machine bridge or hosted service
+- Web dashboard
+- Framework-specific adapters that do not come from a demonstrated use case
+- Performance tuning before correctness baselines and conformance tests exist
+- Stable v1 API declaration until consumer and envelope contracts are dogfooded
+
+## Roadmap policy
+
+Every roadmap item should have:
+
+1. a real use case and owner;
+2. a written contract or acceptance criterion;
+3. failure-mode and migration coverage;
+4. independent review;
+5. durable outcomes in Git and release notes.

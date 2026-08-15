@@ -10,7 +10,7 @@ When Cursor, Claude, Antigravity, and Terminal Agents (like Hermes) share a work
 
 AgentBus replaces the "Game of Telephone" with a **localhost sidecar**: a Python MCP server backed by SQLite. No orchestrator runtime lock-in. No heavy cloud dashboard. Just a hyper-fast local pub/sub built for top-tier AI orchestration.
 
-> **v0.11.0 (July 2026):** **Phase 1 DX** — Jupyter `AsyncAgentBus` + `%agentbus` magics; TypeScript client under `packages/js/agentbus-client`. Orchestration DX (`up/down/ps/logs`) + God View remain from v0.10/v0.9.
+> **v0.18.0 (August 2026):** MCP Python SDK v2 migration, following the headless runner, async suspend/resume, wake-plane and resilient-delivery work shipped in v0.12-v0.16. See the changelog for release detail.
 >
 > **Note:** Install as **`okf-agentbus`** (CLI command remains `agentbus`). Extras: `[obs,devex,jupyter,sdk]`.
 
@@ -30,8 +30,13 @@ The SQLite bus instantly captures it, without requiring the MCP server. Once you
 | LangSmith | Cloud-only, backward-looking | Local SQLite, forward-looking Execution TUI |
 | Redis pub/sub | Extra daemon, complex setup | Zero-config SQLite, native stdio MCP |
 
-## Feature Arsenal (v0.3 - v0.11)
+## Feature Arsenal (v0.3 - v0.18)
 
+*   **MCP Python SDK v2 (v0.18):** migrated the stdio MCP server while preserving the existing event-store contract.
+*   **Resilient delivery (v0.16.4):** bounded retry with jitter, retry-exhausted dead letters and file spillover for SQLite contention.
+*   **Async suspend/resume (v0.16):** durable waits and correlated wake events let headless agents yield without busy polling.
+*   **Headless runners (v0.15):** opt-in adapters for heterogeneous CLI agents with bounded chain behavior and structured acknowledgements.
+*   **Wake plane and Go helpers (v0.12-v0.13):** platform-packaged workers, role leases, wake ingress and webhook delivery.
 *   **Jupyter async client (v0.11):** `from agentbus.jupyter import AsyncAgentBus` + `%agentbus start` — non-blocking polls that yield to the notebook event loop.
 *   **TypeScript client (v0.11):** `packages/js/agentbus-client` — Node EventEmitter + MCP stdio spawn (`@agentbus/agentbus-client`, path install for now).
 *   **God View Mesh (v0.9):** Passive OS + MCP observability so silent agents still leave bus footprints (`system/mcp`, `system/fs`, `system/shell`, `system/monologue`).
@@ -142,6 +147,11 @@ agentbus down
 ## Documentation
 
 For full architectural documentation, see the `docs/` directory.
+
+- [Roadmap](ROADMAP.md)
+- [v0.19 product plan and cross-machine Swarm handoff](docs/plans/2026-08-15-agentbus-v0.19-handoff.md)
+- [MCP schema](docs/MCP_SCHEMA.md)
+- [Release process](docs/RELEASE.md)
 
 ## License
 

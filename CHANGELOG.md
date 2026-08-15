@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- Add the proposed v0.19 product-hardening and durable-consumer roadmap with a
+  cross-machine Swarm continuation handoff.
+- Align README and roadmap entry points with the v0.18.0 release.
+
+## [0.18.0] - 2026-08-10
+
 ### Changed — MCP Python SDK v2 migration
 
 - Migrate the high-level server from the removed v1 `FastMCP` API to the v2
