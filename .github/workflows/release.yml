@@ -192,7 +192,8 @@ jobs:
             --version "$VERSION" \
             --tag "$GITHUB_REF_NAME" \
             --dist-dir dist \
-            --pyproject pyproject.toml >> "$GITHUB_OUTPUT"
+            --pyproject pyproject.toml \
+            --runtime-init src/agentbus/__init__.py >> "$GITHUB_OUTPUT"
       - if: steps.pypi-preflight.outputs.publish-needed == 'true'
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
         with:

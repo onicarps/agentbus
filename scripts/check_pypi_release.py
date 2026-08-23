@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import sys
@@ -29,6 +30,22 @@ def local_artifacts(dist_dir: Path) -> dict[str, str]:
     if not files:
         raise ValueError(f"no wheel or sdist artifacts found in {dist_dir}")
     return {path.name: sha256(path) for path in files}
+
+
+def runtime_version(init_path: Path) -> str:
+    """Read a literal ``__version__`` assignment without importing the package."""
+    module = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
+    for statement in module.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        if not any(isinstance(target, ast.Name) and target.id == "__version__" for target in targets):
+            continue
+        value = statement.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+        raise ValueError(f"__version__ must be a literal string in {init_path}")
+    raise ValueError(f"no __version__ assignment found in {init_path}")
 
 
 def fetch_release(project: str, version: str) -> dict[str, str] | None:
@@ -71,6 +88,7 @@ def main() -> int:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--dist-dir", type=Path, required=True)
     parser.add_argument("--pyproject", type=Path, required=True)
+    parser.add_argument("--runtime-init", type=Path, required=True)
     args = parser.parse_args()
 
     expected_tag = f"v{args.version}"
@@ -83,6 +101,15 @@ def main() -> int:
         parser.error(
             f"pyproject version {project_version!r} does not match release version "
             f"{args.version!r}"
+        )
+    try:
+        declared_runtime_version = runtime_version(args.runtime_init)
+    except (OSError, SyntaxError, ValueError) as exc:
+        parser.error(str(exc))
+    if declared_runtime_version != args.version:
+        parser.error(
+            f"runtime version {declared_runtime_version!r} does not match release "
+            f"version {args.version!r}"
         )
 
     try:
