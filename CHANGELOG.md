@@ -27,6 +27,8 @@
   and remove the platform publication path that previously ignored all errors.
 - Constrain Hatchling below 1.30 so release artifacts use Core Metadata 2.4,
   which remains compatible with the pinned PyPI publishing action.
+- Refresh npm transitive locks within existing semver ranges to clear the
+  release candidate's dependency audit findings.
 
 ### Documentation
 
