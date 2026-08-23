@@ -1558,5 +1558,28 @@ def await_cmd(
     raise SystemExit(AWAIT_EXIT_CODE)
 
 
+@main.command("doctor")
+@click.option("--workspace", type=click.Path(file_okay=False), default=None)
+@click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable report.")
+@click.option("--strict", is_flag=True, help="Return non-zero for warnings as well as failures.")
+def doctor_cmd(workspace: str | None, as_json: bool, strict: bool) -> None:
+    """Run read-only workspace checks plus isolated runtime probes."""
+    from agentbus.doctor import run_doctor
+
+    try:
+        ws = _cli_workspace(workspace)
+        report = run_doctor(ws)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2))
+    else:
+        click.echo(f"AgentBus Doctor: {report.overall_status}")
+        for check in report.checks:
+            click.echo(f"[{check.status:<4}] {check.name}: {check.message}")
+    if report.overall_status == "FAIL" or (strict and report.overall_status == "WARN"):
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     main()

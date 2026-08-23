@@ -154,13 +154,22 @@ agentbus run --config examples/runner.hermes.yaml --once
 | `grok` | `grok --prompt-file … --always-approve --max-turns N` (Phase E) |
 | `agy` | `agy --print … --print-timeout …` (Phase E) |
 | `aider` | `aider --message …` SRE/health (optional) |
+| `codex` | `codex exec -C … --ephemeral --json -` with the fenced prompt on stdin |
+| `pi` | `pi --print --no-session --no-approve --no-extensions @prompt.md` by default |
 
 ```bash
 # Factory / Grok / Agy
 agentbus run --config examples/runner.factory.yaml --once
 agentbus run --config examples/runner.grok.yaml --once   # wake_file default
 agentbus run --config examples/runner.agy.yaml --once
+agentbus run --config examples/runner.codex.yaml --once
+agentbus run --config examples/runner.pi.yaml --once
 ```
+
+Codex and Pi default to no approval bypass. Pi project-file trust and extension
+loading require explicit trusted runner configuration. Event summaries and
+payload fields are serialized in a dedicated untrusted-data block; they cannot
+replace the runner identity or standing-order section.
 
 Tech design: Phase B–F under `initiatives/agentbus/decisions/v0.15-*.md`  
 Dual intake: `webhook_queue` | `wake_file`.

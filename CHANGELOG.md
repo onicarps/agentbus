@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add honest `agentbus doctor` diagnostics for workspace resolution, SQLite
+  integrity/schema/runtime settings, RBAC and registered schemas, packaged Go
+  helper architecture, stale process state, disk capacity and redacted runtime
+  versions. Publish/poll and MCP stdio probes use disposable workspaces and do
+  not mutate the target bus.
+- Add registered Codex and Pi headless adapters using their real CLI surfaces.
+  Codex receives prompts on stdin via `codex exec`; Pi defaults to
+  `--no-approve --no-extensions`. Runner config rejects unknown adapter types,
+  and runtime construction failures enter the poison-pill completion path.
+- Fence event summaries and payloads as untrusted serialized data so they cannot
+  imitate the authoritative runner identity and policy sections.
+
+### Changed
+
+- Make PyPI tag reruns fail closed: existing filenames must match the candidate
+  SHA-256 hashes, exact releases become no-ops, and matching partial uploads may
+  resume with `skip-existing` only after validation.
+- Apply the same fail-closed policy to npm using packed tarball SRI integrity,
+  and remove the platform publication path that previously ignored all errors.
+
 ### Documentation
 
 - Add the proposed v0.19 product-hardening and durable-consumer roadmap with a

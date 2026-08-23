@@ -1,0 +1,16 @@
+version: "1.0"
+runner_id: codex-runner-1
+producer_id: codex
+intake:
+  mode: wake_file
+  wake_file: .agentbus/WAKE.codex.json
+adapter:
+  type: codex
+  command: codex
+  timeout_seconds: 1800
+  output_format: json
+accept_to: [codex, engineer, implementer]
+allow_broadcast: false
+budget:
+  max_turns_per_chain: 10
+  max_event_age_hours: 24

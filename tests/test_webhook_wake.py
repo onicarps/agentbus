@@ -1,6 +1,5 @@
 import threading
 import json
-import time
 import subprocess
 import os
 import shutil

@@ -8,6 +8,10 @@ from typing import Any
 
 import yaml
 
+SUPPORTED_ADAPTERS = frozenset(
+    {"echo", "hermes", "factory", "grok", "agy", "aider", "codex", "pi"}
+)
+
 
 @dataclass
 class IntakeConfig:
@@ -82,6 +86,10 @@ def load_runner_config(path: Path) -> RunnerConfig:
     if not isinstance(adapter_raw, dict):
         adapter_raw = {"type": str(adapter_raw)}
     adapter_type = str(adapter_raw.get("type") or "echo").strip()
+    if adapter_type.lower() not in SUPPORTED_ADAPTERS:
+        raise ValueError(
+            f"adapter.type must be one of: {', '.join(sorted(SUPPORTED_ADAPTERS))}"
+        )
     # All adapter keys except type become options (command, timeout, dry_run, …)
     adapter_options = {
         str(k): v for k, v in adapter_raw.items() if k != "type"

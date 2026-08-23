@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import pytest
 
 from agentbus.auth import check_publish_token, write_workspace_token
 from agentbus.leases import (
-    DEFAULT_TTL_SECONDS,
     LeaseStore,
     MAX_TTL_SECONDS,
     normalize_resource,

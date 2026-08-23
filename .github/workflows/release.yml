@@ -173,12 +173,30 @@ jobs:
       url: https://pypi.org/p/okf-agentbus
     permissions:
       id-token: write
+      contents: read
     steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: python-package-distributions
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+      - name: Verify tag and any existing PyPI files
+        id: pypi-preflight
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          python scripts/check_pypi_release.py \
+            --project okf-agentbus \
+            --version "$VERSION" \
+            --tag "$GITHUB_REF_NAME" \
+            --dist-dir dist \
+            --pyproject pyproject.toml >> "$GITHUB_OUTPUT"
+      - if: steps.pypi-preflight.outputs.publish-needed == 'true'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          skip-existing: true
 
   # ---------------------------------------------------------------------------
   # npm: main package + platform optionalDependencies (esbuild style)
@@ -231,24 +249,30 @@ jobs:
       - name: Prepare platform package
         working-directory: packages/js/go-worker-${{ matrix.plat }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           node -e "
             const fs=require('fs');
             const p=JSON.parse(fs.readFileSync('package.json','utf8'));
-            p.version=process.env.TAG;
+            p.version=process.env.GITHUB_REF_NAME.replace(/^v/,'');
             fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');
           "
           chmod +x bin/* || true
           ls -la bin/
-        env:
-          TAG: ${{ github.ref_name }}
 
       - name: Publish platform package
+        id: npm-preflight
         working-directory: packages/js/go-worker-${{ matrix.plat }}
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          npm version "$TAG" --no-git-tag-version --allow-same-version
-          npm publish --access public --provenance || true
+          npm pack --json > pack.json
+          node ../../../scripts/check_npm_release.mjs \
+            --package "${{ matrix.pkg }}" \
+            --version "$TAG" \
+            --pack-json pack.json >> "$GITHUB_OUTPUT"
+
+      - name: Publish platform package
+        if: steps.npm-preflight.outputs.publish-needed == 'true'
+        working-directory: packages/js/go-worker-${{ matrix.plat }}
+        run: npm publish "${{ steps.npm-preflight.outputs.tarball }}" --access public --provenance
 
   publish-npm:
     name: Publish @agentbus/agentbus-client
@@ -304,5 +328,16 @@ jobs:
           npm test
           npm run build
 
+      - name: Pack and verify any existing npm package
+        id: npm-preflight
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          npm pack --json > pack.json
+          node ../../../scripts/check_npm_release.mjs \
+            --package "@agentbus/agentbus-client" \
+            --version "$TAG" \
+            --pack-json pack.json >> "$GITHUB_OUTPUT"
+
       - name: Publish package to npm
-        run: npm publish --access public --provenance
+        if: steps.npm-preflight.outputs.publish-needed == 'true'
+        run: npm publish "${{ steps.npm-preflight.outputs.tarball }}" --access public --provenance

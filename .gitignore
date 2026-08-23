@@ -15,3 +15,5 @@ src/agentbus/bin/**
 !src/agentbus/bin/.gitkeep
 packages/js/go-worker-*/bin/**
 !packages/js/go-worker-*/bin/.gitkeep
+.mypy_cache/
+uv.lock

@@ -277,13 +277,13 @@ def process_envelope(
             detail={"chain": chain, "reason": "budget"},
         )
     else:
-        adapter = get_adapter(
-            cfg.adapter.type,
-            workspace=workspace,
-            options=cfg.adapter.options,
-        )
         remaining = budget.remaining(chain)
         try:
+            adapter = get_adapter(
+                cfg.adapter.type,
+                workspace=workspace,
+                options=cfg.adapter.options,
+            )
             result = adapter.start_turn(wake, budget_remaining=remaining)
         except Exception as exc:  # noqa: BLE001 — poison-pill path
             log.exception("adapter error event_id=%s", wake.event_id)

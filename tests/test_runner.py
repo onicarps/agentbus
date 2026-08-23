@@ -6,9 +6,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 from agentbus.runner import load_runner_config, run_once
+from agentbus.runner.adapters import get_adapter
 from agentbus.store import EventStore
 
 
@@ -189,6 +191,40 @@ def test_wake_file_intake(tmp_path: Path):
         events = store.poll("okf/handoff", since_id=0)["events"]
         assert len(events) == 1
         assert events[0]["causation_id"] == 55
+    finally:
+        store.close()
+
+
+def test_runner_config_rejects_unknown_adapter(tmp_path: Path):
+    cfg_path = _write_runner_yaml(
+        tmp_path / "runner.yaml", adapter={"type": "unknown"}
+    )
+    with pytest.raises(ValueError, match="adapter.type"):
+        load_runner_config(cfg_path)
+
+
+def test_codex_and_pi_are_registered(tmp_path: Path):
+    assert type(get_adapter("codex", workspace=tmp_path)).__name__ == "CodexAdapter"
+    assert type(get_adapter("pi", workspace=tmp_path)).__name__ == "PiAdapter"
+
+
+def test_unknown_adapter_is_contained_and_marked_done(tmp_path: Path):
+    cfg_path = _write_runner_yaml(tmp_path / "runner.yaml")
+    _enqueue(tmp_path, 404, to="hermes", frm="agy", summary="poison adapter")
+    cfg = load_runner_config(cfg_path)
+    cfg.adapter.type = "unknown"  # bypass loader to exercise runtime containment
+
+    results = run_once(tmp_path, cfg)
+
+    assert results[0]["status"] == "processed"
+    assert results[0]["ok"] is False
+    assert "RUNNER_ERROR: adapter exception" in results[0]["summary"]
+    done = tmp_path / ".agentbus" / "ingress" / "hermes_wake_done.ids"
+    assert "404" in done.read_text(encoding="utf-8")
+    store = EventStore(tmp_path)
+    try:
+        events = store.poll("okf/handoff")["events"]
+        assert events[0]["payload"]["summary"].startswith("RUNNER_ERROR")
     finally:
         store.close()
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dispatch a comprehensive pre-push QA mission to Factory via AgentBus.
 
-Grok (engineer) runs this whenever code may ship. Factory owns execution.
+Codex (engineer) runs this whenever code may ship. Factory owns execution.
 """
 
 from __future__ import annotations
@@ -85,7 +85,9 @@ def render_mission(
     out = out_dir / f"mission_qa_{safe}_{stamp}.md"
     header = (
         f"---\ntype: Mission\ntitle: {title}\nmission_id: {mission_id}\n"
-        f"status: dispatched\nrequester: grok\nexecutor: factory\n---\n\n"
+        f"status: dispatched\nrequester: codex\nexecutor: factory\n"
+        f"generated:\n  by: codex\n  at: "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n---\n\n"
         f"# {title}\n\n"
         f"**mission_id:** `{mission_id}`  \n"
         f"**repo:** `{repo}`  \n"
@@ -115,8 +117,10 @@ def main() -> int:
     )
     p.add_argument("--extra", default="")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--producer-id", default="grok")
+    p.add_argument("--producer-id", default="codex")
     args = p.parse_args()
+    if args.producer_id != "codex":
+        p.error("Factory QA dispatches from this helper must use producer_id=codex")
 
     ws = Path(args.workspace).expanduser().resolve()
     repo = Path(args.repo).expanduser().resolve() if args.repo else (ws / "projects" / "agentbus")
@@ -150,13 +154,14 @@ def main() -> int:
         f"FACTORY_QA_MISSION: {args.title} | mission_id={mission_id} | "
         f"repo={repo.name}@{snap['git_head']} dirty={snap['dirty']} | "
         f"Run full pre-push QA per mission file; reply QA_VERDICT GREEN|RED with causation_id. "
-        f"Spawn droids as needed (droid_proof). Grok will not self-QA."
+        f"Use genuine Factory execution and include droid_proof when applicable. "
+        f"Codex will not self-QA."
     )
     if len(summary) > 1900:
         summary = summary[:1900]
 
     payload = {
-        "from": "grok",
+        "from": "codex",
         "to": "factory",
         "summary": summary,
         "initiative": args.initiative,

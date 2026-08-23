@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,11 +43,16 @@ def resolve_workspace(path: str | Path | None = None) -> Path:
     """
     from agentbus.workspace_guard import assert_workspace_supported
 
-    start = Path(path).expanduser().resolve() if path else Path.cwd().resolve()
+    start = Path(path).expanduser().resolve() if path is not None else Path.cwd().resolve()
     if not start.is_dir():
         raise ValueError(f"Workspace not found: {start}")
     resolved = start
+    temp_root = Path(tempfile.gettempdir()).resolve()
     for candidate in [start, *start.parents]:
+        # Never let an incidental marker at the shared OS temp root capture an
+        # explicitly supplied child. Nested test repositories still resolve.
+        if candidate == temp_root and candidate != start:
+            break
         if (candidate / ".git").exists():
             resolved = candidate
             break

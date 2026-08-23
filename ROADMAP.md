@@ -24,12 +24,12 @@ The detailed cross-machine implementation handoff is:
 ### P0 — release and product foundation
 
 - [ ] Align README, changelog and release documentation with v0.18+
-- [ ] Make same-tag release reruns safe and verifiably idempotent
+- [ ] Make same-tag release reruns safe and verifiably idempotent (`ABUS-019-002`; implementation awaiting independent QA)
 - [ ] Add Linux, macOS and Windows test coverage plus Python, Go and TypeScript jobs
 - [ ] Define the v0.19 compatibility and deprecation policy
-- [ ] Add `agentbus doctor` diagnostics
+- [ ] Add honest, documented `agentbus doctor` diagnostics (`ABUS-019-004`; implementation awaiting independent QA)
 - [ ] Remove or classify repository debris and generated artifacts
-- [ ] Decide and document Go serve parity versus explicit feature deferral
+- [x] Decide and document Go serve parity versus explicit feature deferral ([support boundary](docs/SUPPORT.md), `ABUS-019-010`)
 
 ### P1 — durable consumers and contracts
 

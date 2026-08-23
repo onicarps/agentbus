@@ -1,0 +1,17 @@
+version: "1.0"
+runner_id: pi-runner-1
+producer_id: pi
+intake:
+  mode: wake_file
+  wake_file: .agentbus/WAKE.pi.json
+adapter:
+  type: pi
+  command: pi
+  timeout_seconds: 900
+  approve_project_files: false
+  load_extensions: false
+accept_to: [pi, ops]
+allow_broadcast: false
+budget:
+  max_turns_per_chain: 10
+  max_event_age_hours: 24

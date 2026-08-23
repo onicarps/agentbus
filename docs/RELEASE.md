@@ -2,6 +2,32 @@
 
 Tag-driven releases via `.github/workflows/release.yml` (`push` tags `v*`).
 
+## Release invariants and reruns
+
+- The tag is immutable input: `vX.Y.Z` must equal the version sent to each
+  package registry. Never delete and recreate a published tag.
+- Python artifacts are collected into `dist/` and compared by filename and
+  SHA-256 with the PyPI JSON API before upload.
+- An exact PyPI rerun is a successful no-op. A partial upload resumes only when
+  every existing filename has the candidate hash. Any hash mismatch or remote
+  filename absent from the candidate fails the job.
+- `skip-existing` is permitted only behind that preflight; it is not itself an
+  integrity check.
+- npm packages are packed before publication and their local SRI integrity is
+  compared with `dist.integrity`; exact reruns skip, mismatches and registry
+  query failures stop the workflow. Publication errors are never suppressed.
+- GitHub Release assets and registry provenance are produced by the workflow;
+  validate installation from published wheels/sdist before announcing shipment.
+
+Pre-tag local gate:
+
+```bash
+agentbus doctor --workspace "$AGENTBUS_WORKSPACE" --strict
+python -m pytest
+cd go-core && go test ./...
+cd ../packages/js/agentbus-client && npm test
+```
+
 ## What the workflow does
 
 **Strategy (Agy #625):** ship Go helpers as **platform-specific wheels** (Ruff-style)

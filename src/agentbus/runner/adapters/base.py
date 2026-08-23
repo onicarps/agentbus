@@ -55,7 +55,19 @@ def get_adapter(
         if workspace is None:
             raise ValueError("aider adapter requires workspace")
         return AiderAdapter(workspace=workspace, options=options)
+    if kind == "codex":
+        from agentbus.runner.adapters.codex import CodexAdapter
+
+        if workspace is None:
+            raise ValueError("codex adapter requires workspace")
+        return CodexAdapter(workspace=workspace, options=options)
+    if kind == "pi":
+        from agentbus.runner.adapters.pi import PiAdapter
+
+        if workspace is None:
+            raise ValueError("pi adapter requires workspace")
+        return PiAdapter(workspace=workspace, options=options)
     raise ValueError(
         f"unknown adapter type {adapter_type!r} "
-        f"(supported: echo, hermes, factory, grok, agy, aider)"
+        f"(supported: echo, hermes, factory, grok, agy, aider, codex, pi)"
     )

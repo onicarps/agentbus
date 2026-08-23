@@ -100,6 +100,17 @@ agentbus publish \
   --payload '{"from":"cursor","to":"hermes","summary":"Write tests"}'
 ```
 
+Before operating or releasing a workspace, run the read-only diagnostics:
+
+```bash
+agentbus doctor --workspace /path/to/workspace
+agentbus doctor --workspace /path/to/workspace --json
+```
+
+The command inspects the target without publishing to its bus. Write-path and
+MCP stdio checks run in temporary isolated workspaces. `--strict` makes warnings
+(including absent optional Go helpers) fail CI.
+
 **God View Observability (v0.9.0):**
 
 Track silent agents by wiretapping their operations:
