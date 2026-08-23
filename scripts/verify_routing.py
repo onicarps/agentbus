@@ -2,7 +2,6 @@ import subprocess
 import concurrent.futures
 import json
 import random
-import sys
 
 def publish_event(target):
     payload = json.dumps({"to": target, "from": "grok", "summary": "Stress test message"})
