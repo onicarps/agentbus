@@ -1,5 +1,7 @@
 [build-system]
-requires = ["hatchling"]
+# Hatchling 1.30 emits Core Metadata 2.5, which the pinned PyPI publisher
+# (v1.14.0 / Twine 6.x) cannot validate. Keep release artifacts on 2.4.
+requires = ["hatchling>=1.26,<1.30"]
 build-backend = "hatchling.build"
 
 [project]

@@ -25,6 +25,8 @@
   resume with `skip-existing` only after validation.
 - Apply the same fail-closed policy to npm using packed tarball SRI integrity,
   and remove the platform publication path that previously ignored all errors.
+- Constrain Hatchling below 1.30 so release artifacts use Core Metadata 2.4,
+  which remains compatible with the pinned PyPI publishing action.
 
 ### Documentation
 
