@@ -10,7 +10,9 @@ When Cursor, Claude, Antigravity, and Terminal Agents (like Hermes) share a work
 
 AgentBus replaces the "Game of Telephone" with a **localhost sidecar**: a Python MCP server backed by SQLite. No orchestrator runtime lock-in. No heavy cloud dashboard. Just a hyper-fast local pub/sub built for top-tier AI orchestration.
 
-> **v0.18.0 (August 2026):** MCP Python SDK v2 migration, following the headless runner, async suspend/resume, wake-plane and resilient-delivery work shipped in v0.12-v0.16. See the changelog for release detail.
+> **v0.19.0 (August 2026):** Release-integrity gates, honest runtime diagnostics,
+> registered Codex/Pi headless adapters, and untrusted-event prompt containment,
+> on top of the MCP Python SDK v2 migration. See the changelog for details.
 >
 > **Note:** Install as **`okf-agentbus`** (CLI command remains `agentbus`). Extras: `[obs,devex,jupyter,sdk]`.
 

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-23
+
 ### Added
 
 - Add honest `agentbus doctor` diagnostics for workspace resolution, SQLite
@@ -28,7 +30,7 @@
 
 - Add the proposed v0.19 product-hardening and durable-consumer roadmap with a
   cross-machine Swarm continuation handoff.
-- Align README and roadmap entry points with the v0.18.0 release.
+- Align README and roadmap entry points with the v0.19.0 release.
 
 ## [0.18.0] - 2026-08-10
 
