@@ -18,6 +18,7 @@ from agentbus.identity import (
     load_trust_state,
     sign_event_envelope,
     topic_restricted,
+    validate_typed_action,
     verify_envelope,
 )
 from agentbus.mcpsafe import PolicyEnforcer
@@ -480,11 +481,16 @@ class EventStore:
         trace_id: str | None = None,
         parent_span_id: str | None = None,
         identity_envelope: dict | None = None,
+        action: dict | None = None,
         auto_sign: bool = True,
         signing_key_path: Path | None = None,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
         stored_payload, artifacts = extract_artifacts(payload)
+        if action is not None:
+            action = validate_typed_action(action)
+            if "action" in stored_payload and stored_payload["action"] != action:
+                raise IdentityError("payload_action_mismatch")
 
         if sla_timeout_minutes is not None:
             if sla_timeout_minutes < 1:
@@ -511,11 +517,17 @@ class EventStore:
                         causation_id=causation_id,
                         idempotency_key=idempotency_key,
                         trace_id=trace_id,
+                        action=action,
                         private_key_path=signing_key_path,
                     )
                 except IdentityError as exc:
                     verification_reason = str(exc)
             if identity_envelope is not None:
+                if action is not None and (
+                    not isinstance(identity_envelope.get("signed"), dict)
+                    or identity_envelope["signed"].get("action") != action
+                ):
+                    raise IdentityError("identity_action_mismatch")
                 verification = verify_envelope(
                     self.workspace,
                     identity_envelope,
@@ -561,6 +573,7 @@ class EventStore:
                 topic=topic,
                 payload=stored_payload,
                 auth_token=auth_token,
+                identity_verified=verification_status == "verified",
             )
 
         if self._mcpsafe is not None:

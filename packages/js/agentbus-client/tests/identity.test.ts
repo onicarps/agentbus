@@ -3,7 +3,11 @@ import { resolve } from "path";
 import { execFileSync } from "child_process";
 import { describe, expect, it } from "vitest";
 
-import { canonicalizeAgentId, validateAgentIdValue } from "../src/identity";
+import {
+  canonicalizeAgentId,
+  validateAgentIdAction,
+  validateAgentIdValue,
+} from "../src/identity";
 
 const fixture = JSON.parse(
   readFileSync(
@@ -58,8 +62,36 @@ describe("AgentID RFC 8785 boundary", () => {
     expect(() => validateAgentIdValue({ value: "e\u0301" })).toThrow(
       "non_nfc_string",
     );
+    expect(() => validateAgentIdValue({ value: "\ud800" })).toThrow(
+      "invalid_unicode_scalar",
+    );
     await expect(canonicalizeAgentId({ value: Number.NaN })).rejects.toThrow(
       "non_finite_number",
     );
+  });
+
+  it("validates the typed privileged action contract", () => {
+    expect(
+      validateAgentIdAction({ type: "qa_verdict", result: "green" }),
+    ).toEqual({ type: "qa_verdict", result: "green" });
+    expect(() => validateAgentIdAction({ type: "qa_verdict" })).toThrow(
+      "invalid_qa_verdict_result",
+    );
+    expect(() => validateAgentIdAction({ type: "agy_go" })).toThrow(
+      "agy_go_phase_required",
+    );
+    expect(() =>
+      validateAgentIdAction({ type: "message", result: "green" }),
+    ).toThrow("unexpected_action_fields");
+    expect(() =>
+      validateAgentIdAction({ type: "identity_admin", operation: "impersonate" }),
+    ).toThrow("invalid_identity_admin_operation");
+    expect(() =>
+      validateAgentIdAction({
+        type: "runner_ack",
+        source_event_id: "not-an-id",
+        status: "ops_only",
+      }),
+    ).toThrow("invalid_runner_ack_source_event_id");
   });
 });

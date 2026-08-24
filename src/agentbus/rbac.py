@@ -63,13 +63,25 @@ class RbacConfig:
         )
 
 
-def rbac_disabled() -> bool:
-    return os.environ.get("AGENTBUS_DISABLE_RBAC", "").strip().lower() in {
+def _identity_protected(workspace: Path) -> bool:
+    from agentbus.identity import configured, load_trust_state
+
+    return configured(workspace) and load_trust_state(workspace).mode in {
+        "protected",
+        "strict",
+    }
+
+
+def rbac_disabled(workspace: Path | None = None) -> bool:
+    requested = os.environ.get("AGENTBUS_DISABLE_RBAC", "").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+    if requested and workspace is not None and _identity_protected(workspace):
+        return False
+    return requested
 
 
 def roles_path(workspace: Path) -> Path:
@@ -81,7 +93,7 @@ def droid_proofs_path(workspace: Path) -> Path:
 
 
 def load_rbac_config(workspace: Path) -> RbacConfig | None:
-    if rbac_disabled():
+    if rbac_disabled(workspace):
         return None
     path = roles_path(workspace)
     if not path.is_file():
@@ -140,12 +152,14 @@ def default_rbac_config() -> RbacConfig:
             ),
         },
         producers={
+            "codex": "engineer",
             "grok": "engineer",
             "agy": "architect",
             "hermes": "bridge",
             "factory": "qa",
             "factory_droid": "qa_droid",
             "aider": "ops",
+            "pi": "ops",
             "slack": "bridge",
             "wiretap": "observer",
             "os-watcher": "observer",
@@ -173,7 +187,11 @@ def resolve_role(
     config = load_rbac_config(workspace)
     if not config:
         return None
-    if auth_token and auth_token in config.token_roles:
+    if (
+        auth_token
+        and not _identity_protected(workspace)
+        and auth_token in config.token_roles
+    ):
         return config.token_roles[auth_token]
     return config.producers.get(producer_id)
 
@@ -258,6 +276,7 @@ def check_publish_rbac(
     topic: str,
     payload: dict,
     auth_token: str | None = None,
+    identity_verified: bool = False,
 ) -> None:
     """Raise ForbiddenError (403) when role cannot publish."""
     config = load_rbac_config(workspace)
@@ -286,8 +305,16 @@ def check_publish_rbac(
         )
 
     if role.requires_droid_proof:
+        if _identity_protected(workspace):
+            if not identity_verified:
+                raise ForbiddenError(
+                    f"403 Forbidden: role '{role_name}' requires verified AgentID"
+                )
+            return
         proof = payload.get("droid_proof")
-        if not verify_droid_proof(workspace, proof if isinstance(proof, str) else None):
+        if not verify_droid_proof(
+            workspace, proof if isinstance(proof, str) else None
+        ):
             raise ForbiddenError(
                 f"403 Forbidden: role '{role_name}' requires valid droid_proof"
             )

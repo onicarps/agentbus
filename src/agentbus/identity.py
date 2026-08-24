@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import tempfile
 import unicodedata
@@ -36,6 +37,10 @@ MODE_ORDER = {"audit": 0, "protected": 1, "strict": 2}
 DEFAULT_RESTRICTED_TOPICS = ("okf/handoff", "okf/approval", "system/")
 MAX_SAFE_INTEGER = (1 << 53) - 1
 MAX_DELEGATION_TTL_SECONDS = 3600
+ROOT_PRODUCER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+DELEGATED_PRODUCER_PATTERN = re.compile(
+    r"^[a-z][a-z0-9_-]{0,63}/subagent/[a-z0-9][a-z0-9_-]{0,63}$"
+)
 PRIVILEGED_DELEGATION_CAPABILITIES = frozenset(
     {
         "agy_go",
@@ -48,6 +53,28 @@ PRIVILEGED_DELEGATION_CAPABILITIES = frozenset(
         "release",
     }
 )
+PRIVILEGED_ACTION_TYPES = frozenset(
+    {"qa_verdict", "agy_go", "merge", "push", "release", "identity_admin"}
+)
+ACTION_CAPABILITIES = {
+    "message": "message",
+    "runner_ack": "message",
+    "implementation": "implementation",
+    "qa_verdict": "qa_verdict",
+    "agy_go": "agy_go",
+    "merge": "merge",
+    "push": "push",
+    "release": "release",
+    "identity_admin": "identity_admin",
+}
+DEFAULT_ACTION_PRODUCERS = {
+    "qa_verdict": ["factory", "factory_droid"],
+    "agy_go": ["agy"],
+    "merge": ["codex"],
+    "push": ["codex"],
+    "release": ["codex"],
+    "identity_admin": ["identity-admin"],
+}
 _UNSET = object()
 
 
@@ -290,6 +317,7 @@ def bootstrap_workspace_identity(workspace: Path, *, mode: str = "audit") -> Tru
         "restricted_topics": list(DEFAULT_RESTRICTED_TOPICS),
         "replay_window_seconds": "300",
         "reference_monitor": "local_audit",
+        "action_producers": DEFAULT_ACTION_PRODUCERS,
     }
     _atomic_json(root / "policy.json", _signed_document(policy, private))
     return load_trust_state(workspace, update_high_water=True)
@@ -385,6 +413,64 @@ def topic_restricted(topic: str, state: TrustState) -> bool:
     )
 
 
+def validate_typed_action(action: Any) -> dict[str, Any]:
+    """Validate the closed AgentID action vocabulary and required fields."""
+    if not isinstance(action, dict):
+        raise IdentityError("invalid_typed_action")
+    action_type = action.get("type")
+    if action_type not in ACTION_CAPABILITIES:
+        raise IdentityError(f"unknown_action_type: {action_type}")
+    allowed_fields: dict[str, set[str]] = {
+        "message": {"type"},
+        "runner_ack": {"type", "source_event_id", "status"},
+        "implementation": {"type", "phase", "task"},
+        "qa_verdict": {"type", "result", "mission_id", "candidate"},
+        "agy_go": {"type", "phase", "scope"},
+        "merge": {"type", "target", "candidate"},
+        "push": {"type", "target", "candidate"},
+        "release": {"type", "version", "candidate"},
+        "identity_admin": {"type", "operation", "subject"},
+    }
+    extras = set(action) - allowed_fields[str(action_type)]
+    if extras:
+        raise IdentityError(f"unexpected_action_fields: {sorted(extras)}")
+    if action_type == "qa_verdict" and action.get("result") not in {"green", "red"}:
+        raise IdentityError("invalid_qa_verdict_result")
+    if action_type == "agy_go" and not isinstance(action.get("phase"), str):
+        raise IdentityError("agy_go_phase_required")
+    if action_type == "identity_admin" and action.get("operation") not in {
+        "delegate",
+        "enroll",
+        "mode",
+        "revoke",
+        "rotate",
+    }:
+        raise IdentityError("invalid_identity_admin_operation")
+    for key, value in action.items():
+        if key == "source_event_id":
+            if not isinstance(value, str) or not value.isdigit():
+                raise IdentityError("invalid_runner_ack_source_event_id")
+        elif not isinstance(value, str):
+            raise IdentityError(f"invalid_action_field: {key}")
+    validate_jcs_value(action)
+    return action
+
+
+def _authorize_action(
+    state: TrustState, entry: dict[str, Any], action: dict[str, Any]
+) -> None:
+    action_type = str(action["type"])
+    required = ACTION_CAPABILITIES[action_type]
+    if required not in (entry.get("capabilities") or []):
+        raise IdentityError(f"identity_capability_not_allowed: {action_type}")
+    if action_type in PRIVILEGED_ACTION_TYPES:
+        allowed = (state.policy.get("action_producers") or {}).get(action_type) or []
+        if entry.get("producer_id") not in allowed:
+            raise IdentityError(f"403 Forbidden: action_producer_not_allowed: {action_type}")
+        if entry.get("delegated_by") is not None:
+            raise IdentityError("privileged_delegation_forbidden")
+
+
 def enroll_identity(
     workspace: Path,
     producer_id: str,
@@ -392,7 +478,7 @@ def enroll_identity(
     capabilities: Iterable[str] = ("message",),
     topics: Iterable[str] = ("okf/handoff",),
 ) -> str:
-    if not producer_id or "/subagent/" in producer_id:
+    if not ROOT_PRODUCER_PATTERN.fullmatch(producer_id):
         raise IdentityError("invalid_producer_id")
     root = _identity_dir(workspace)
     state = load_trust_state(workspace, update_high_water=True)
@@ -444,6 +530,14 @@ def _verify_delegations(registry: dict[str, Any]) -> None:
     for entry in keys:
         if not isinstance(entry, dict) or not isinstance(entry.get("producer_id"), str):
             raise VerificationError("invalid_identity_registry")
+        producer_id = entry["producer_id"]
+        expected_pattern = (
+            DELEGATED_PRODUCER_PATTERN
+            if entry.get("delegated_by") is not None
+            else ROOT_PRODUCER_PATTERN
+        )
+        if not expected_pattern.fullmatch(producer_id):
+            raise VerificationError("invalid_producer_id")
         by_producer.setdefault(entry["producer_id"], []).append(entry)
     for entry in keys:
         delegated_by = entry.get("delegated_by")
@@ -843,10 +937,10 @@ def sign_event_envelope(
         for item in allowed_topics
     ):
         raise IdentityError(f"identity_topic_not_allowed: {topic}")
-    chosen_action = action or payload.get("action") or {"type": "message"}
-    action_type = chosen_action.get("type") if isinstance(chosen_action, dict) else None
-    if action_type not in (entry.get("capabilities") or []):
-        raise IdentityError(f"identity_capability_not_allowed: {action_type}")
+    chosen_action = validate_typed_action(
+        action or payload.get("action") or {"type": "message"}
+    )
+    _authorize_action(state, entry, chosen_action)
     unsigned = {
         "envelope_version": ENVELOPE_VERSION,
         "workspace_id": state.workspace_id,
@@ -970,15 +1064,11 @@ def verify_envelope(
             for item in allowed_topics
         ):
             raise VerificationError("identity_topic_not_allowed")
-        action = unsigned.get("action")
-        action_type = action.get("type") if isinstance(action, dict) else None
-        if action_type not in (entry.get("capabilities") or []):
-            raise VerificationError("identity_capability_not_allowed")
-        if (
-            entry.get("delegated_by") is not None
-            and action_type in PRIVILEGED_DELEGATION_CAPABILITIES
-        ):
-            raise VerificationError("privileged_delegation_forbidden")
+        action = validate_typed_action(unsigned.get("action"))
+        try:
+            _authorize_action(state, entry, action)
+        except IdentityError as exc:
+            raise VerificationError(str(exc)) from exc
         public = Ed25519PublicKey.from_public_bytes(_unb64(entry["public_key"]))
         try:
             public.verify(_unb64(signature), canonical_bytes(unsigned))

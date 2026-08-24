@@ -195,7 +195,8 @@ Cooperative **continuation-passing** waits (no LLM session freeze).
 agentbus await \
   --expect-from factory \
   --causation-id 412 \
-  --match QA_VERDICT \
+  --action-type qa_verdict \
+  --action-result green \
   --timeout-hours 4
 # exit 75 → runner publishes RUNNER_SUSPEND + durable WaitRegistration
 ```
@@ -204,7 +205,7 @@ agentbus await \
 |-------|----------|
 | Drop file | `.agentbus/runs/<event_id>/await.json` |
 | Wait store | `.agentbus/waits/<wait_id>.json` |
-| Fulfill | Predicate match (`from_any` + `causation_id`; optional summary) |
+| Fulfill | Predicate match (`from_any` + `causation_id`); privileged gates also require a verified signed typed action |
 | Timeout | Default 4h (max 24h) → `okf/dead-letter` `WAIT_TIMEOUT` + resume `status=timeout` |
 | Resume wake | `payload.resume` locked keys; bus `causation_id` = stored `chain_key` (budget continuity) |
 | Idempotency | `suspend-ack:{runner}:{event_id}` · `resume:{wait_id}:{fulfilled_by}` |

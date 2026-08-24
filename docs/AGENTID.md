@@ -31,6 +31,15 @@ rejected.
 
 Every signed event covers the exact post-extraction payload, ordered artifact type/name/size/SHA-256 records, topic, producer, schema, policy and registry versions, nonce, timestamp, causation, idempotency, trace, and typed action. Signatures are Ed25519 over RFC 8785 JCS bytes. Event IDs and other 64-bit values are decimal strings inside the signed object.
 
+Privileged automation uses a closed typed-action vocabulary rather than
+matching words in summaries. Factory or an enrolled Factory droid may sign
+`qa_verdict`; only Agy may sign `agy_go`; Codex may sign `merge`, `push`, and
+`release`; and the dedicated identity administrator owns `identity_admin`.
+Capabilities and the root-signed producer allowlist must both authorize the
+action. Publish typed actions with `agentbus publish --action '<json>'` or the
+MCP `action` argument, and wait on them with `agentbus await --action-type ...`.
+`runner_ack` is explicitly operations-only and cannot fulfill a QA or GO gate.
+
 Python uses `rfc8785==0.1.4` and `cryptography==50.0.0`; TypeScript uses the ESM-only `canonicalize@4.0.0` through a preserved dynamic-import boundary; Go pins `github.com/cyberphone/json-canonicalization@v0.0.0-20241213102144-19d51d7fe467`. A shared fixture proves byte and signature parity across all three implementations.
 
 ## Wake security
@@ -54,6 +63,18 @@ the payload would otherwise deduplicate. Poll/await, runner intake, trace views,
 TUI/monitor snapshots, HITL review, SLA processing, and log projection all
 recompute proof material; protected/strict mode filters invalid restricted-topic
 events without hydrating or executing their payloads.
+
+In protected or strict mode, `AGENTBUS_AUTH=off`,
+`AGENTBUS_DISABLE_RBAC=1`, token-to-role mappings, and legacy droid proofs cannot
+grant authority. MCP publishing is bound to the supervised runtime producer,
+and a private key enrolled for one producer cannot publish as another. The Go
+direct store/worker path refuses restricted-topic publish and poll once AgentID
+is configured; those operations must go through the verifying broker.
+
+`agentbus doctor` verifies the signed policy and registry, key state,
+high-water rollback protection, identity database migrations, credential scrub,
+reference-monitor mode, and strict readiness. A normal shared-UID local setup
+honestly reports `strict_ready=false`.
 
 On a host where mutually distrusting runtimes share one Unix UID, file permissions and same-UID sockets provide tamper evidence, not execution prevention. Strict readiness requires the reference monitor and peer runtimes to run under distinct OS principals or equivalently isolated containers. A software signature proves control of an enrolled execution boundary; it does not prove model vendor, model name, persona, or correctness.
 

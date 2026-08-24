@@ -14,6 +14,7 @@ from agentbus.auth import (
     token_path,
     write_workspace_token,
 )
+from agentbus.identity import bootstrap_workspace_identity, set_policy_mode
 
 
 def test_no_token_required_when_unconfigured(monkeypatch, tmp_path):
@@ -84,3 +85,12 @@ def test_token_file_permissions(tmp_path):
 
 def test_read_workspace_token_missing(tmp_path):
     assert read_workspace_token(tmp_path) is None
+
+
+def test_protected_mode_ignores_auth_off(monkeypatch, tmp_path):
+    bootstrap_workspace_identity(tmp_path)
+    set_policy_mode(tmp_path, "protected")
+    write_workspace_token(tmp_path, "protected-secret")
+    monkeypatch.setenv("AGENTBUS_AUTH", "off")
+    with pytest.raises(ValueError, match="unauthorized"):
+        check_publish_token(tmp_path, auth_token="wrong")

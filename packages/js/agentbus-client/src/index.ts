@@ -11,6 +11,7 @@ export {
   agentIdCanonicalSha256,
   canonicalizeAgentId,
   validateAgentIdValue,
+  validateAgentIdAction,
   verifyAgentIdSignature,
 } from "./identity";
 export {
@@ -24,6 +25,7 @@ export type {
   McpToolClient,
 } from "./types";
 export type { StdioMcpOptions } from "./stdio";
+export type { AgentIdAction } from "./identity";
 
 const DEFAULT_POLL_LIMIT = 50;
 

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -83,6 +84,42 @@ func TestIdempotencyKey(t *testing.T) {
 	}
 	if !dup || ev2.EventID != 1 {
 		t.Fatalf("dup=%v id=%d", dup, ev2.EventID)
+	}
+	other, otherDup, err := s.Publish(ctx, PublishRequest{
+		Topic:          "okf/handoff",
+		ProducerID:     "hermes",
+		Payload:        map[string]any{"from": "hermes", "to": "agy", "summary": "y"},
+		IdempotencyKey: &key,
+	})
+	if err != nil || otherDup || other.EventID == ev2.EventID {
+		t.Fatalf("scoped idempotency err=%v dup=%v id=%d", err, otherDup, other.EventID)
+	}
+}
+
+func TestIdentityConfiguredWorkspaceRequiresBrokerForRestrictedTopics(t *testing.T) {
+	dir := t.TempDir()
+	identityDir := filepath.Join(dir, ".agentbus", "identity")
+	if err := os.MkdirAll(identityDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(identityDir, "trust-root.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	_, _, err = s.Publish(context.Background(), PublishRequest{
+		Topic:      "okf/handoff",
+		ProducerID: "factory",
+		Payload:    map[string]any{"from": "factory", "to": "codex", "summary": "forged"},
+	})
+	if err == nil {
+		t.Fatal("restricted direct publish unexpectedly succeeded")
+	}
+	if _, err := s.Poll("okf/handoff", 0, 50); err == nil {
+		t.Fatal("restricted direct poll unexpectedly succeeded")
 	}
 }
 

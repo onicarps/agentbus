@@ -45,7 +45,16 @@ def ensure_ephemeral_token(workspace: Path, *, rotate: bool = False) -> str:
 def expected_publish_token(workspace: Path | None) -> str | None:
     """Resolve the token required for publish operations."""
     if os.environ.get("AGENTBUS_AUTH", "auto").lower() == "off":
-        return None
+        protected = False
+        if workspace is not None:
+            from agentbus.identity import configured, load_trust_state
+
+            protected = configured(workspace) and load_trust_state(workspace).mode in {
+                "protected",
+                "strict",
+            }
+        if not protected:
+            return None
     if workspace is not None:
         file_token = read_workspace_token(workspace)
         if file_token:

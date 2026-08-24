@@ -20,6 +20,7 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from agentbus.bin_resolve import resolve_go_binary
+from agentbus.identity import configured as identity_configured, load_trust_state
 from agentbus.rbac import RbacConfig
 from agentbus.swarm import _pid_alive, state_path
 from agentbus.workspace_guard import diagnose_workspace
@@ -93,8 +94,10 @@ def check_database(workspace: Path) -> DiagnosticCheck:
         return DiagnosticCheck("database", "FAIL", f"database inspection failed: {exc}")
     required_columns = {
         "event_id", "topic", "producer_id", "timestamp", "schema_version", "payload",
-        "status", "trace_id", "span_id", "parent_span_id",
+        "status", "trace_id", "span_id", "parent_span_id", "identity_envelope",
+        "verification_status", "scoped_idempotency_key",
     }
+    required_tables = {"events", "artifacts", "identity_nonces", "identity_key_high_water", "schema_version"}
     missing = sorted(required_columns - columns)
     expected_journal = "ROLLBACK" if os.name == "nt" else "WAL"
     details = {
@@ -103,8 +106,9 @@ def check_database(workspace: Path) -> DiagnosticCheck:
         "busy_timeout_ms": busy,
         "tables": sorted(tables),
         "missing_event_columns": missing,
+        "missing_identity_tables": sorted(required_tables - tables),
     }
-    if integrity != ["ok"] or "events" not in tables or missing:
+    if integrity != ["ok"] or required_tables - tables or missing:
         return DiagnosticCheck("database", "FAIL", "integrity or schema/migration check failed", details)
     if journal != expected_journal or busy < (10000 if os.name == "nt" else 5000):
         return DiagnosticCheck("database", "WARN", "SQLite runtime settings differ from defaults", details)
@@ -136,6 +140,83 @@ def check_rbac(workspace: Path) -> DiagnosticCheck:
     return DiagnosticCheck(
         "rbac", "OK", "RBAC syntax and role references verified",
         {"roles": sorted(config.roles), "producers": sorted(config.producers)},
+    )
+
+
+def check_identity(workspace: Path) -> DiagnosticCheck:
+    """Verify AgentID trust state and report isolation claims honestly."""
+    if not identity_configured(workspace):
+        return DiagnosticCheck(
+            "identity",
+            "WARN",
+            "AgentID is not initialized; events have no cryptographic producer binding",
+            {"configured": False, "strict_ready": False},
+        )
+    try:
+        state = load_trust_state(workspace, update_high_water=False)
+        keys = state.registry.get("keys") or []
+        if not isinstance(keys, list):
+            raise ValueError("registry keys must be a list")
+        active = sorted(
+            str(item.get("key_id"))
+            for item in keys
+            if isinstance(item, dict) and item.get("state") == "active"
+        )
+        revoked = sorted(str(x) for x in state.registry.get("revoked_key_ids") or [])
+        from agentbus.runner.adapters.prompt_common import scrub_child_environment
+
+        scrubbed = scrub_child_environment(
+            {
+                "PATH": "/bin",
+                "AGENTBUS_IDENTITY_PRIVATE_KEY": "/private/key",
+                "AGENTBUS_TOKEN": "secret",
+                "AGENTBUS_BROKER_SOCKET": "/run/broker.sock",
+                "SSH_AUTH_SOCK": "/run/ssh.sock",
+            }
+        )
+        child_scrub_ok = scrubbed == {"PATH": "/bin"}
+        same_uid = os.name != "nt" and hasattr(os, "geteuid")
+        isolated_monitor = state.policy.get("reference_monitor") not in {
+            None,
+            "local_audit",
+        }
+        strict_ready = bool(
+            state.mode == "strict" and isolated_monitor and not same_uid
+        )
+        details = {
+            "configured": True,
+            "workspace_id": state.workspace_id,
+            "mode": state.mode,
+            "policy_version": state.policy_version,
+            "registry_version": state.registry_version,
+            "active_key_ids": active,
+            "revoked_key_ids": revoked,
+            "child_credential_scrub": child_scrub_ok,
+            "reference_monitor": state.policy.get("reference_monitor"),
+            "same_uid_shared_host": same_uid,
+            "strict_ready": strict_ready,
+        }
+    except Exception as exc:
+        return DiagnosticCheck(
+            "identity", "FAIL", f"AgentID policy/registry verification failed: {exc}"
+        )
+    if not child_scrub_ok:
+        return DiagnosticCheck(
+            "identity", "FAIL", "child credential scrubbing self-check failed", details
+        )
+    if not active:
+        return DiagnosticCheck(
+            "identity", "WARN", "AgentID registry has no active producer keys", details
+        )
+    if not strict_ready:
+        return DiagnosticCheck(
+            "identity",
+            "WARN",
+            "AgentID integrity is active; strict_ready=False on this shared-UID/local-monitor host",
+            details,
+        )
+    return DiagnosticCheck(
+        "identity", "OK", "AgentID policy, registry and strict isolation verified", details
     )
 
 
@@ -313,6 +394,7 @@ def check_versions() -> DiagnosticCheck:
 def run_doctor(workspace: Path) -> DoctorReport:
     checks = [
         check_workspace(workspace), check_database(workspace), check_rbac(workspace),
+        check_identity(workspace),
         check_schema_registry(workspace), check_go_binaries(), check_process_state(workspace),
         check_disk(workspace), check_isolated_publish_poll(), check_mcp_stdio(), check_versions(),
     ]

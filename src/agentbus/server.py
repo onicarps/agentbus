@@ -10,6 +10,7 @@ from typing import Any
 from mcp.server import MCPServer
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
+from agentbus.identity import IdentityError, configured as identity_configured, load_trust_state
 from agentbus.leases import LeaseStore
 from agentbus.artifacts import PayloadTooLargeError
 from agentbus.mcpsafe import AccessDeniedError, PolicyEnforcer, load_enforcer
@@ -96,6 +97,20 @@ def _producer_id(override: str | None) -> str:
     return pid
 
 
+def _bound_publish_producer(override: str | None) -> str:
+    """In protected mode derive producer from supervised server identity."""
+    requested = _producer_id(override)
+    if _workspace is None or not identity_configured(_workspace):
+        return requested
+    state = load_trust_state(_workspace)
+    if state.mode not in {"protected", "strict"}:
+        return requested
+    bound = (os.environ.get("AGENTBUS_PRODUCER_ID") or "").strip()
+    if not bound or requested != bound:
+        raise IdentityError("403 Forbidden: producer_not_bound_to_mcp_runtime")
+    return bound
+
+
 def _check_mcpsafe_tool(tool: str) -> str | None:
     """Return JSON error if tool blocked; else None."""
     if _mcpsafe is None:
@@ -158,6 +173,7 @@ def agentbus_publish(
     sla_timeout_minutes: int | None = None,
     trace_id: str | None = None,
     parent_span_id: str | None = None,
+    action: dict | None = None,
 ) -> str:
     """Append one event to the workspace event log."""
 
@@ -168,13 +184,14 @@ def agentbus_publish(
         return json.dumps({"error": str(exc), "code": 401})
 
     def _run() -> str:
-        validated = validate_payload(
-            topic, payload, producer_id=_producer_id(producer_id)
-        )
         try:
+            bound_producer = _bound_publish_producer(producer_id)
+            validated = validate_payload(
+                topic, payload, producer_id=bound_producer
+            )
             event, duplicate = _get_store().publish(
                 topic=topic,
-                producer_id=_producer_id(producer_id),
+                producer_id=bound_producer,
                 schema_version=schema_version,
                 payload=validated,
                 causation_id=causation_id,
@@ -183,9 +200,19 @@ def agentbus_publish(
                 sla_timeout_minutes=sla_timeout_minutes,
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
+                action=action,
+                auto_sign=bool(os.environ.get("AGENTBUS_IDENTITY_PRIVATE_KEY")),
+                signing_key_path=(
+                    Path(os.environ["AGENTBUS_IDENTITY_PRIVATE_KEY"])
+                    if os.environ.get("AGENTBUS_IDENTITY_PRIVATE_KEY")
+                    else None
+                ),
             )
-        except ForbiddenError as exc:
-            return json.dumps({"error": str(exc), "code": exc.code})
+        except (ForbiddenError, IdentityError) as exc:
+            code = getattr(exc, "code", 403)
+            return json.dumps({"error": str(exc), "code": code})
+        except ValueError as exc:
+            return json.dumps({"error": str(exc), "code": 400})
         except AccessDeniedError as exc:
             return json.dumps({"error": str(exc), "code": exc.code})
         except PayloadTooLargeError as exc:
@@ -215,6 +242,7 @@ def agentbus_publish(
             "sla_timeout_minutes": sla_timeout_minutes,
             "trace_id": trace_id,
             "parent_span_id": parent_span_id,
+            "action": action,
         },
         _run,
     )

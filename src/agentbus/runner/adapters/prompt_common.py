@@ -36,6 +36,16 @@ OPS_SUMMARY_PREFIXES: tuple[str, ...] = (
     "CHAIN_BREAK",
     "SUPPRESS ACK",
 )
+AGENT_SOCKET_ENV = frozenset({"SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO"})
+
+
+def scrub_child_environment(inherited: dict[str, str]) -> dict[str, str]:
+    """Return a copy without ambient AgentBus authority or agent sockets."""
+    return {
+        key: value
+        for key, value in inherited.items()
+        if not key.startswith("AGENTBUS_") and key not in AGENT_SOCKET_ENV
+    }
 
 
 def preview_suppresses_ack(preview: str | None) -> bool:
@@ -65,15 +75,10 @@ def runner_subprocess_env(
     delegated_producer_id: str | None = None,
 ) -> dict[str, str]:
     """Minimal child env without inherited AgentBus signer or broker authority."""
-    env = os.environ.copy()
+    env = scrub_child_environment(dict(os.environ))
     # A child CLI is untrusted by default.  Ambient AgentBus variables may name
     # private keys, bearer tokens, broker sockets, or a more privileged peer.
     # Remove the whole namespace, then add only task-routing metadata below.
-    for key in tuple(env):
-        if key.startswith("AGENTBUS_"):
-            env.pop(key, None)
-    for key in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO"):
-        env.pop(key, None)
     # Authoritative from the active runner; inherited ambient values must not
     # redirect an adapter's `agentbus await` drop to the wrong workspace/producer.
     env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
@@ -233,7 +238,7 @@ def build_cli_role_prompt(
         "",
         "- If you need a dependency (e.g. Factory QA verdict), call:",
         "  `agentbus await --expect-from factory --causation-id <id> "
-        "--match QA_VERDICT --timeout-hours 4`",
+        "--action-type qa_verdict --action-result green --timeout-hours 4`",
         "- That exits 75, registers a durable wait, and the runner resumes you later.",
         "- Do **not** poll the bus in a loop waiting for another agent.",
         "",

@@ -57,8 +57,17 @@ KNOWN_TOPICS: dict[str, dict] = {
         "required": ["from", "to", "summary"],
         "additionalProperties": False,
         "properties": {
-            "from": {"type": "string", "pattern": r"^[a-z][a-z0-9_-]*$"},
-            "to": {"type": "string", "pattern": r"^[a-z][a-z0-9_*,*-]+$"},
+            "from": {
+                "type": "string",
+                "pattern": r"^[a-z][a-z0-9_-]*(?:/subagent/[a-z0-9][a-z0-9_-]*)?$",
+            },
+            "to": {
+                "type": "string",
+                "pattern": (
+                    r"^(?:\*|[a-z][a-z0-9_-]*(?:/subagent/[a-z0-9][a-z0-9_-]*)?)"
+                    r"(?:,(?:\*|[a-z][a-z0-9_-]*(?:/subagent/[a-z0-9][a-z0-9_-]*)?))*$"
+                ),
+            },
             "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
             # Reply/ack convention (bus field causation_id on publish, not payload):
             # set causation_id=<wake event_id> when acknowledging a handoff.
@@ -68,6 +77,26 @@ KNOWN_TOPICS: dict[str, dict] = {
                 "maxItems": 10,
             },
             "initiative": {"type": "string"},
+            "action": {
+                "type": "object",
+                "required": ["type"],
+                "additionalProperties": True,
+                "properties": {
+                    "type": {
+                        "enum": [
+                            "message",
+                            "runner_ack",
+                            "implementation",
+                            "qa_verdict",
+                            "agy_go",
+                            "merge",
+                            "push",
+                            "release",
+                            "identity_admin",
+                        ]
+                    }
+                },
+            },
             "droid_proof": {"type": "string", "minLength": 8, "maxLength": 256},
             "tool": {
                 "type": "string",

@@ -207,6 +207,11 @@ def companion_ack_payload(
         "from": producer_id,
         "to": reply_to if reply_to not in BROADCAST_TO else "agy",
         "summary": summary,
+        "action": {
+            "type": "runner_ack",
+            "source_event_id": str(wake.event_id),
+            "status": "ops_only",
+        },
     }
     links = slack_links_from_wake(wake)
     if links:

@@ -97,6 +97,13 @@ def test_bootstrap_enroll_sign_and_verify(tmp_path: Path) -> None:
     assert envelope["signed"]["artifact_digests"][0]["size"] == "10"
 
 
+def test_enrollment_rejects_path_or_delegated_identity_claims(tmp_path: Path) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    for producer in ("../factory", "Factory", "agy/subagent/fake", "a" * 65):
+        with pytest.raises(IdentityError, match="invalid_producer_id"):
+            enroll_identity(tmp_path, producer)
+
+
 def test_tampering_payload_or_artifact_fails(tmp_path: Path) -> None:
     _boot_and_enroll(tmp_path)
     payload = {"from": "codex", "to": "factory", "summary": "candidate"}
@@ -139,6 +146,120 @@ def test_peer_claim_and_capability_escalation_rejected(tmp_path: Path) -> None:
             payload={"from": "agy", "to": "codex", "summary": "green"},
             action={"type": "qa_verdict", "result": "green"},
         )
+
+
+def test_typed_actions_enforce_separation_of_duties(tmp_path: Path) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    enroll_identity(
+        tmp_path,
+        "factory",
+        capabilities=("message", "qa_verdict"),
+        topics=("okf/handoff",),
+    )
+    enroll_identity(
+        tmp_path,
+        "agy",
+        capabilities=("message", "agy_go", "qa_verdict"),
+        topics=("okf/handoff",),
+    )
+    enroll_identity(
+        tmp_path,
+        "codex",
+        capabilities=("message", "qa_verdict", "agy_go", "release"),
+        topics=("okf/handoff",),
+    )
+    factory_payload = {"from": "factory", "to": "codex", "summary": "GREEN"}
+    qa = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id="factory",
+        schema_version="1.0",
+        payload=factory_payload,
+        action={"type": "qa_verdict", "result": "green", "mission_id": "qa-1"},
+    )
+    assert verify_envelope(tmp_path, qa, stored_payload=factory_payload).verified
+
+    agy_payload = {"from": "agy", "to": "codex", "summary": "Phase 4 GO"}
+    go = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id="agy",
+        schema_version="1.0",
+        payload=agy_payload,
+        action={"type": "agy_go", "phase": "4", "scope": "migration"},
+    )
+    assert verify_envelope(tmp_path, go, stored_payload=agy_payload).verified
+
+    for producer, action in (
+        ("codex", {"type": "qa_verdict", "result": "green"}),
+        ("codex", {"type": "agy_go", "phase": "4"}),
+        ("agy", {"type": "qa_verdict", "result": "green"}),
+    ):
+        with pytest.raises(IdentityError, match="action_producer_not_allowed"):
+            sign_event_envelope(
+                tmp_path,
+                topic="okf/handoff",
+                producer_id=producer,
+                schema_version="1.0",
+                payload={"from": producer, "to": "all", "summary": "forged"},
+                action=action,
+            )
+
+    with pytest.raises(IdentityError, match="unknown_action_type"):
+        sign_event_envelope(
+            tmp_path,
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload=factory_payload,
+            action={"type": "pretend_factory"},
+        )
+    with pytest.raises(IdentityError, match="invalid_qa_verdict_result"):
+        sign_event_envelope(
+            tmp_path,
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload=factory_payload,
+            action={"type": "qa_verdict", "result": "maybe"},
+        )
+
+
+def test_store_publishes_and_binds_typed_action(tmp_path: Path) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    enroll_identity(
+        tmp_path,
+        "factory",
+        capabilities=("message", "qa_verdict"),
+        topics=("okf/handoff",),
+    )
+    set_policy_mode(tmp_path, "protected")
+    store = EventStore(tmp_path)
+    event, _ = store.publish(
+        topic="okf/handoff",
+        producer_id="factory",
+        schema_version="1.0",
+        payload={"from": "factory", "to": "codex", "summary": "GREEN"},
+        action={"type": "qa_verdict", "result": "green", "mission_id": "qa-2"},
+        skip_rbac=True,
+    )
+    assert event.verification_status == "verified"
+    assert event.identity_envelope["signed"]["action"]["type"] == "qa_verdict"
+    with pytest.raises(IdentityError, match="payload_action_mismatch"):
+        store.publish(
+            topic="okf/handoff",
+            producer_id="factory",
+            schema_version="1.0",
+            payload={
+                "from": "factory",
+                "to": "codex",
+                "summary": "mismatch",
+                "action": {"type": "message"},
+            },
+            action={"type": "qa_verdict", "result": "green"},
+            skip_rbac=True,
+        )
+    store.close()
 
 
 def test_delegated_child_is_bounded_and_cannot_impersonate_factory(
@@ -237,7 +358,10 @@ def test_delegated_child_is_bounded_and_cannot_impersonate_factory(
         schema_version="1.0",
         payload=own,
     )
-    forged_signed = {**valid["signed"], "action": {"type": "qa_verdict"}}
+    forged_signed = {
+        **valid["signed"],
+        "action": {"type": "qa_verdict", "result": "green"},
+    }
     child_private = serialization.load_pem_private_key(
         (
             tmp_path / ".agentbus" / "identity" / "private" / f"{key_id}.pem"
@@ -253,9 +377,8 @@ def test_delegated_child_is_bounded_and_cannot_impersonate_factory(
         .rstrip(b"=")
         .decode("ascii"),
     }
-    assert (
-        verify_envelope(tmp_path, forged, stored_payload=own).reason
-        == "identity_capability_not_allowed"
+    assert str(verify_envelope(tmp_path, forged, stored_payload=own).reason).startswith(
+        "identity_capability_not_allowed"
     )
     with pytest.raises(IdentityError, match="privileged_delegation_forbidden"):
         delegate_identity(
@@ -480,8 +603,11 @@ def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path)
     key_id = enroll_identity(
         tmp_path,
         "factory",
-        capabilities=("message",),
+        capabilities=("message", "qa_verdict"),
         topics=("okf/handoff",),
+    )
+    codex_key_id = enroll_identity(
+        tmp_path, "codex", capabilities=("message",), topics=("okf/handoff",)
     )
     set_policy_mode(tmp_path, "protected")
     args = [
@@ -494,6 +620,8 @@ def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path)
         "factory",
         "--payload",
         json.dumps({"from": "factory", "to": "codex", "summary": "GREEN"}),
+        "--action",
+        json.dumps({"type": "qa_verdict", "result": "green"}),
     ]
     runner = CliRunner()
     denied = runner.invoke(main, args, env={"AGENTBUS_IDENTITY_PRIVATE_KEY": ""})
@@ -503,6 +631,17 @@ def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path)
     assert store.latest_event_id() == 0
     store.close()
 
+    wrong_private = (
+        tmp_path / ".agentbus" / "identity" / "private" / f"{codex_key_id}.pem"
+    )
+    wrong_identity = runner.invoke(
+        main,
+        args,
+        env={"AGENTBUS_IDENTITY_PRIVATE_KEY": str(wrong_private)},
+    )
+    assert wrong_identity.exit_code == 1
+    assert "signing_key_identity_mismatch" in wrong_identity.output
+
     private_path = tmp_path / ".agentbus" / "identity" / "private" / f"{key_id}.pem"
     allowed = runner.invoke(
         main,
@@ -510,6 +649,14 @@ def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path)
         env={"AGENTBUS_IDENTITY_PRIVATE_KEY": str(private_path)},
     )
     assert allowed.exit_code == 0, allowed.output
+    store = EventStore(tmp_path, auto_prune=False)
+    published = store.get_event(1)
+    assert published is not None
+    assert published.identity_envelope["signed"]["action"] == {
+        "type": "qa_verdict",
+        "result": "green",
+    }
+    store.close()
 
 
 def test_protected_reads_filter_database_and_artifact_tampering(tmp_path: Path) -> None:

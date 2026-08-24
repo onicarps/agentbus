@@ -482,6 +482,8 @@ def register_wait_from_await_drop(
             or [],
             "summary_contains": await_data.get("match")
             or await_data.get("summary_contains"),
+            "action_type": await_data.get("action_type"),
+            "action_result": await_data.get("action_result"),
             "topic": await_data.get("topic") or "okf/handoff",
         }
     predicate = WaitPredicate.from_dict(pred_raw)

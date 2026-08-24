@@ -128,6 +128,43 @@ def test_match_predicate_primary_and_self_guard():
     assert match_predicate(free, good, waiter_producer_id="grok") is False
 
 
+def test_typed_wait_requires_verified_signed_action():
+    pred = WaitPredicate(
+        from_any=["factory"],
+        causation_id=100,
+        action_type="qa_verdict",
+        action_result="green",
+    )
+    base = {
+        "event_id": 201,
+        "topic": "okf/handoff",
+        "producer_id": "factory",
+        "causation_id": 100,
+        "payload": {"from": "factory", "to": "codex", "summary": "QA_VERDICT: GREEN"},
+    }
+    assert not match_predicate(pred, base, waiter_producer_id="codex")
+    assert not match_predicate(
+        pred,
+        {**base, "verification_status": "verified"},
+        waiter_producer_id="codex",
+    )
+    verified = {
+        **base,
+        "verification_status": "verified",
+        "identity_envelope": {
+            "signed": {"action": {"type": "qa_verdict", "result": "green"}}
+        },
+    }
+    assert match_predicate(pred, verified, waiter_producer_id="codex")
+    ack = {
+        **verified,
+        "identity_envelope": {
+            "signed": {"action": {"type": "runner_ack", "status": "ops_only"}}
+        },
+    }
+    assert not match_predicate(pred, ack, waiter_producer_id="codex")
+
+
 def test_build_resume_schema_and_idempotency_keys(tmp_path: Path):
     waits = WaitStore(tmp_path)
     wait = waits.create(
@@ -218,6 +255,26 @@ def test_await_cli_rejects_match_only(tmp_path: Path):
     )
     assert result.exit_code != 0
     assert result.exit_code != AWAIT_EXIT_CODE
+
+
+def test_await_cli_rejects_action_result_without_type(tmp_path: Path):
+    (tmp_path / ".agentbus").mkdir(parents=True, exist_ok=True)
+    result = CliRunner().invoke(
+        main,
+        [
+            "await",
+            "--workspace",
+            str(tmp_path),
+            "--event-id",
+            "412",
+            "--expect-from",
+            "factory",
+            "--action-result",
+            "green",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "requires --action-type" in result.output
 
 
 def test_suspend_via_await_drop_echo(tmp_path: Path):

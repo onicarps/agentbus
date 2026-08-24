@@ -25,6 +25,23 @@
 - Require CLI publishers to supply an explicit matching identity private-key
   handle instead of selecting credentials from caller-controlled `producer_id`.
 
+### Added — AgentID Phase 3
+
+- Add signed typed actions for QA verdict, Agy GO, merge, push, release, and
+  identity administration, with capability checks plus root-signed
+  producer/action separation-of-duties policy.
+- Add typed CLI/MCP publish and durable-wait fields so privileged automation no
+  longer derives authority from summary substrings; runner ACK remains
+  operations-only.
+- Make protected/strict mode ignore legacy auth/RBAC disable flags, token-role
+  elevation, and droid-proof-only QA authority; bind MCP publishing to its
+  supervised producer identity.
+- Converge Go event-store migrations with AgentID columns, scoped idempotency,
+  and identity replay tables, and require the verifying broker for restricted
+  Go publish/poll when AgentID is configured.
+- Extend TypeScript typed-action/JCS validation and `agentbus doctor` identity,
+  rollback, credential-scrub, reference-monitor, and strict-readiness checks.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added

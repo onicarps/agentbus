@@ -25,7 +25,10 @@ CURSOR_FILENAME = "_cursor.json"
 # Strict wait-id / agent-id grammar. Reject traversal, collisions, and reserved
 # internal names (anything beginning with "_", e.g. the cursor file).
 WAIT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+AGENT_ID_PATTERN = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}"
+    r"(?:/subagent/[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?$"
+)
 
 
 def validate_agent_id(value: str) -> str:
@@ -96,12 +99,15 @@ def new_wait_id() -> str:
 class WaitPredicate:
     """Predicate for matching bus events against a wait.
 
-    Primary keys: from_any + causation_id. summary_contains is secondary only.
+    Primary keys: from_any + causation_id. Typed signed action filters are
+    authoritative for privileged transitions; summary_contains is legacy UX.
     """
 
     causation_id: int | None = None
     from_any: list[str] = field(default_factory=list)
     summary_contains: str | None = None
+    action_type: str | None = None
+    action_result: str | None = None
     topic: str = "okf/handoff"
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,6 +115,8 @@ class WaitPredicate:
             "causation_id": self.causation_id,
             "from_any": list(self.from_any),
             "summary_contains": self.summary_contains,
+            "action_type": self.action_type,
+            "action_result": self.action_result,
             "topic": self.topic,
         }
 
@@ -128,6 +136,8 @@ class WaitPredicate:
             causation_id=causation_id,
             from_any=[str(x) for x in from_any if x],
             summary_contains=str(sc) if sc else None,
+            action_type=str(d.get("action_type") or "") or None,
+            action_result=str(d.get("action_result") or "") or None,
             topic=str(d.get("topic") or "okf/handoff"),
         )
 
@@ -278,6 +288,19 @@ def match_predicate(
     if pred.summary_contains:
         summary = str(payload.get("summary") or "")
         if pred.summary_contains not in summary:
+            return False
+
+    # Privileged automation matches only the verified signed action. Summary
+    # words such as "QA_VERDICT" or "GO" are never authority by themselves.
+    if pred.action_type:
+        if event.get("verification_status") != "verified":
+            return False
+        envelope = event.get("identity_envelope")
+        signed = envelope.get("signed") if isinstance(envelope, dict) else None
+        action = signed.get("action") if isinstance(signed, dict) else None
+        if not isinstance(action, dict) or action.get("type") != pred.action_type:
+            return False
+        if pred.action_result is not None and action.get("result") != pred.action_result:
             return False
 
     # Require at least one primary key for safety (no free-text-only waits)

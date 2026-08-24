@@ -44,6 +44,16 @@ def test_factory_droid_agent_id():
     assert payload["from"] == "factory_droid"
 
 
+def test_delegated_agent_id_can_send_and_receive():
+    child = "agy/subagent/review-42"
+    payload = validate_payload(
+        "okf/handoff",
+        {"from": child, "to": child, "summary": "bounded task"},
+    )
+    assert payload["from"] == child
+    assert payload["to"] == child
+
+
 def test_hermes_bad_payload_still_fails_without_summary():
     with pytest.raises(ValueError, match="invalid_payload"):
         validate_payload(

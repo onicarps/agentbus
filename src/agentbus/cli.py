@@ -361,6 +361,7 @@ def serve(
 @click.option("--producer-id", default=None)
 @click.option("--causation-id", type=int, default=None)
 @click.option("--idempotency-key", default=None)
+@click.option("--action", "action_json", default=None, help="Signed typed action JSON object")
 @click.option(
     "--sla-timeout-minutes",
     type=int,
@@ -398,6 +399,7 @@ def publish(
     producer_id: str | None,
     causation_id: int | None,
     idempotency_key: str | None,
+    action_json: str | None,
     sla_timeout_minutes: int | None,
     trace_id: str | None,
     parent_span_id: str | None,
@@ -415,6 +417,9 @@ def publish(
         payload = strict_json_loads(payload_json)
     else:
         raise click.ClickException("Provide --payload or --payload-file")
+    action = strict_json_loads(action_json) if action_json else None
+    if action is not None and not isinstance(action, dict):
+        raise click.ClickException("--action must be a JSON object")
 
     ws = _cli_workspace(workspace)
     _auth(ws, token)
@@ -446,6 +451,7 @@ def publish(
                 payload=payload,
                 causation_id=causation_id,
                 idempotency_key=idempotency_key,
+                action=action,
                 auth_token=token,
                 sla_timeout_minutes=sla_timeout_minutes,
                 trace_id=trace_id,
@@ -534,6 +540,7 @@ def publish_batch(
                     payload=payload,
                     causation_id=spec.get("causation_id"),
                     idempotency_key=spec.get("idempotency_key"),
+                    action=spec.get("action"),
                     auth_token=token,
                     sla_timeout_minutes=spec.get("sla_timeout_minutes"),
                     trace_id=spec.get("trace_id"),
@@ -1477,6 +1484,16 @@ def run_cmd(workspace: str | None, config_path: str, once: bool) -> None:
     help="Secondary filter: substring required in payload.summary.",
 )
 @click.option(
+    "--action-type",
+    default=None,
+    help="Require a verified signed typed action (for privileged gates).",
+)
+@click.option(
+    "--action-result",
+    default=None,
+    help="Require action.result (for example green or red).",
+)
+@click.option(
     "--topic",
     default="okf/handoff",
     show_default=True,
@@ -1529,6 +1546,8 @@ def await_cmd(
     expect_from: tuple[str, ...],
     causation_id: int | None,
     summary_contains: str | None,
+    action_type: str | None,
+    action_result: str | None,
     topic: str,
     timeout_hours: float,
     reason: str,
@@ -1564,6 +1583,8 @@ def await_cmd(
             "predicate requires --expect-from and/or --causation-id "
             "(summary --match alone is not allowed)"
         )
+    if action_result is not None and action_type is None:
+        raise click.ClickException("--action-result requires --action-type")
 
     hours = clamp_timeout_hours(timeout_hours)
     wid = wait_id or new_wait_id()
@@ -1581,6 +1602,8 @@ def await_cmd(
         "causation_id": causation_id,
         "from_any": from_any,
         "summary_contains": summary_contains,
+        "action_type": action_type,
+        "action_result": action_result,
         "topic": topic or "okf/handoff",
     }
     drop: dict = {
@@ -1595,6 +1618,8 @@ def await_cmd(
         "expect_from": from_any,
         "causation_id": causation_id,
         "match": summary_contains,
+        "action_type": action_type,
+        "action_result": action_result,
         "topic": topic,
     }
     path = write_await_drop(ws, int(event_id), drop)

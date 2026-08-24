@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS events (
   payload TEXT NOT NULL,
   causation_id INTEGER,
   idempotency_key TEXT UNIQUE,
+  scoped_idempotency_key TEXT,
   status TEXT NOT NULL DEFAULT 'PUBLISHED',
   pending_until TEXT,
   rejection_reason TEXT,
@@ -160,12 +161,87 @@ CREATE TABLE IF NOT EXISTS events (
   sla_cleared INTEGER NOT NULL DEFAULT 0,
   trace_id TEXT,
   span_id TEXT,
-  parent_span_id TEXT
+  parent_span_id TEXT,
+  identity_envelope TEXT,
+  verification_status TEXT NOT NULL DEFAULT 'legacy_unverified',
+  verification_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events(topic, event_id);
 CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id);
+CREATE TABLE IF NOT EXISTS schema_version (
+  component TEXT PRIMARY KEY,
+  version INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS identity_nonces (
+  key_id TEXT NOT NULL, nonce TEXT NOT NULL, timestamp TEXT NOT NULL,
+  event_id INTEGER, PRIMARY KEY (key_id, nonce)
+);
+CREATE TABLE IF NOT EXISTS identity_key_high_water (
+  key_id TEXT PRIMARY KEY, max_timestamp TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, event_id INTEGER NOT NULL,
+  type TEXT NOT NULL, name TEXT NOT NULL, content_blob TEXT NOT NULL,
+  sha256 TEXT, size_bytes INTEGER,
+  FOREIGN KEY (event_id) REFERENCES events(event_id)
+);
+`)
+	if err != nil {
+		return err
+	}
+	for name, ddl := range map[string]string{
+		"scoped_idempotency_key": "ALTER TABLE events ADD COLUMN scoped_idempotency_key TEXT",
+		"identity_envelope":      "ALTER TABLE events ADD COLUMN identity_envelope TEXT",
+		"verification_status":    "ALTER TABLE events ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'legacy_unverified'",
+		"verification_reason":    "ALTER TABLE events ADD COLUMN verification_reason TEXT",
+	} {
+		if err := s.ensureEventColumn(name, ddl); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_producer_idempotency
+  ON events(producer_id, scoped_idempotency_key)
+  WHERE scoped_idempotency_key IS NOT NULL;
+INSERT INTO schema_version(component, version) VALUES('event_store', 20)
+  ON CONFLICT(component) DO UPDATE SET version=MAX(version, 20);
 `)
 	return err
+}
+
+func (s *EventStore) ensureEventColumn(name, ddl string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(events)`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var column, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &column, &columnType, &notnull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if column == name {
+			return rows.Close()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ddl)
+	return err
+}
+
+func (s *EventStore) identityRestricted(topic string) bool {
+	root := filepath.Join(s.Workspace(), ".agentbus", "identity", "trust-root.json")
+	if _, err := os.Stat(root); err != nil {
+		return false
+	}
+	return topic == "okf/handoff" || topic == "okf/approval" || len(topic) >= 7 && topic[:7] == "system/"
 }
 
 func (s *EventStore) writerLoop() {
@@ -191,9 +267,13 @@ func (s *EventStore) writerLoop() {
 func (s *EventStore) handlePublish(req PublishRequest) {
 	res := PublishResult{}
 	defer func() { req.Result <- res }()
+	if s.identityRestricted(req.Topic) {
+		res.Err = fmt.Errorf("403 Forbidden: restricted topic requires AgentID broker")
+		return
+	}
 
 	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
-		existing, err := s.loadByIdempotency(*req.IdempotencyKey)
+		existing, err := s.loadByIdempotency(req.ProducerID, *req.IdempotencyKey)
 		if err != nil {
 			res.Err = err
 			return
@@ -236,8 +316,9 @@ func (s *EventStore) handlePublish(req PublishRequest) {
 	r, err := s.db.Exec(`
 INSERT INTO events (
   topic, producer_id, timestamp, schema_version, payload,
-  causation_id, idempotency_key, status, span_id, trace_id, parent_span_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  causation_id, idempotency_key, scoped_idempotency_key, status,
+  span_id, trace_id, parent_span_id
+) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
 		req.Topic, req.ProducerID, ts, sv, string(payloadJSON),
 		causation, idem, StatusPublished, span, trace, parent,
 	)
@@ -267,11 +348,15 @@ INSERT INTO events (
 	res.Event = ev
 }
 
-func (s *EventStore) loadByIdempotency(key string) (*Event, error) {
+func (s *EventStore) loadByIdempotency(producerID, key string) (*Event, error) {
 	row := s.db.QueryRow(`
 SELECT event_id, topic, producer_id, timestamp, schema_version, payload,
-       causation_id, idempotency_key, status, trace_id, span_id, parent_span_id
-FROM events WHERE idempotency_key = ?`, key)
+       causation_id, COALESCE(scoped_idempotency_key, idempotency_key), status,
+       trace_id, span_id, parent_span_id
+FROM events WHERE producer_id = ? AND (
+  scoped_idempotency_key = ? OR
+  (scoped_idempotency_key IS NULL AND idempotency_key = ?)
+) ORDER BY event_id DESC LIMIT 1`, producerID, key, key)
 	return scanEvent(row)
 }
 
@@ -297,6 +382,9 @@ func (s *EventStore) Publish(ctx context.Context, req PublishRequest) (Event, bo
 
 // Poll returns events after sinceID for topic (PUBLISHED only for MVP parity).
 func (s *EventStore) Poll(topic string, sinceID int64, limit int) (PollResult, error) {
+	if s.identityRestricted(topic) {
+		return PollResult{}, fmt.Errorf("403 Forbidden: restricted topic requires AgentID broker")
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -305,7 +393,8 @@ func (s *EventStore) Poll(topic string, sinceID int64, limit int) (PollResult, e
 	}
 	rows, err := s.db.Query(`
 SELECT event_id, topic, producer_id, timestamp, schema_version, payload,
-       causation_id, idempotency_key, status, trace_id, span_id, parent_span_id
+       causation_id, COALESCE(scoped_idempotency_key, idempotency_key), status,
+       trace_id, span_id, parent_span_id
 FROM events
 WHERE topic = ? AND event_id > ? AND status = ?
 ORDER BY event_id ASC

@@ -4,7 +4,20 @@ from __future__ import annotations
 
 import pytest
 
-from agentbus.rbac import ForbiddenError, ensure_default_roles, mint_droid_proof
+from agentbus.identity import (
+    IdentityError,
+    bootstrap_workspace_identity,
+    enroll_identity,
+    set_policy_mode,
+)
+from agentbus.rbac import (
+    ForbiddenError,
+    check_publish_rbac,
+    ensure_default_roles,
+    mint_droid_proof,
+    rbac_disabled,
+    resolve_role,
+)
 from agentbus.schemas import validate_payload
 from agentbus.store import EventStore
 
@@ -170,3 +183,66 @@ def test_rbac_disabled_env(tmp_path, monkeypatch):
         assert event.event_id == 1
     finally:
         s.close()
+
+
+def test_protected_mode_ignores_rbac_disable_and_token_roles(tmp_path, monkeypatch):
+    config = ensure_default_roles(tmp_path)
+    config.token_roles["qa-token"] = "qa"
+    from agentbus.rbac import save_rbac_config
+
+    save_rbac_config(tmp_path, config)
+    bootstrap_workspace_identity(tmp_path)
+    set_policy_mode(tmp_path, "protected")
+    monkeypatch.setenv("AGENTBUS_DISABLE_RBAC", "1")
+    assert rbac_disabled(tmp_path) is False
+    assert resolve_role(
+        tmp_path, producer_id="grok", auth_token="qa-token"
+    ) == "engineer"
+    with pytest.raises(ForbiddenError, match="blocked by pattern"):
+        check_publish_rbac(
+            tmp_path,
+            producer_id="grok",
+            topic="okf/handoff",
+            payload=_handoff("Self-reported PASS"),
+            auth_token="qa-token",
+        )
+
+
+def test_protected_qa_droid_requires_agentid_not_legacy_proof(tmp_path):
+    ensure_default_roles(tmp_path)
+    bootstrap_workspace_identity(tmp_path)
+    enroll_identity(
+        tmp_path,
+        "factory_droid",
+        capabilities=("message", "qa_verdict"),
+        topics=("okf/handoff",),
+    )
+    set_policy_mode(tmp_path, "protected")
+    proof = mint_droid_proof(tmp_path)["droid_proof"]
+    store = EventStore(tmp_path)
+    payload = validate_payload(
+        "okf/handoff",
+        {
+            "from": "factory_droid",
+            "to": "codex",
+            "summary": "GREEN",
+            "droid_proof": proof,
+        },
+    )
+    with pytest.raises(IdentityError, match="identity_verification_required"):
+        store.publish(
+            topic="okf/handoff",
+            producer_id="factory_droid",
+            schema_version="1.0",
+            payload=payload,
+            auto_sign=False,
+        )
+    event, _ = store.publish(
+        topic="okf/handoff",
+        producer_id="factory_droid",
+        schema_version="1.0",
+        payload=payload,
+        action={"type": "qa_verdict", "result": "green"},
+    )
+    assert event.verification_status == "verified"
+    store.close()

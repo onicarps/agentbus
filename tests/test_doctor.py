@@ -10,6 +10,7 @@ from agentbus.doctor import (
     DiagnosticCheck,
     check_database,
     check_isolated_publish_poll,
+    check_identity,
     check_mcp_stdio,
     check_process_state,
     check_rbac,
@@ -17,6 +18,7 @@ from agentbus.doctor import (
     check_workspace,
 )
 from agentbus.rbac import ensure_default_roles
+from agentbus.identity import bootstrap_workspace_identity, enroll_identity
 from agentbus.schema_registry import register_schema
 from agentbus.store import EventStore
 
@@ -40,6 +42,28 @@ def test_database_missing_is_honest_warning(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     assert check_database(workspace).status == "WARN"
+
+
+def test_identity_diagnostics_are_honest_about_shared_uid(tmp_path: Path) -> None:
+    unconfigured = check_identity(tmp_path)
+    assert unconfigured.status == "WARN"
+    assert unconfigured.details == {"configured": False, "strict_ready": False}
+    bootstrap_workspace_identity(tmp_path)
+    enroll_identity(tmp_path, "codex")
+    configured = check_identity(tmp_path)
+    assert configured.status == "WARN"
+    assert configured.details["configured"] is True
+    assert configured.details["child_credential_scrub"] is True
+    assert configured.details["strict_ready"] is False
+
+
+def test_identity_diagnostics_reject_tampered_registry(tmp_path: Path) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    registry = tmp_path / ".agentbus" / "identity" / "registry.json"
+    document = json.loads(registry.read_text(encoding="utf-8"))
+    document["signed"]["registry_version"] = "99"
+    registry.write_text(json.dumps(document), encoding="utf-8")
+    assert check_identity(tmp_path).status == "FAIL"
 
 
 def test_rbac_rejects_unknown_role_reference(tmp_path: Path) -> None:
