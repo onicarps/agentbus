@@ -119,6 +119,7 @@ The workspace trust-root private key is held offline by the human workspace owne
   - TypeScript: `canonicalize@4.0.0`, registry integrity `sha512-FEdXzwWs+N3rZqEqpqleiY9M1A6IAf9oo1zHFABnLW9FcJ/jzsu+G/Ks3Hq3FglmPKe80GeGBw8ZXLEnwPB0vQ==` (`@peculiar/json-canonicalize` is invalid).
   - Go: `github.com/cyberphone/json-canonicalization@v0.0.0-20241213102144-19d51d7fe467`.
 - **Crypto providers:** Python uses `cryptography==50.0.0` Ed25519 primitives; TypeScript uses Node's `crypto` Ed25519 API; Go uses standard-library `crypto/ed25519`. Release lockfiles and artifact metadata retain exact dependency hashes.
+- **Packaging impact:** `cryptography==50.0.0` introduces a native-wheel dependency to the Python package's previously crypto-free install graph, so the full supported wheel/platform matrix and source-install fallback are release gates. `canonicalize@4.0.0` is ESM-only while `@agentbus/agentbus-client` currently emits CommonJS; the client must either adopt an ESM-compatible import/build boundary or keep canonicalization out of the CommonJS runtime path. A failing `require("canonicalize")` is an explicit packaging regression test.
 - **64-bit Integer Domain:** All 64-bit identifiers (`event_id`, `causation_id`, microsecond timestamps) MUST be serialized as strings in the signed envelope object to prevent IEEE-754 double precision domain errors ($\ge 2^{53}$).
 - **Signed bytes:** Ed25519 signs `JCS(unsigned_envelope)` directly. The signature is not a member of `unsigned_envelope`; including it would create a recursive, undefined byte sequence. The transport object is `{ "signed": unsigned_envelope, "signature": "<unpadded base64url>" }`.
 - **Signed Object Format:**
@@ -200,7 +201,7 @@ Every row below represents an automated, reproducible test that MUST **fail clos
 | **N27** | Event signed by a revoked key ID present in Revocation Ledger | Key Revocation | Rejected immediately upon ledger lookup | `ABUS-020-003` |
 | **N28** | Event signed with rotated key after rotation grace window has expired | Key Rotation | Rejected | `ABUS-020-003` |
 | **N29** | Attempting break-glass recovery to retroactively verify historical events | Recovery Ledger | Rejected; break-glass events marked non-retroactive | `ABUS-020-008` |
-| **N30** | Signed payload containing duplicate JSON keys, lone surrogates, `NaN`/`Inf`, or non-NFC strings | JCS Serializer | Rejected prior to signing across Python, Go, and TS | `ABUS-020-002` |
+| **N30** | Signed payload containing duplicate JSON keys, lone surrogates, `NaN`/`Inf`, non-NFC strings, or an integer `>= 2^53` | JCS Serializer | Rejected prior to signing across Python, Go, and TS; Node must not silently round | `ABUS-020-002` |
 | **N31** | Cross-language test: Envelope signed in Python verified in Go and TypeScript | Cross-SDK Test | Byte-identical canonical form and verification PASS | `ABUS-020-002` |
 | **N32** | Forward migration of legacy v0.19 `events.db` into v0.20 schema | Schema Migration | History intact; legacy rows marked `legacy_unverified` | `ABUS-020-008` |
 
