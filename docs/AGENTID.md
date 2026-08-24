@@ -16,6 +16,24 @@ agentbus identity verify-event 42
 agentbus identity issue-wake-capability factory
 ```
 
+Staged promotion and recovery use explicit signed-policy operations:
+
+```bash
+# Stage 1: initialize/enroll and observe legacy_unverified rows in audit mode.
+agentbus identity mode protected
+
+# Stage 3 requires an externally established distinct-principal/container broker.
+agentbus identity reference-monitor isolated_broker --isolation-attested
+agentbus identity mode strict
+
+# Recovery is prospective and never upgrades historical rows.
+agentbus identity record-recovery --reason "rotate lost online signer"
+```
+
+`--isolation-attested` records operator acknowledgement in signed policy; it is
+not proof by itself. `agentbus doctor` continues to report
+`strict_ready=false` on a shared-UID host even when policy mode is strict.
+
 In an identity-configured workspace, CLI publishing on restricted topics
 requires `AGENTBUS_IDENTITY_PRIVATE_KEY` to name the caller's matching signing
 handle. Merely passing `--producer-id factory` never selects Factory's key.
@@ -75,6 +93,13 @@ is configured; those operations must go through the verifying broker.
 high-water rollback protection, identity database migrations, credential scrub,
 reference-monitor mode, and strict readiness. A normal shared-UID local setup
 honestly reports `strict_ready=false`.
+
+Opening a released v0.16.4, v0.18.0, or v0.19.0 database performs only additive
+schema migration. Existing event IDs, payload bytes, timestamps, causation, and
+idempotency values are preserved; unsigned history is labeled
+`legacy_unverified`. Root-signed recovery-ledger entries contain an
+`effective_after_event_id` boundary and `non_retroactive=true`, so break-glass
+operations cannot certify old events.
 
 On a host where mutually distrusting runtimes share one Unix UID, file permissions and same-UID sockets provide tamper evidence, not execution prevention. Strict readiness requires the reference monitor and peer runtimes to run under distinct OS principals or equivalently isolated containers. A software signature proves control of an enrolled execution boundary; it does not prove model vendor, model name, persona, or correctness.
 

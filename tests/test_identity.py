@@ -58,6 +58,10 @@ def test_strict_json_rejects_ambiguous_inputs() -> None:
         strict_json_loads('{"from":"codex","from":"agy"}')
     with pytest.raises(IdentityError, match="non_finite"):
         strict_json_loads('{"n": NaN}')
+    with pytest.raises(IdentityError, match="non_finite"):
+        strict_json_loads('{"n": Infinity}')
+    with pytest.raises(IdentityError, match="invalid_unicode_scalar"):
+        strict_json_loads('{"value": "\\ud800"}')
     with pytest.raises(IdentityError, match="non_nfc"):
         canonical_bytes({"value": "e\u0301"})
     with pytest.raises(IdentityError, match="unsafe_integer"):

@@ -782,6 +782,99 @@ def set_policy_mode(workspace: Path, mode: str) -> TrustState:
     return load_trust_state(workspace, update_high_water=True)
 
 
+def configure_reference_monitor(
+    workspace: Path,
+    monitor: str,
+    *,
+    isolation_attested: bool = False,
+) -> TrustState:
+    """Bind policy to a monitor class without claiming host strict readiness."""
+    if monitor not in {"local_audit", "isolated_broker"}:
+        raise IdentityError("invalid_reference_monitor")
+    state = load_trust_state(workspace, update_high_water=True)
+    if monitor == "isolated_broker" and not isolation_attested:
+        raise IdentityError("isolated_monitor_attestation_required")
+    if monitor == "local_audit" and state.mode == "strict":
+        raise IdentityError("strict_monitor_downgrade_refused")
+    root = _identity_dir(workspace)
+    private = _load_private(root / "private" / "workspace-root.pem")
+    policy = dict(state.policy)
+    policy["policy_version"] = str(state.policy_version + 1)
+    policy["reference_monitor"] = monitor
+    policy["isolation_attested"] = bool(isolation_attested)
+    _atomic_json(root / "policy.json", _signed_document(policy, private))
+    return load_trust_state(workspace, update_high_water=True)
+
+
+def load_recovery_ledger(workspace: Path) -> dict[str, Any]:
+    """Load and verify the root-signed, explicitly non-retroactive ledger."""
+    root = _identity_dir(workspace)
+    state = load_trust_state(workspace, update_high_water=False)
+    path = root / "recovery.json"
+    if not path.is_file():
+        ledger = {
+            "workspace_id": state.workspace_id,
+            "recovery_version": "0",
+            "events": [],
+        }
+    else:
+        trust = strict_json_loads((root / "trust-root.json").read_bytes())
+        public = Ed25519PublicKey.from_public_bytes(_unb64(trust["public_key"]))
+        ledger = _verify_document(
+            strict_json_loads(path.read_bytes()), public, "recovery"
+        )
+    if ledger.get("workspace_id") != state.workspace_id:
+        raise VerificationError("recovery_workspace_mismatch")
+    events = ledger.get("events")
+    if not isinstance(events, list) or any(
+        not isinstance(item, dict) or item.get("non_retroactive") is not True
+        for item in events
+    ):
+        raise VerificationError("invalid_recovery_ledger")
+    high_path = root / "recovery-high-water.json"
+    if high_path.is_file():
+        high = strict_json_loads(high_path.read_bytes())
+        if int(ledger["recovery_version"]) < int(high.get("recovery_version", 0)):
+            raise VerificationError("recovery_rollback")
+    return ledger
+
+
+def record_break_glass_recovery(
+    workspace: Path,
+    *,
+    reason: str,
+    effective_after_event_id: int,
+) -> dict[str, Any]:
+    """Record recovery prospectively; it can never attest historical rows."""
+    if not reason.strip() or effective_after_event_id < 0:
+        raise IdentityError("invalid_recovery_record")
+    root = _identity_dir(workspace)
+    state = load_trust_state(workspace, update_high_water=True)
+    current = load_recovery_ledger(workspace)
+    event = {
+        "recovery_id": secrets.token_hex(12),
+        "timestamp": datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
+        "reason": reason.strip(),
+        "effective_after_event_id": str(effective_after_event_id),
+        "non_retroactive": True,
+    }
+    ledger = {
+        "workspace_id": state.workspace_id,
+        "recovery_version": str(int(current["recovery_version"]) + 1),
+        "events": [*current["events"], event],
+    }
+    private = _load_private(root / "private" / "workspace-root.pem")
+    _atomic_json(root / "recovery.json", _signed_document(ledger, private))
+    _atomic_json(
+        root / "recovery-high-water.json",
+        {"recovery_version": int(ledger["recovery_version"])},
+        mode=0o600,
+    )
+    return event
+
+
 def issue_wake_capability(workspace: Path, runtime: str) -> Path:
     """Issue and policy-bind one runtime-specific wake capability."""
     if not runtime or any(

@@ -15,7 +15,7 @@ def test_project_metadata_pins_supported_mcp_major() -> None:
         "project"
     ]
 
-    assert project["version"] == "0.19.0"
+    assert project["version"] == "0.20.0"
     assert "mcp>=2,<3" in project["dependencies"]
 
 

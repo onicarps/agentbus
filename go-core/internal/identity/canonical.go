@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -21,6 +22,9 @@ var maxSafeInteger = big.NewInt(9007199254740991)
 // CanonicalizeJSON validates the shared AgentID JSON domain and returns RFC
 // 8785 bytes. Duplicate keys are rejected before object construction.
 func CanonicalizeJSON(raw []byte) ([]byte, error) {
+	if err := rejectUnpairedEscapedSurrogates(raw); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := parseValue(decoder, nil, "$", map[string]struct{}{}); err != nil {
@@ -37,6 +41,51 @@ func CanonicalizeJSON(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("jcs_error: %w", err)
 	}
 	return canonical, nil
+}
+
+func rejectUnpairedEscapedSurrogates(raw []byte) error {
+	inString := false
+	for i := 0; i < len(raw); {
+		if raw[i] == '"' {
+			inString = !inString
+			i++
+			continue
+		}
+		if !inString || raw[i] != '\\' {
+			i++
+			continue
+		}
+		if i+1 >= len(raw) {
+			return fmt.Errorf("invalid_json_escape")
+		}
+		if raw[i+1] != 'u' {
+			i += 2
+			continue
+		}
+		if i+6 > len(raw) {
+			return fmt.Errorf("invalid_unicode_escape")
+		}
+		unit, err := strconv.ParseUint(string(raw[i+2:i+6]), 16, 16)
+		if err != nil {
+			return fmt.Errorf("invalid_unicode_escape")
+		}
+		if unit >= 0xDC00 && unit <= 0xDFFF {
+			return fmt.Errorf("invalid_unicode_scalar")
+		}
+		if unit >= 0xD800 && unit <= 0xDBFF {
+			if i+12 > len(raw) || raw[i+6] != '\\' || raw[i+7] != 'u' {
+				return fmt.Errorf("invalid_unicode_scalar")
+			}
+			low, lowErr := strconv.ParseUint(string(raw[i+8:i+12]), 16, 16)
+			if lowErr != nil || low < 0xDC00 || low > 0xDFFF {
+				return fmt.Errorf("invalid_unicode_scalar")
+			}
+			i += 12
+			continue
+		}
+		i += 6
+	}
+	return nil
 }
 
 func parseValue(

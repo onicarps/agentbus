@@ -47,6 +47,9 @@ func TestRejectsAmbiguousInputs(t *testing.T) {
 		`{"from":"codex","from":"agy"}`,
 		`{"n":9007199254740993}`,
 		"{\"s\":\"e\u0301\"}",
+		`{"s":"\ud800"}`,
+		`{"n":NaN}`,
+		`{"n":Infinity}`,
 	}
 	for _, raw := range tests {
 		if _, err := CanonicalizeJSON([]byte(raw)); err == nil {

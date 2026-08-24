@@ -20,7 +20,11 @@ import yaml
 from jsonschema import Draft202012Validator
 
 from agentbus.bin_resolve import resolve_go_binary
-from agentbus.identity import configured as identity_configured, load_trust_state
+from agentbus.identity import (
+    configured as identity_configured,
+    load_recovery_ledger,
+    load_trust_state,
+)
 from agentbus.rbac import RbacConfig
 from agentbus.swarm import _pid_alive, state_path
 from agentbus.workspace_guard import diagnose_workspace
@@ -163,6 +167,7 @@ def check_identity(workspace: Path) -> DiagnosticCheck:
             if isinstance(item, dict) and item.get("state") == "active"
         )
         revoked = sorted(str(x) for x in state.registry.get("revoked_key_ids") or [])
+        recovery = load_recovery_ledger(workspace)
         from agentbus.runner.adapters.prompt_common import scrub_child_environment
 
         scrubbed = scrub_child_environment(
@@ -175,14 +180,14 @@ def check_identity(workspace: Path) -> DiagnosticCheck:
             }
         )
         child_scrub_ok = scrubbed == {"PATH": "/bin"}
-        same_uid = os.name != "nt" and hasattr(os, "geteuid")
+        same_uid = True if os.name != "nt" and hasattr(os, "geteuid") else None
         isolated_monitor = state.policy.get("reference_monitor") not in {
             None,
             "local_audit",
         }
-        strict_ready = bool(
-            state.mode == "strict" and isolated_monitor and not same_uid
-        )
+        # A policy assertion is not an isolation receipt. This local process
+        # cannot prove that the broker and peers run as distinct principals.
+        strict_ready = False
         details = {
             "configured": True,
             "workspace_id": state.workspace_id,
@@ -191,10 +196,17 @@ def check_identity(workspace: Path) -> DiagnosticCheck:
             "registry_version": state.registry_version,
             "active_key_ids": active,
             "revoked_key_ids": revoked,
+            "recovery_version": int(recovery["recovery_version"]),
+            "recovery_events": len(recovery["events"]),
             "child_credential_scrub": child_scrub_ok,
             "reference_monitor": state.policy.get("reference_monitor"),
             "same_uid_shared_host": same_uid,
             "strict_ready": strict_ready,
+            "strict_readiness_reason": (
+                "external_isolation_receipt_unavailable"
+                if isolated_monitor
+                else "isolated_reference_monitor_not_configured"
+            ),
         }
     except Exception as exc:
         return DiagnosticCheck(
@@ -212,7 +224,7 @@ def check_identity(workspace: Path) -> DiagnosticCheck:
         return DiagnosticCheck(
             "identity",
             "WARN",
-            "AgentID integrity is active; strict_ready=False on this shared-UID/local-monitor host",
+            "AgentID integrity is active; local doctor cannot prove distinct-principal broker isolation",
             details,
         )
     return DiagnosticCheck(

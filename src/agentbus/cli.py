@@ -27,10 +27,12 @@ from agentbus.intercepts import InterceptRule, add_rule, load_config
 from agentbus.identity import (
     IdentityError,
     bootstrap_workspace_identity,
+    configure_reference_monitor,
     delegate_identity,
     enroll_identity,
     issue_wake_capability,
     load_trust_state,
+    record_break_glass_recovery,
     revoke_identity_key,
     rotate_identity,
     set_policy_mode,
@@ -1821,6 +1823,59 @@ def identity_mode(mode: str, workspace: str | None) -> None:
             }
         )
     )
+
+
+@identity_group.command("reference-monitor")
+@click.argument("monitor", type=click.Choice(["local_audit", "isolated_broker"]))
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--isolation-attested",
+    is_flag=True,
+    help="Acknowledge an externally established distinct-principal/container boundary.",
+)
+def identity_reference_monitor(
+    monitor: str, workspace: str | None, isolation_attested: bool
+) -> None:
+    """Bind the signed policy to a monitor class; does not make doctor strict-ready."""
+    try:
+        state = configure_reference_monitor(
+            _cli_workspace(workspace),
+            monitor,
+            isolation_attested=isolation_attested,
+        )
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "reference_monitor": state.policy["reference_monitor"],
+                "policy_version": state.policy_version,
+                "strict_ready": False,
+            }
+        )
+    )
+
+
+@identity_group.command("record-recovery")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--reason", required=True)
+def identity_record_recovery(workspace: str | None, reason: str) -> None:
+    """Record a root-signed prospective break-glass recovery boundary."""
+    ws = _cli_workspace(workspace)
+    store = EventStore(ws, auto_prune=False)
+    try:
+        effective_after = store.latest_event_id()
+    finally:
+        store.close()
+    try:
+        event = record_break_glass_recovery(
+            ws,
+            reason=reason,
+            effective_after_event_id=effective_after,
+        )
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(event))
 
 
 @identity_group.command("rotate")

@@ -42,6 +42,19 @@
 - Extend TypeScript typed-action/JCS validation and `agentbus doctor` identity,
   rollback, credential-scrub, reference-monitor, and strict-readiness checks.
 
+### Added — AgentID Phase 4
+
+- Add released v0.16.4, v0.18.0, and v0.19.0 database-lineage fixtures proving
+  additive schema migration, byte-stable history, and permanent
+  `legacy_unverified` labeling for unsigned events.
+- Add signed reference-monitor configuration, monotonic
+  audit-to-protected-to-strict promotion, and root-signed prospective recovery
+  records that cannot retroactively attest historical rows.
+- Add an executable N1-N32 adversarial evidence matrix and exact July 2026
+  certification-substitution plus Grok/Hermes peer-impersonation fixtures.
+- Reject unpaired escaped UTF-16 surrogates at the Go canonicalization boundary
+  before JSON decoding can replace and erase the invalid scalar.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added
