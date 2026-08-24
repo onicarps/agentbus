@@ -11,6 +11,15 @@ from pathlib import Path
 
 from agentbus.artifacts import extract_artifacts
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
+from agentbus.identity import (
+    IdentityError,
+    VerificationResult,
+    configured as identity_configured,
+    load_trust_state,
+    sign_event_envelope,
+    topic_restricted,
+    verify_envelope,
+)
 from agentbus.mcpsafe import PolicyEnforcer
 from agentbus.rbac import check_approve_rbac, check_publish_rbac
 from agentbus.retry import (
@@ -20,7 +29,11 @@ from agentbus.retry import (
     is_transient_sqlite_error,
 )
 from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
-from agentbus.tracing import generate_span_id, normalize_parent_span_id, normalize_trace_id
+from agentbus.tracing import (
+    generate_span_id,
+    normalize_parent_span_id,
+    normalize_trace_id,
+)
 
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_PENDING = "PENDING_APPROVAL"
@@ -49,6 +62,9 @@ class Event:
     trace_id: str | None = None
     span_id: str | None = None
     parent_span_id: str | None = None
+    identity_envelope: dict | None = None
+    verification_status: str = "legacy_unverified"
+    verification_reason: str | None = None
 
     def to_dict(self) -> dict:
         data = {
@@ -78,6 +94,11 @@ class Event:
             data["span_id"] = self.span_id
         if self.parent_span_id:
             data["parent_span_id"] = self.parent_span_id
+        data["verification_status"] = self.verification_status
+        if self.identity_envelope:
+            data["identity_envelope"] = self.identity_envelope
+        if self.verification_reason:
+            data["verification_reason"] = self.verification_reason
         return data
 
 
@@ -124,6 +145,7 @@ class EventStore:
         Prefer a single MCP writer process; PRAGMAs only reduce lock storms.
         """
         self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA foreign_keys = ON")
         # Whitelist must match the docstring above.
         _JOURNAL_MODES = frozenset(
             {"WAL", "MEMORY", "DELETE", "TRUNCATE", "PERSIST", "OFF"}
@@ -149,6 +171,21 @@ class EventStore:
     def _init_schema(self) -> None:
         self._conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS identity_nonces (
+                key_id TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                event_id INTEGER,
+                PRIMARY KEY (key_id, nonce)
+            );
+            CREATE TABLE IF NOT EXISTS identity_key_high_water (
+                key_id TEXT PRIMARY KEY,
+                max_timestamp TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 topic TEXT NOT NULL,
@@ -167,6 +204,12 @@ class EventStore:
         self._migrate_sla_columns()
         self._migrate_trace_columns()
         self._migrate_artifacts_table()
+        self._migrate_identity_columns()
+        self._conn.execute(
+            "INSERT INTO schema_version(component, version) VALUES('event_store', 20) "
+            "ON CONFLICT(component) DO UPDATE SET version=MAX(version, 20)"
+        )
+        self._conn.commit()
 
     def _migrate_artifacts_table(self) -> None:
         self._conn.executescript(
@@ -181,6 +224,29 @@ class EventStore:
             );
             CREATE INDEX IF NOT EXISTS idx_artifacts_event_id ON artifacts(event_id);
             """
+        )
+        artifact_cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(artifacts)").fetchall()
+        }
+        if "sha256" not in artifact_cols:
+            self._conn.execute("ALTER TABLE artifacts ADD COLUMN sha256 TEXT")
+        if "size_bytes" not in artifact_cols:
+            self._conn.execute("ALTER TABLE artifacts ADD COLUMN size_bytes INTEGER")
+        self._conn.commit()
+
+    def _migrate_identity_columns(self) -> None:
+        self._add_column_if_missing(
+            "identity_envelope", "ALTER TABLE events ADD COLUMN identity_envelope TEXT"
+        )
+        self._add_column_if_missing(
+            "verification_status",
+            "ALTER TABLE events ADD COLUMN verification_status TEXT NOT NULL "
+            "DEFAULT 'legacy_unverified'",
+        )
+        self._add_column_if_missing(
+            "verification_reason",
+            "ALTER TABLE events ADD COLUMN verification_reason TEXT",
         )
         self._conn.commit()
 
@@ -201,8 +267,12 @@ class EventStore:
             raise
 
     def _migrate_trace_columns(self) -> None:
-        self._add_column_if_missing("trace_id", "ALTER TABLE events ADD COLUMN trace_id TEXT")
-        self._add_column_if_missing("span_id", "ALTER TABLE events ADD COLUMN span_id TEXT")
+        self._add_column_if_missing(
+            "trace_id", "ALTER TABLE events ADD COLUMN trace_id TEXT"
+        )
+        self._add_column_if_missing(
+            "span_id", "ALTER TABLE events ADD COLUMN span_id TEXT"
+        )
         self._add_column_if_missing(
             "parent_span_id", "ALTER TABLE events ADD COLUMN parent_span_id TEXT"
         )
@@ -256,6 +326,17 @@ class EventStore:
             return 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+        expired_ids = [
+            row[0]
+            for row in self._conn.execute(
+                "SELECT event_id FROM events WHERE timestamp < ?", (cutoff_str,)
+            ).fetchall()
+        ]
+        if expired_ids:
+            placeholders = ",".join("?" for _ in expired_ids)
+            self._conn.execute(
+                f"DELETE FROM artifacts WHERE event_id IN ({placeholders})", expired_ids
+            )
         cur = self._conn.execute(
             "DELETE FROM events WHERE timestamp < ?",
             (cutoff_str,),
@@ -338,9 +419,9 @@ class EventStore:
         self._conn.commit()
 
     def _sla_deadline_from_now(self, minutes: int) -> str:
-        return (
-            datetime.now(timezone.utc) + timedelta(minutes=minutes)
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
 
     def _find_recent_content_duplicate(
         self,
@@ -383,6 +464,7 @@ class EventStore:
         sla_timeout_minutes: int | None = None,
         trace_id: str | None = None,
         parent_span_id: str | None = None,
+        identity_envelope: dict | None = None,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
         if idempotency_key:
@@ -426,6 +508,53 @@ class EventStore:
         parent_span_id = normalize_parent_span_id(parent_span_id)
         span_id = generate_span_id()
 
+        verification_status = "legacy_unverified"
+        verification_reason: str | None = None
+        identity_state = None
+        if identity_configured(self.workspace):
+            identity_state = load_trust_state(self.workspace, update_high_water=True)
+            if identity_envelope is None:
+                try:
+                    identity_envelope = sign_event_envelope(
+                        self.workspace,
+                        topic=topic,
+                        producer_id=producer_id,
+                        schema_version=schema_version,
+                        payload=stored_payload,
+                        artifacts=artifacts,
+                        causation_id=causation_id,
+                        idempotency_key=idempotency_key,
+                        trace_id=trace_id,
+                    )
+                except IdentityError as exc:
+                    verification_reason = str(exc)
+            if identity_envelope is not None:
+                verification = verify_envelope(
+                    self.workspace,
+                    identity_envelope,
+                    stored_payload=stored_payload,
+                    artifacts=artifacts,
+                    expected_topic=topic,
+                    expected_producer=producer_id,
+                    expected_schema_version=schema_version,
+                    expected_causation_id=causation_id,
+                    expected_idempotency_key=idempotency_key,
+                    expected_trace_id=trace_id,
+                )
+                if verification.verified:
+                    verification_status = "verified"
+                    verification_reason = None
+                else:
+                    verification_reason = verification.reason
+            if (
+                identity_state.mode in {"protected", "strict"}
+                and topic_restricted(topic, identity_state)
+                and verification_status != "verified"
+            ):
+                raise IdentityError(
+                    f"identity_verification_required: {verification_reason or 'unsigned'}"
+                )
+
         event_status = status or STATUS_PUBLISHED
         event_pending_until = pending_until
 
@@ -434,9 +563,9 @@ class EventStore:
             if rule:
                 event_status = STATUS_PENDING
                 ttl = timedelta(minutes=rule.ttl_minutes or DEFAULT_TTL_MINUTES)
-                event_pending_until = (
-                    datetime.now(timezone.utc) + ttl
-                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                event_pending_until = (datetime.now(timezone.utc) + ttl).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
 
         sla_deadline = None
         if sla_timeout_minutes is not None and event_status == STATUS_PUBLISHED:
@@ -449,14 +578,38 @@ class EventStore:
         def _insert_commit() -> int:
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
+                identity_key_id = None
+                identity_nonce = None
+                identity_timestamp = None
+                if verification_status == "verified" and identity_envelope is not None:
+                    signed = identity_envelope["signed"]
+                    identity_key_id = str(signed["key_id"])
+                    identity_nonce = str(signed["nonce"])
+                    identity_timestamp = str(signed["timestamp"])
+                    high = self._conn.execute(
+                        "SELECT max_timestamp FROM identity_key_high_water "
+                        "WHERE key_id = ?",
+                        (identity_key_id,),
+                    ).fetchone()
+                    if high is not None and identity_timestamp < high["max_timestamp"]:
+                        raise IdentityError("event_timestamp_rollback")
+                    try:
+                        self._conn.execute(
+                            "INSERT INTO identity_nonces(key_id, nonce, timestamp) "
+                            "VALUES (?, ?, ?)",
+                            (identity_key_id, identity_nonce, identity_timestamp),
+                        )
+                    except sqlite3.IntegrityError as exc:
+                        raise IdentityError("identity_nonce_replay") from exc
                 cur = self._conn.execute(
                     """
                     INSERT INTO events
                         (topic, producer_id, timestamp, schema_version, payload,
                          causation_id, idempotency_key, status, pending_until,
                          sla_timeout_minutes, sla_deadline, sla_cleared,
-                         trace_id, span_id, parent_span_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                         trace_id, span_id, parent_span_id, identity_envelope,
+                         verification_status, verification_reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         topic,
@@ -473,13 +626,28 @@ class EventStore:
                         trace_id,
                         span_id,
                         parent_span_id,
+                        json.dumps(identity_envelope) if identity_envelope else None,
+                        verification_status,
+                        verification_reason,
                     ),
                 )
                 event_id = int(cur.lastrowid)
+                if identity_key_id is not None:
+                    self._conn.execute(
+                        "UPDATE identity_nonces SET event_id = ? "
+                        "WHERE key_id = ? AND nonce = ?",
+                        (event_id, identity_key_id, identity_nonce),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO identity_key_high_water(key_id, max_timestamp) "
+                        "VALUES (?, ?) ON CONFLICT(key_id) DO UPDATE SET "
+                        "max_timestamp=MAX(max_timestamp, excluded.max_timestamp)",
+                        (identity_key_id, identity_timestamp),
+                    )
                 self._save_artifacts(event_id, artifacts)
                 self._conn.commit()
                 return event_id
-            except sqlite3.OperationalError:
+            except (sqlite3.OperationalError, IdentityError):
                 try:
                     self._conn.rollback()
                 except sqlite3.Error:
@@ -511,13 +679,24 @@ class EventStore:
         return self._hydrate_event(event), False
 
     def _save_artifacts(self, event_id: int, artifacts: list[dict]) -> None:
+        import hashlib
+
         for art in artifacts:
+            raw = art["content"].encode("utf-8")
             self._conn.execute(
                 """
-                INSERT INTO artifacts (event_id, type, name, content_blob)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO artifacts
+                    (event_id, type, name, content_blob, sha256, size_bytes)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (event_id, art["type"], art["name"], art["content"]),
+                (
+                    event_id,
+                    art["type"],
+                    art["name"],
+                    art["content"],
+                    hashlib.sha256(raw).hexdigest(),
+                    len(raw),
+                ),
             )
 
     def _fetch_artifacts(self, event_ids: list[int]) -> dict[int, list[dict]]:
@@ -624,6 +803,40 @@ class EventStore:
         if not row:
             return None
         return self._row_to_event(row)
+
+    def verify_event(self, event_id: int) -> VerificationResult:
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE event_id = ?", (event_id,)
+        ).fetchone()
+        if row is None:
+            return VerificationResult(False, None, None, None, "event_not_found")
+        event = self._row_to_event(row)
+        if not event.identity_envelope:
+            return VerificationResult(False, None, None, None, "legacy_unverified")
+        artifacts = self._fetch_artifacts([event_id]).get(event_id, [])
+        return verify_envelope(
+            self.workspace,
+            event.identity_envelope,
+            stored_payload=event.payload,
+            artifacts=artifacts,
+            expected_topic=event.topic,
+            expected_producer=event.producer_id,
+            expected_schema_version=event.schema_version,
+            expected_causation_id=event.causation_id,
+            expected_idempotency_key=event.idempotency_key,
+            expected_trace_id=event.trace_id,
+        )
+
+    def get_verified_event(
+        self, event_id: int
+    ) -> tuple[Event | None, VerificationResult]:
+        event = self.get_event(event_id)
+        result = self.verify_event(event_id)
+        if event is not None:
+            event.verification_status = "verified" if result.verified else "unverified"
+            event.verification_reason = result.reason
+            event = self._hydrate_event(event)
+        return event, result
 
     def approve_event(
         self,
@@ -792,7 +1005,9 @@ class EventStore:
         self.expire_pending()
         self.expire_sla_breaches()
         count = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
-        latest = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()["m"]
+        latest = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()[
+            "m"
+        ]
         pending = self._conn.execute(
             "SELECT COUNT(*) AS c FROM events WHERE status = ?",
             (STATUS_PENDING,),
@@ -849,7 +1064,9 @@ class EventStore:
             idempotency_key=row["idempotency_key"],
             status=row["status"] if "status" in keys else STATUS_PUBLISHED,
             pending_until=row["pending_until"] if "pending_until" in keys else None,
-            rejection_reason=row["rejection_reason"] if "rejection_reason" in keys else None,
+            rejection_reason=row["rejection_reason"]
+            if "rejection_reason" in keys
+            else None,
             sla_timeout_minutes=(
                 row["sla_timeout_minutes"] if "sla_timeout_minutes" in keys else None
             ),
@@ -858,4 +1075,17 @@ class EventStore:
             trace_id=row["trace_id"] if "trace_id" in keys else None,
             span_id=row["span_id"] if "span_id" in keys else None,
             parent_span_id=row["parent_span_id"] if "parent_span_id" in keys else None,
+            identity_envelope=(
+                json.loads(row["identity_envelope"])
+                if "identity_envelope" in keys and row["identity_envelope"]
+                else None
+            ),
+            verification_status=(
+                row["verification_status"]
+                if "verification_status" in keys and row["verification_status"]
+                else "legacy_unverified"
+            ),
+            verification_reason=(
+                row["verification_reason"] if "verification_reason" in keys else None
+            ),
         )

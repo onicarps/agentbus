@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -18,6 +19,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from agentbus.workspace_guard import assert_workspace_supported
+from agentbus.identity import (
+    configured as identity_configured,
+    load_trust_state,
+    verify_wake_capability,
+)
+from agentbus.store import EventStore
 
 log = logging.getLogger("agentbus.wake_ingress")
 
@@ -138,18 +145,23 @@ class WakeIngressHandler(BaseHTTPRequestHandler):
             self._json(403, {"ok": False, "error": "loopback_only"})
             return
 
+        if self.server.protected and not self.server.token:
+            self._json(503, {"ok": False, "error": "runtime_capability_required"})
+            return
         if self.server.token:
             got = self.headers.get("X-AgentBus-Token") or ""
             auth = self.headers.get("Authorization") or ""
             if auth.lower().startswith("bearer "):
                 got = auth[7:].strip() or got
-            if got != self.server.token:
+            if not secrets.compare_digest(got, self.server.token):
                 self._json(401, {"ok": False, "error": "unauthorized"})
                 return
 
         length = int(self.headers.get("Content-Length") or "0")
         if length <= 0 or length > MAX_BODY:
-            self._json(413 if length > MAX_BODY else 400, {"ok": False, "error": "bad_body"})
+            self._json(
+                413 if length > MAX_BODY else 400, {"ok": False, "error": "bad_body"}
+            )
             return
         raw = self.rfile.read(length)
         try:
@@ -169,7 +181,26 @@ class WakeIngressHandler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "missing_event_id"})
             return
 
-        payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+        if self.server.protected:
+            event, verification = self.server.event_store.get_verified_event(event_id)
+            if event is None:
+                self._json(404, {"ok": False, "error": "event_not_found"})
+                return
+            if not verification.verified:
+                self._json(
+                    403,
+                    {
+                        "ok": False,
+                        "error": "event_unverified",
+                        "reason": verification.reason,
+                    },
+                )
+                return
+            envelope = event.to_dict()
+
+        payload = (
+            envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+        )
         record = {
             "received_at": _utc_now(),
             "event_id": event_id,
@@ -204,6 +235,21 @@ class WakeIngressServer(ThreadingHTTPServer):
         self.runtime = runtime
         self.token = token or ""
         self.store = IngressStore(workspace, runtime)
+        state = load_trust_state(workspace) if identity_configured(workspace) else None
+        self.protected = state is not None and state.mode in {"protected", "strict"}
+        if self.protected and (
+            state is None or not verify_wake_capability(state, runtime, self.token)
+        ):
+            self.store.close()
+            super().server_close()
+            raise ValueError(
+                f"invalid or unregistered runtime capability for {runtime!r}"
+            )
+        self.event_store = EventStore(workspace, auto_prune=False)
+
+    def server_close(self) -> None:
+        self.event_store.close()
+        super().server_close()
 
 
 def run_ingress(
@@ -225,6 +271,13 @@ def run_ingress(
         log.warning(
             "wake-ingress binding %s — prefer 127.0.0.1 (WEBHOOK_SPEC_GO)",
             host,
+        )
+    state = load_trust_state(workspace) if identity_configured(workspace) else None
+    protected = state is not None and state.mode in {"protected", "strict"}
+    if protected and not token:
+        raise ValueError(
+            "runtime capability required in protected/strict identity mode; "
+            "pass --token or AGENTBUS_WEBHOOK_TOKEN"
         )
     if not token:
         log.warning(

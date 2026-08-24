@@ -1,0 +1,37 @@
+{
+  "seed": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "public_key": "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ",
+  "canonical_sha256": "4329ef0a9b0d985064f74013e2e0291e0ed859083f719796c84eb0b384a62c7d",
+  "envelope": {
+    "signed": {
+      "envelope_version": "1",
+      "workspace_id": "0123456789abcdef0123456789abcdef",
+      "topic": "okf/handoff",
+      "producer_id": "codex",
+      "key_id": "codex-fixture-v1",
+      "policy_version": "7",
+      "registry_version": "12",
+      "schema_version": "1.0",
+      "nonce": "00112233445566778899aabbccddeeff",
+      "timestamp": "2026-08-25T00:00:00.000000Z",
+      "causation_id": "7524",
+      "idempotency_key": "fixture:7524",
+      "trace_id": "trace-fixture",
+      "action": {"type": "message"},
+      "payload": {
+        "from": "codex",
+        "summary": "AgentID cross-language fixture",
+        "to": "factory"
+      },
+      "artifact_digests": [
+        {
+          "name": "proof.txt",
+          "sha256": "f9d0742a1e5358206c6143e4e25fb5cc920c2f457923bae3a8d29ff25c864304",
+          "size": "10",
+          "type": "file_content"
+        }
+      ]
+    },
+    "signature": "GopOOWWBouirdn3IaOk4WXODRV_6B4yC_W-sqaUU6UGBu28irLt4CYT1KKW0ZYmfIxXjc8bAc0paUgUkrzq-CA"
+  }
+}

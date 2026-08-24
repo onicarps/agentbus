@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
+from agentbus.identity import configured as identity_configured, load_trust_state
 from agentbus.runner.types import WakeEnvelope
+
+if TYPE_CHECKING:
+    from agentbus.store import EventStore
 
 
 def load_done_ids(path: Path) -> set[int]:
@@ -52,7 +56,9 @@ def envelope_from_queue_record(rec: dict[str, Any]) -> WakeEnvelope | None:
     raw_wake = rec.get("raw") if isinstance(rec.get("raw"), dict) else {}
     payload = rec.get("payload")
     if not isinstance(payload, dict):
-        payload = raw_wake.get("payload") if isinstance(raw_wake.get("payload"), dict) else {}
+        payload = (
+            raw_wake.get("payload") if isinstance(raw_wake.get("payload"), dict) else {}
+        )
     if not isinstance(payload, dict):
         payload = {}
 
@@ -151,3 +157,42 @@ def read_wake_file(path: Path, done: set[int]) -> WakeEnvelope | None:
     if env is None or env.event_id in done:
         return None
     return env
+
+
+def rehydrate_wake(
+    workspace: Path,
+    store: "EventStore",
+    candidate: WakeEnvelope,
+) -> WakeEnvelope | None:
+    """Replace caller-controlled wake content with the persisted event.
+
+    Audit mode preserves legacy synthetic wakes for migration compatibility.
+    Protected and strict modes fail closed unless the event exists and its
+    AgentID envelope verifies from untrusted storage.
+    """
+    state = load_trust_state(workspace) if identity_configured(workspace) else None
+    protected = state is not None and state.mode in {"protected", "strict"}
+    event, verification = store.get_verified_event(candidate.event_id)
+    if event is None:
+        if protected:
+            return None
+        candidate.verification_reason = "legacy_synthetic_wake"
+        return candidate
+    if protected and not verification.verified:
+        return None
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    frm, to, summary = _payload_fields(payload)
+    return WakeEnvelope(
+        event_id=event.event_id,
+        topic=event.topic,
+        from_agent=frm or event.producer_id,
+        to=to,
+        summary=summary,
+        payload=payload,
+        source=f"{candidate.source}:store",
+        raw={"wake": candidate.raw, "event": event.to_dict()},
+        causation_id=event.causation_id,
+        trace_id=event.trace_id,
+        identity_verified=verification.verified,
+        verification_reason=verification.reason,
+    )

@@ -27,6 +27,8 @@ dependencies = [
     "jsonschema>=4.0",
     "click>=8.0",
     "PyYAML>=6.0",
+    "rfc8785==0.1.4",
+    "cryptography==50.0.0",
 ]
 
 [project.optional-dependencies]

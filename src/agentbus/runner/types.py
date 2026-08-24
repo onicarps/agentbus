@@ -26,6 +26,8 @@ class WakeEnvelope:
     raw: dict[str, Any] = field(default_factory=dict)
     causation_id: int | None = None
     trace_id: str | None = None
+    identity_verified: bool = False
+    verification_reason: str | None = None
 
 
 @dataclass

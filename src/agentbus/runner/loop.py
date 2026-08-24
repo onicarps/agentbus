@@ -25,8 +25,14 @@ from agentbus.runner.intake import (
     iter_queue_envelopes,
     load_done_ids,
     read_wake_file,
+    rehydrate_wake,
 )
-from agentbus.runner.types import AWAIT_EXIT_CODE, BROADCAST_TO, TurnResult, WakeEnvelope
+from agentbus.runner.types import (
+    AWAIT_EXIT_CODE,
+    BROADCAST_TO,
+    TurnResult,
+    WakeEnvelope,
+)
 from agentbus.runner.wait_store import (
     load_await_drop,
     suspend_ack_idempotency_key,
@@ -76,8 +82,7 @@ def _intake_hint(cfg: RunnerConfig) -> dict[str, Any]:
         "mode": cfg.intake.mode,
         "runtime": cfg.intake.runtime,
         "queue_path": cfg.intake.queue_path,
-        "wake_file": cfg.intake.wake_file
-        or f".agentbus/WAKE.{cfg.producer_id}.json",
+        "wake_file": cfg.intake.wake_file or f".agentbus/WAKE.{cfg.producer_id}.json",
     }
 
 
@@ -229,9 +234,8 @@ def detect_suspend(
         wait_id = str(drop.get("wait_id") or "")
     summary = result.summary or ""
     if not summary.startswith("RUNNER_SUSPEND:"):
-        summary = (
-            f"RUNNER_SUSPEND: event_id={wake.event_id}"
-            + (f" wait_id={wait_id}" if wait_id else "")
+        summary = f"RUNNER_SUSPEND: event_id={wake.event_id}" + (
+            f" wait_id={wait_id}" if wait_id else ""
         )
     detail = dict(result.detail or {})
     detail["status"] = "suspended"
@@ -518,15 +522,21 @@ def process_envelope(
 
 
 def collect_pending(
-    workspace: Path, cfg: RunnerConfig, done: set[int]
+    workspace: Path, cfg: RunnerConfig, done: set[int], store: EventStore
 ) -> list[WakeEnvelope]:
     if cfg.intake.mode == "webhook_queue":
         q = _queue_path(workspace, cfg)
-        return list(iter_queue_envelopes(q, done))
-    if cfg.intake.mode == "wake_file":
+        candidates = list(iter_queue_envelopes(q, done))
+    elif cfg.intake.mode == "wake_file":
         env = read_wake_file(_wake_file_path(workspace, cfg), done)
-        return [env] if env else []
-    raise ValueError(f"unsupported intake mode {cfg.intake.mode}")
+        candidates = [env] if env else []
+    else:
+        raise ValueError(f"unsupported intake mode {cfg.intake.mode}")
+    return [
+        hydrated
+        for candidate in candidates
+        if (hydrated := rehydrate_wake(workspace, store, candidate)) is not None
+    ]
 
 
 def run_once(workspace: Path, cfg: RunnerConfig) -> list[dict[str, Any]]:
@@ -540,10 +550,10 @@ def run_once(workspace: Path, cfg: RunnerConfig) -> list[dict[str, Any]]:
         runner_state_path(workspace, cfg.runner_id),
         cfg.budget.max_turns_per_chain,
     )
-    pending = collect_pending(workspace, cfg, done)
     results: list[dict[str, Any]] = []
     store = EventStore(workspace)
     try:
+        pending = collect_pending(workspace, cfg, done, store)
         for wake in pending:
             results.append(
                 process_envelope(
@@ -567,7 +577,9 @@ def run_once(workspace: Path, cfg: RunnerConfig) -> list[dict[str, Any]]:
 
 def run_loop(workspace: Path, cfg: RunnerConfig, *, once: bool = False) -> int:
     """Run until interrupted, or a single drain if once=True. Return exit code."""
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+    )
     if once:
         results = run_once(workspace, cfg)
         log.info("run --once processed=%s", len(results))

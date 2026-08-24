@@ -8,6 +8,12 @@ export { getDatabasePath } from "./locator";
 export { DatabaseWatcher } from "./watcher";
 export { createStdioMcpClient } from "./stdio";
 export {
+  agentIdCanonicalSha256,
+  canonicalizeAgentId,
+  validateAgentIdValue,
+  verifyAgentIdSignature,
+} from "./identity";
+export {
   platformKey,
   optionalPackageName,
   resolveGoWorkerPath,

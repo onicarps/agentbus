@@ -159,6 +159,8 @@ agentbus down
 
 ## Documentation
 
+- [AgentID security model and identity CLI](docs/AGENTID.md)
+
 For full architectural documentation, see the `docs/` directory.
 
 - [Roadmap](ROADMAP.md)

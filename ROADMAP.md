@@ -1,12 +1,26 @@
 # AgentBus Roadmap
 
-**Current release:** v0.18.0 (August 2026)
+**Current release:** v0.19.0 (August 2026)
 
-**Next proposed milestone:** v0.19 — Product Hardening and Durable Consumers
+**Next milestone:** v0.20 — AgentID cryptographic identity and anti-impersonation
 
-The detailed cross-machine implementation handoff is:
+The v0.20 security contract is:
 
-- [AgentBus v0.19 Product Plan and Swarm Handoff](docs/plans/2026-08-15-agentbus-v0.19-handoff.md)
+- [AgentID security model](docs/AGENTID.md)
+- [AgentID trust-boundary ADR](docs/adr/2026-08-25-agentid-trust-boundaries.md)
+
+## v0.20 AgentID
+
+- [x] `ABUS-020-001`: independent threat model and trust-boundary ADR (Factory GREEN)
+- [x] `ABUS-020-002`: canonical Ed25519/RFC 8785 envelope and cross-language fixtures
+- [x] `ABUS-020-003`: signed policy/registry lifecycle, rotation, revocation, nonce and clock state
+- [x] `ABUS-020-010`: protected store-backed wake rehydration and policy-bound ingress capability
+- [ ] `ABUS-020-004`: signer isolation and bounded child delegation
+- [ ] `ABUS-020-005`: mandatory verify-at-read and producer-scoped deduplication
+- [ ] `ABUS-020-006`: typed privileged actions and separation of duties
+- [ ] `ABUS-020-007`: complete SDK/doctor integration and strict readiness diagnostics
+- [ ] `ABUS-020-008`: released-fixture migration and staged rollout
+- [ ] `ABUS-020-009`: full 32-case adversarial suite plus exact July incident fixtures
 
 ## Shipped
 

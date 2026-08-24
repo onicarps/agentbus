@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added — AgentID Phase 1
+
+- Add root-signed workspace identity policy and public-key registry with Ed25519 enrollment, rotation, immediate revocation, monotonic policy/registry high-water checks, and runtime-specific wake capabilities.
+- Add RFC 8785 signed event envelopes that bind the stored payload and ordered artifact digests, plus nonce and signer-clock replay state.
+- Add byte-identical Python, TypeScript, and Go canonicalization/signature fixtures with explicit rejection of duplicate keys, non-NFC text, non-finite numbers, lone surrogates, and unsafe numeric integers.
+- Rehydrate protected wake notifications from the event store and recompute AgentID verification before runner execution; reject synthetic or tampered event IDs and caller-controlled wake bodies.
+- Add `agentbus identity` lifecycle and verification commands and an honest audit/shared-UID security guide.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added

@@ -24,6 +24,17 @@ from agentbus.devex import (
     run_monitor,
 )
 from agentbus.intercepts import InterceptRule, add_rule, load_config
+from agentbus.identity import (
+    IdentityError,
+    bootstrap_workspace_identity,
+    enroll_identity,
+    issue_wake_capability,
+    load_trust_state,
+    revoke_identity_key,
+    rotate_identity,
+    set_policy_mode,
+    strict_json_loads,
+)
 from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
 from agentbus.mcpsafe import AccessDeniedError
 from agentbus.rbac import ForbiddenError, ensure_default_roles, mint_droid_proof
@@ -45,6 +56,7 @@ from agentbus.swarm import (
     tail_service_logs,
     write_example_swarm,
 )
+
 
 def _cli_workspace(workspace: str | None) -> Path:
     from agentbus.workspace_guard import assert_workspace_supported
@@ -281,7 +293,9 @@ def mcp_serve(
     help="Regenerate workspace token on startup",
 )
 @click.option("--wiretap", is_flag=True, help="God View wiretap (system/mcp events)")
-@click.option("--wiretap-log", type=click.Path(dir_okay=False, path_type=str), default=None)
+@click.option(
+    "--wiretap-log", type=click.Path(dir_okay=False, path_type=str), default=None
+)
 @click.option(
     "--enable-mcpsafe",
     is_flag=True,
@@ -333,7 +347,9 @@ def serve(
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", required=True)
 @click.option("--payload", "payload_json", default=None, help="JSON object string")
-@click.option("--payload-file", type=click.Path(exists=True, dir_okay=False), default=None)
+@click.option(
+    "--payload-file", type=click.Path(exists=True, dir_okay=False), default=None
+)
 @click.option(
     "--attach",
     multiple=True,
@@ -350,9 +366,13 @@ def serve(
     default=None,
     help="SLA window; auto-escalate to okf/dead-letter if no causation_id reply",
 )
-@click.option("--trace-id", default=None, help="Distributed trace ID (W3C-style lineage)")
+@click.option(
+    "--trace-id", default=None, help="Distributed trace ID (W3C-style lineage)"
+)
 @click.option("--parent-span-id", default=None, help="Parent span for trace waterfall")
-@click.option("--token", default=None, help="Publish auth token (default: workspace file)")
+@click.option(
+    "--token", default=None, help="Publish auth token (default: workspace file)"
+)
 @click.option("--retention-days", default=7, show_default=True)
 @click.option(
     "--enable-mcpsafe",
@@ -389,9 +409,9 @@ def publish(
     from agentbus.mcpsafe import load_enforcer, mcpsafe_enabled_from_env
 
     if payload_file:
-        payload = json.loads(Path(payload_file).read_text(encoding="utf-8"))
+        payload = strict_json_loads(Path(payload_file).read_bytes())
     elif payload_json:
-        payload = json.loads(payload_json)
+        payload = strict_json_loads(payload_json)
     else:
         raise click.ClickException("Provide --payload or --payload-file")
 
@@ -430,7 +450,12 @@ def publish(
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
             )
-        except (ForbiddenError, PayloadTooLargeError, AccessDeniedError) as exc:
+        except (
+            ForbiddenError,
+            PayloadTooLargeError,
+            AccessDeniedError,
+            IdentityError,
+        ) as exc:
             raise click.ClickException(str(exc)) from exc
         out = {
             "event_id": event.event_id,
@@ -473,7 +498,9 @@ def publish_batch(
     store = _open_store(workspace, retention_days)
     results: list[dict] = []
     try:
-        for line_no, line in enumerate(Path(batch_file).read_text(encoding="utf-8").splitlines(), 1):
+        for line_no, line in enumerate(
+            Path(batch_file).read_text(encoding="utf-8").splitlines(), 1
+        ):
             if not line.strip():
                 continue
             try:
@@ -483,7 +510,9 @@ def publish_batch(
             topic = spec.get("topic")
             payload = spec.get("payload")
             if not topic or not isinstance(payload, dict):
-                raise click.ClickException(f"line {line_no}: require topic and payload object")
+                raise click.ClickException(
+                    f"line {line_no}: require topic and payload object"
+                )
             payload = validate_payload(
                 topic,
                 payload,
@@ -661,7 +690,9 @@ def lock_renew(
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
-        click.echo(json.dumps(store.lock_renew(resource, lease_id, owner_id, ttl_seconds)))
+        click.echo(
+            json.dumps(store.lock_renew(resource, lease_id, owner_id, ttl_seconds))
+        )
     finally:
         store.close()
 
@@ -701,9 +732,7 @@ def project_log(
     log_path = ws / log_file
     store = _open_store(workspace, retention_days)
     try:
-        result = project_handoffs(
-            store, ws, log_path, dry_run=dry_run, reset=reset
-        )
+        result = project_handoffs(store, ws, log_path, dry_run=dry_run, reset=reset)
         click.echo(json.dumps({k: v for k, v in result.items() if k != "lines"}))
         if dry_run and result["lines"]:
             click.echo("---")
@@ -745,9 +774,7 @@ def token_ensure(workspace: str, quiet: bool) -> None:
         click.echo(value)
     else:
         click.echo(
-            json.dumps(
-                {"path": str(token_path(ws)), "token": value, "created": True}
-            )
+            json.dumps({"path": str(token_path(ws)), "token": value, "created": True})
         )
 
 
@@ -762,17 +789,21 @@ def token_rotate(workspace: str, quiet: bool) -> None:
         click.echo(value)
     else:
         click.echo(
-            json.dumps(
-                {"path": str(token_path(ws)), "token": value, "rotated": True}
-            )
+            json.dumps({"path": str(token_path(ws)), "token": value, "rotated": True})
         )
 
 
 @main.command()
-@click.option("--workspace", default=None, help="Workspace root (default: git root or cwd)")
+@click.option(
+    "--workspace", default=None, help="Workspace root (default: git root or cwd)"
+)
 @click.option("--producer-id", default=None, help="MCP producer id for this client")
-@click.option("--apply", is_flag=True, help="Write MCP config updates (default: dry-run)")
-@click.option("--client", "clients", multiple=True, help="Limit to client id (repeatable)")
+@click.option(
+    "--apply", is_flag=True, help="Write MCP config updates (default: dry-run)"
+)
+@click.option(
+    "--client", "clients", multiple=True, help="Limit to client id (repeatable)"
+)
 def init(
     workspace: str | None,
     producer_id: str | None,
@@ -795,7 +826,9 @@ def init(
 
 
 @main.command()
-@click.option("--workspace", default=None, help="Workspace root (default: git root or cwd)")
+@click.option(
+    "--workspace", default=None, help="Workspace root (default: git root or cwd)"
+)
 @click.option("--topic", default=None, help="Filter by topic")
 @click.option("--interval", default=1.0, show_default=True, help="Refresh seconds")
 @click.option("--once", is_flag=True, help="Print snapshot and exit")
@@ -841,7 +874,14 @@ def config_set_intercept(
     ws = _cli_workspace(workspace)
     rule = InterceptRule(topic=topic, contains=contains, ttl_minutes=ttl_minutes)
     config_data = add_rule(ws, rule)
-    click.echo(json.dumps({"path": str(ws / ".agentbus" / "intercepts.json"), "rules": config_data.to_dict()["rules"]}))
+    click.echo(
+        json.dumps(
+            {
+                "path": str(ws / ".agentbus" / "intercepts.json"),
+                "rules": config_data.to_dict()["rules"],
+            }
+        )
+    )
 
 
 @config.command("list-intercepts")
@@ -881,7 +921,9 @@ def droid() -> None:
 def droid_mint(workspace: str, mission_id: str | None, ttl_minutes: int) -> None:
     """Mint a short-lived droid_proof for qa_droid role publishes."""
     ws = _cli_workspace(workspace)
-    click.echo(json.dumps(mint_droid_proof(ws, mission_id=mission_id, ttl_minutes=ttl_minutes)))
+    click.echo(
+        json.dumps(mint_droid_proof(ws, mission_id=mission_id, ttl_minutes=ttl_minutes))
+    )
 
 
 @main.command()
@@ -938,7 +980,9 @@ def reject(
         rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "human")
         click.echo(
             json.dumps(
-                store.reject_event(event_id, reviewer_id=rid, reason=reason, auth_token=None)
+                store.reject_event(
+                    event_id, reviewer_id=rid, reason=reason, auth_token=None
+                )
             )
         )
     except (ValueError, ForbiddenError) as exc:
@@ -966,7 +1010,9 @@ def schema_import(file: Path, workspace: str) -> None:
 @schema.command("register")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--topic", required=True)
-@click.option("--schema-file", type=click.Path(exists=True, dir_okay=False), required=True)
+@click.option(
+    "--schema-file", type=click.Path(exists=True, dir_okay=False), required=True
+)
 @click.option("--version", default="1.0", show_default=True)
 def schema_register(workspace: str, topic: str, schema_file: str, version: str) -> None:
     """Register a topic JSON Schema from a file."""
@@ -974,7 +1020,9 @@ def schema_register(workspace: str, topic: str, schema_file: str, version: str) 
     try:
         click.echo(
             json.dumps(
-                register_schema(_cli_workspace(workspace), topic, schema_obj, version=version)
+                register_schema(
+                    _cli_workspace(workspace), topic, schema_obj, version=version
+                )
             )
         )
     except ValueError as exc:
@@ -1039,7 +1087,9 @@ def ping(workspace: str, producer_id: str | None, retention_days: int) -> None:
     help="FS debounce ms",
 )
 @click.option("--dry-run", is_flag=True, help="Log only; do not publish")
-@click.option("--duration", type=float, default=0, help="Exit after N seconds (0=forever)")
+@click.option(
+    "--duration", type=float, default=0, help="Exit after N seconds (0=forever)"
+)
 def watch_cmd(
     workspace: str | None,
     no_fs: bool,
@@ -1076,15 +1126,21 @@ def watch_cmd(
     show_default=True,
     help="Comma-separated agent ids (hermes,grok,claude,...) or all",
 )
-@click.option("--list", "list_only", is_flag=True, help="Show path map presence and exit")
+@click.option(
+    "--list", "list_only", is_flag=True, help="Show path map presence and exit"
+)
 @click.option(
     "--publish",
     "do_publish",
     is_flag=True,
     help="Also publish lines to system/monologue (privacy-sensitive)",
 )
-@click.option("--lines", type=int, default=15, show_default=True, help="Initial tail window")
-@click.option("--duration", type=float, default=0, help="Exit after N seconds (0=forever)")
+@click.option(
+    "--lines", type=int, default=15, show_default=True, help="Initial tail window"
+)
+@click.option(
+    "--duration", type=float, default=0, help="Exit after N seconds (0=forever)"
+)
 def tail_cmd(
     workspace: str | None,
     agents: str,
@@ -1238,8 +1294,6 @@ def swarm_config_cmd(workspace: str | None) -> None:
         raise click.ClickException(f"invalid swarm.yaml: {exc}") from exc
 
 
-
-
 @main.group()
 def worker() -> None:
     """Wake plane — classical non-LLM worker (Go binary; PRD v0.12)."""
@@ -1324,7 +1378,7 @@ def worker_init(workspace: str | None, to: str) -> None:
     "--token",
     default=None,
     envvar="AGENTBUS_WEBHOOK_TOKEN",
-    help="Shared secret (optional; warns if empty)",
+    help="Runtime-bound ingress capability (mandatory in protected/strict mode)",
 )
 def wake_ingress_cmd(
     workspace: str | None,
@@ -1561,7 +1615,9 @@ def await_cmd(
 @main.command("doctor")
 @click.option("--workspace", type=click.Path(file_okay=False), default=None)
 @click.option("--json", "as_json", is_flag=True, help="Emit a machine-readable report.")
-@click.option("--strict", is_flag=True, help="Return non-zero for warnings as well as failures.")
+@click.option(
+    "--strict", is_flag=True, help="Return non-zero for warnings as well as failures."
+)
 def doctor_cmd(workspace: str | None, as_json: bool, strict: bool) -> None:
     """Run read-only workspace checks plus isolated runtime probes."""
     from agentbus.doctor import run_doctor
@@ -1578,6 +1634,186 @@ def doctor_cmd(workspace: str | None, as_json: bool, strict: bool) -> None:
         for check in report.checks:
             click.echo(f"[{check.status:<4}] {check.name}: {check.message}")
     if report.overall_status == "FAIL" or (strict and report.overall_status == "WARN"):
+        raise SystemExit(1)
+
+
+@main.group("identity")
+def identity_group() -> None:
+    """Manage AgentID trust policy and audit/development identities."""
+
+
+@identity_group.command("init")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--mode",
+    type=click.Choice(["audit", "protected"], case_sensitive=False),
+    default="audit",
+    show_default=True,
+)
+def identity_init(workspace: str | None, mode: str) -> None:
+    """Initialize a root-signed workspace identity policy."""
+    ws = _cli_workspace(workspace)
+    try:
+        state = bootstrap_workspace_identity(ws, mode=mode.lower())
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "workspace_id": state.workspace_id,
+                "mode": state.mode,
+                "policy_version": state.policy_version,
+                "strict_ready": False,
+                "custody": "local_audit_only",
+            }
+        )
+    )
+
+
+@identity_group.command("enroll")
+@click.argument("producer_id")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--capability", multiple=True, default=("message",))
+@click.option("--topic", multiple=True, default=("okf/handoff",))
+def identity_enroll(
+    producer_id: str,
+    workspace: str | None,
+    capability: tuple[str, ...],
+    topic: tuple[str, ...],
+) -> None:
+    """Enroll one producer key in the local audit registry."""
+    ws = _cli_workspace(workspace)
+    try:
+        key_id = enroll_identity(ws, producer_id, capabilities=capability, topics=topic)
+        state = load_trust_state(ws)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "producer_id": producer_id,
+                "key_id": key_id,
+                "registry_version": state.registry_version,
+            }
+        )
+    )
+
+
+@identity_group.command("list")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def identity_list(workspace: str | None) -> None:
+    """List verified policy state and enrolled public identities."""
+    try:
+        state = load_trust_state(_cli_workspace(workspace))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "workspace_id": state.workspace_id,
+                "mode": state.mode,
+                "policy_version": state.policy_version,
+                "registry_version": state.registry_version,
+                "keys": state.registry.get("keys", []),
+                "revoked_key_ids": state.registry.get("revoked_key_ids", []),
+            },
+            indent=2,
+        )
+    )
+
+
+@identity_group.command("mode")
+@click.argument("mode", type=click.Choice(["audit", "protected", "strict"]))
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def identity_mode(mode: str, workspace: str | None) -> None:
+    """Raise the root-signed workspace identity mode."""
+    try:
+        state = set_policy_mode(_cli_workspace(workspace), mode)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "mode": state.mode,
+                "policy_version": state.policy_version,
+                "strict_ready": False,
+            }
+        )
+    )
+
+
+@identity_group.command("rotate")
+@click.argument("producer_id")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--grace-seconds", type=click.IntRange(min=0), default=300)
+def identity_rotate(
+    producer_id: str, workspace: str | None, grace_seconds: int
+) -> None:
+    """Rotate one producer key with a bounded verification grace window."""
+    try:
+        key_id = rotate_identity(
+            _cli_workspace(workspace), producer_id, grace_seconds=grace_seconds
+        )
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({"producer_id": producer_id, "key_id": key_id}))
+
+
+@identity_group.command("revoke")
+@click.argument("key_id")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def identity_revoke(key_id: str, workspace: str | None) -> None:
+    """Immediately revoke a producer key in the root-signed registry."""
+    try:
+        state = revoke_identity_key(_cli_workspace(workspace), key_id)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "key_id": key_id,
+                "revoked": True,
+                "registry_version": state.registry_version,
+            }
+        )
+    )
+
+
+@identity_group.command("issue-wake-capability")
+@click.argument("runtime")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def identity_issue_wake_capability(runtime: str, workspace: str | None) -> None:
+    """Issue a root-policy-bound capability for one wake runtime."""
+    try:
+        path = issue_wake_capability(_cli_workspace(workspace), runtime)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps({"runtime": runtime, "capability_file": str(path)}))
+
+
+@identity_group.command("verify-event")
+@click.argument("event_id", type=click.IntRange(min=1))
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def identity_verify_event(event_id: int, workspace: str | None) -> None:
+    """Recompute one stored event's cryptographic verification result."""
+    store = EventStore(_cli_workspace(workspace), auto_prune=False)
+    try:
+        result = store.verify_event(event_id)
+    finally:
+        store.close()
+    click.echo(
+        json.dumps(
+            {
+                "event_id": event_id,
+                "verified": result.verified,
+                "producer_id": result.producer_id,
+                "key_id": result.key_id,
+                "policy_version": result.policy_version,
+                "reason": result.reason,
+            }
+        )
+    )
+    if not result.verified:
         raise SystemExit(1)
 
 
