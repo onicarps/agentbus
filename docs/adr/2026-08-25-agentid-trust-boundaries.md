@@ -184,12 +184,12 @@ Every row below represents an automated, reproducible test that MUST **fail clos
 | **N11** | Replay of envelope with host system clock set backwards | System Clock | Rejected on monotonic timestamp high-water mark | `ABUS-020-003` |
 | **N12** | Replay of signed envelope into a different workspace (`workspace_id` mismatch) | Multi-Workspace | Rejected on `workspace_id` digest mismatch | `ABUS-020-002` |
 | **N13** | `producer_id="agy"` attempting to publish with `payload.from="factory"` | `EventStore.publish` | `403 Forbidden` (mismatch rejected, not normalized) | `ABUS-020-005` |
-| **N14** | Agy child subagent attempting to publish as `codex`, `factory`, or `factory_droid` | Delegation Boundary | Rejected; child lacks peer key material | `ABUS-020-004` |
+| **N14** | Exact July fixtures: Agy `self` children claim Grok/Hermes, or a child claims Codex/Factory/Factory Droid; an Agy child test result attempts to satisfy Factory QA | Delegation / Gate Boundary | Peer claims rejected; Agy-owned evidence cannot transition the independent Factory gate | `ABUS-020-004` / `009` |
 | **N15** | Child process attempting to access parent signing handles/sockets | Process Environment | Handles scrubbed; signing fails | `ABUS-020-004` |
 | **N16** | Delegated token attempting privilege escalation (e.g. requesting `qa` or `release`) | Delegation Token | Rejected; child cannot exceed parent scope | `ABUS-020-004` |
 | **N17** | Forged wake record injected directly into `<runtime>_wake_queue.jsonl` | Wake Queue File | Runner drops wake during store rehydration | `ABUS-020-010` |
 | **N18** | `WAKE.<agent>.json` written with synthetic `event_id` not in `events.db` | Direct Wake File | Dropped; no matching verified store event | `ABUS-020-010` |
-| **N19** | Unauthenticated HTTP POST to `/agentbus/wake` | Webhook Ingress | `401 Unauthorized` (fail-closed token enforcement) | `ABUS-020-010` |
+| **N19** | HTTP POST to `/agentbus/wake` without a valid broker-issued runtime capability | Webhook Ingress | `401 Unauthorized`; shared token or caller event body is insufficient | `ABUS-020-010` |
 | **N20** | Post-hoc modification or append of rows in `artifacts` table | Side Table Tamper | Hydration digest mismatch; event flagged unverified | `ABUS-020-005` |
 | **N21** | Insertion of orphan artifact row for nonexistent `event_id` | Side Table Tamper | Rejected by SQLite foreign key constraint (`FK=ON`) | `ABUS-020-005` |
 | **N22** | Self-minted `droid_proof` submitted for `qa_droid` in mode $\ge$ `protected` | RBAC / Proof Gate | Rejected; AgentID cryptographic signature required | `ABUS-020-006` |
@@ -200,7 +200,7 @@ Every row below represents an automated, reproducible test that MUST **fail clos
 | **N27** | Event signed by a revoked key ID present in Revocation Ledger | Key Revocation | Rejected immediately upon ledger lookup | `ABUS-020-003` |
 | **N28** | Event signed with rotated key after rotation grace window has expired | Key Rotation | Rejected | `ABUS-020-003` |
 | **N29** | Attempting break-glass recovery to retroactively verify historical events | Recovery Ledger | Rejected; break-glass events marked non-retroactive | `ABUS-020-008` |
-| **N30** | Signed payload containing duplicate JSON keys, lone surrogates, or `NaN`/`Inf` | JCS Serializer | Rejected prior to signing across Python, Go, and TS | `ABUS-020-002` |
+| **N30** | Signed payload containing duplicate JSON keys, lone surrogates, `NaN`/`Inf`, or non-NFC strings | JCS Serializer | Rejected prior to signing across Python, Go, and TS | `ABUS-020-002` |
 | **N31** | Cross-language test: Envelope signed in Python verified in Go and TypeScript | Cross-SDK Test | Byte-identical canonical form and verification PASS | `ABUS-020-002` |
 | **N32** | Forward migration of legacy v0.19 `events.db` into v0.20 schema | Schema Migration | History intact; legacy rows marked `legacy_unverified` | `ABUS-020-008` |
 
