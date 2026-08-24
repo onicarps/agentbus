@@ -35,6 +35,19 @@ ENVELOPE_VERSION = "1"
 MODE_ORDER = {"audit": 0, "protected": 1, "strict": 2}
 DEFAULT_RESTRICTED_TOPICS = ("okf/handoff", "okf/approval", "system/")
 MAX_SAFE_INTEGER = (1 << 53) - 1
+MAX_DELEGATION_TTL_SECONDS = 3600
+PRIVILEGED_DELEGATION_CAPABILITIES = frozenset(
+    {
+        "agy_go",
+        "factory",
+        "identity_admin",
+        "merge",
+        "push",
+        "qa_droid",
+        "qa_verdict",
+        "release",
+    }
+)
 _UNSET = object()
 
 
@@ -346,6 +359,7 @@ def load_trust_state(workspace: Path, *, update_high_water: bool = False) -> Tru
         isinstance(x, str) for x in restricted
     ):
         raise VerificationError("invalid_restricted_topics")
+    _verify_delegations(registry)
     return TrustState(
         workspace_id=str(policy["workspace_id"]),
         mode=effective_mode(mode),
@@ -407,6 +421,174 @@ def enroll_identity(
     _write_registry_and_policy(root, state, registry, root_private)
     load_trust_state(workspace, update_high_water=True)
     return key_id
+
+
+def _parse_utc_timestamp(value: Any, reason: str) -> datetime:
+    if not isinstance(value, str):
+        raise VerificationError(reason)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise VerificationError(reason) from exc
+    if parsed.tzinfo is None:
+        raise VerificationError(reason)
+    return parsed.astimezone(timezone.utc)
+
+
+def _verify_delegations(registry: dict[str, Any]) -> None:
+    """Validate every root-registered child against its parent's authority."""
+    keys = registry.get("keys") or []
+    if not isinstance(keys, list):
+        raise VerificationError("invalid_identity_registry")
+    by_producer: dict[str, list[dict[str, Any]]] = {}
+    for entry in keys:
+        if not isinstance(entry, dict) or not isinstance(entry.get("producer_id"), str):
+            raise VerificationError("invalid_identity_registry")
+        by_producer.setdefault(entry["producer_id"], []).append(entry)
+    for entry in keys:
+        delegated_by = entry.get("delegated_by")
+        if delegated_by is None:
+            continue
+        producer = str(entry["producer_id"])
+        if not isinstance(delegated_by, str) or not producer.startswith(
+            f"{delegated_by}/subagent/"
+        ):
+            raise VerificationError("invalid_delegated_producer_id")
+        parent_key_id = entry.get("delegated_by_key_id")
+        parents = [
+            item
+            for item in by_producer.get(delegated_by, [])
+            if item.get("key_id") == parent_key_id
+        ]
+        if len(parents) != 1 or parents[0].get("delegated_by") is not None:
+            raise VerificationError("invalid_delegation_parent")
+        parent = parents[0]
+        capabilities = set(entry.get("capabilities") or [])
+        topics = set(entry.get("topics") or [])
+        if capabilities & PRIVILEGED_DELEGATION_CAPABILITIES:
+            raise VerificationError("privileged_delegation_forbidden")
+        if not capabilities.issubset(set(parent.get("capabilities") or [])):
+            raise VerificationError("delegation_capability_escalation")
+        if not topics.issubset(set(parent.get("topics") or [])):
+            raise VerificationError("delegation_topic_escalation")
+        if entry.get("max_delegation_depth") != 0:
+            raise VerificationError("delegation_depth_escalation")
+        _parse_utc_timestamp(entry.get("expires_at"), "invalid_delegation_expiry")
+        proof = entry.get("delegation_proof")
+        if not isinstance(proof, dict):
+            raise VerificationError("missing_delegation_proof")
+        signed = proof.get("signed")
+        signature = proof.get("signature")
+        if not isinstance(signed, dict) or not isinstance(signature, str):
+            raise VerificationError("invalid_delegation_proof")
+        expected = {
+            "parent_key_id": parent_key_id,
+            "child_key_id": entry.get("key_id"),
+            "child_producer_id": producer,
+            "public_key": entry.get("public_key"),
+            "capabilities": sorted(capabilities),
+            "topics": sorted(topics),
+            "expires_at": entry.get("expires_at"),
+            "max_delegation_depth": 0,
+        }
+        if signed != expected:
+            raise VerificationError("delegation_binding_mismatch")
+        try:
+            parent_public = Ed25519PublicKey.from_public_bytes(
+                _unb64(str(parent["public_key"]))
+            )
+            parent_public.verify(_unb64(signature), canonical_bytes(signed))
+        except (InvalidSignature, KeyError) as exc:
+            raise VerificationError("invalid_delegation_signature") from exc
+
+
+def delegate_identity(
+    workspace: Path,
+    parent_producer_id: str,
+    child_id: str,
+    *,
+    capabilities: Iterable[str] = ("message",),
+    topics: Iterable[str] = ("okf/handoff",),
+    ttl_seconds: int = 900,
+) -> tuple[str, str]:
+    """Create a bounded, non-transitive child identity signed by its parent."""
+    if not child_id or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-_" for ch in child_id):
+        raise IdentityError("invalid_child_id")
+    if ttl_seconds < 1 or ttl_seconds > MAX_DELEGATION_TTL_SECONDS:
+        raise IdentityError("invalid_delegation_ttl")
+    root = _identity_dir(workspace)
+    state = load_trust_state(workspace, update_high_water=True)
+    parent = _active_key(state, parent_producer_id)
+    if parent.get("delegated_by") is not None:
+        raise IdentityError("nested_delegation_forbidden")
+    child_producer_id = f"{parent_producer_id}/subagent/{child_id}"
+    if any(
+        entry.get("producer_id") == child_producer_id
+        for entry in state.registry.get("keys", [])
+    ):
+        raise IdentityError(f"producer_already_enrolled: {child_producer_id}")
+    requested_capabilities = set(capabilities)
+    requested_topics = set(topics)
+    if requested_capabilities & PRIVILEGED_DELEGATION_CAPABILITIES:
+        raise IdentityError("privileged_delegation_forbidden")
+    if not requested_capabilities.issubset(set(parent.get("capabilities") or [])):
+        raise IdentityError("delegation_capability_escalation")
+    if not requested_topics.issubset(set(parent.get("topics") or [])):
+        raise IdentityError("delegation_topic_escalation")
+
+    private = Ed25519PrivateKey.generate()
+    key_id = f"{child_producer_id.replace('/', '-')}-{secrets.token_hex(6)}"
+    private_path = root / "private" / f"{key_id}.pem"
+    private_path.write_bytes(_private_bytes(private))
+    os.chmod(private_path, 0o600)
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    delegation = {
+        "parent_key_id": parent["key_id"],
+        "child_key_id": key_id,
+        "child_producer_id": child_producer_id,
+        "public_key": _b64(_public_raw(private.public_key())),
+        "capabilities": sorted(requested_capabilities),
+        "topics": sorted(requested_topics),
+        "expires_at": expires_at,
+        "max_delegation_depth": 0,
+    }
+    parent_private = _load_private(root / "private" / f"{parent['key_id']}.pem")
+    entry = {
+        "key_id": key_id,
+        "producer_id": child_producer_id,
+        "algorithm": "Ed25519",
+        "public_key": delegation["public_key"],
+        "capabilities": delegation["capabilities"],
+        "topics": delegation["topics"],
+        "state": "active",
+        "delegated_by": parent_producer_id,
+        "delegated_by_key_id": parent["key_id"],
+        "expires_at": expires_at,
+        "max_delegation_depth": 0,
+        "delegation_proof": _signed_document(delegation, parent_private),
+    }
+    registry = dict(state.registry)
+    registry["registry_version"] = str(state.registry_version + 1)
+    registry["keys"] = [*state.registry["keys"], entry]
+    root_private = _load_private(root / "private" / "workspace-root.pem")
+    _write_registry_and_policy(root, state, registry, root_private)
+    load_trust_state(workspace, update_high_water=True)
+    return child_producer_id, key_id
+
+
+def delegated_private_key_path(
+    workspace: Path, parent_producer_id: str, child_producer_id: str
+) -> Path:
+    """Resolve an explicit live child handle without accepting a peer key."""
+    state = load_trust_state(workspace, update_high_water=True)
+    entry = _active_key(state, child_producer_id)
+    if entry.get("delegated_by") != parent_producer_id or not child_producer_id.startswith(
+        f"{parent_producer_id}/subagent/"
+    ):
+        raise IdentityError("invalid_delegation_parent")
+    return _identity_dir(workspace) / "private" / f"{entry['key_id']}.pem"
 
 
 def _write_registry_and_policy(
@@ -584,7 +766,20 @@ def _active_key(
     ]
     if len(matches) != 1:
         raise IdentityError(f"active_identity_key_not_found: {producer_id}")
-    return matches[0]
+    entry = matches[0]
+    if entry.get("delegated_by") is not None:
+        parent_key_id = entry.get("delegated_by_key_id")
+        if any(
+            item.get("key_id") == parent_key_id and item.get("state") == "revoked"
+            for item in state.registry.get("keys", [])
+        ):
+            raise IdentityError("delegation_parent_revoked")
+        expires = _parse_utc_timestamp(
+            entry.get("expires_at"), "invalid_delegation_expiry"
+        )
+        if datetime.now(timezone.utc) >= expires:
+            raise IdentityError("delegation_expired")
+    return entry
 
 
 def _verification_key(
@@ -606,6 +801,19 @@ def _verification_key(
         entry.get("not_after") or ""
     ):
         raise VerificationError("rotation_grace_expired")
+    if entry.get("delegated_by") is not None:
+        parent_key_id = entry.get("delegated_by_key_id")
+        if any(
+            item.get("key_id") == parent_key_id and item.get("state") == "revoked"
+            for item in state.registry.get("keys", [])
+        ):
+            raise VerificationError("delegation_parent_revoked")
+        signed_at = _parse_utc_timestamp(timestamp, "invalid_event_timestamp")
+        expires = _parse_utc_timestamp(
+            entry.get("expires_at"), "invalid_delegation_expiry"
+        )
+        if signed_at >= expires:
+            raise VerificationError("delegation_expired")
     return entry
 
 
@@ -623,11 +831,12 @@ def sign_event_envelope(
     action: dict[str, Any] | None = None,
     timestamp: str | None = None,
     nonce: str | None = None,
+    private_key_path: Path | None = None,
 ) -> dict[str, Any]:
     state = load_trust_state(workspace, update_high_water=True)
     entry = _active_key(state, producer_id)
     if topic_restricted(topic, state) and payload.get("from") != producer_id:
-        raise IdentityError("payload_from_producer_mismatch")
+        raise IdentityError("403 Forbidden: payload_from_producer_mismatch")
     allowed_topics = entry.get("topics") or []
     if not any(
         topic == item or (str(item).endswith("/") and topic.startswith(str(item)))
@@ -661,8 +870,12 @@ def sign_event_envelope(
     }
     validate_jcs_value(unsigned)
     private = _load_private(
-        _identity_dir(workspace) / "private" / f"{entry['key_id']}.pem"
+        private_key_path
+        if private_key_path is not None
+        else _identity_dir(workspace) / "private" / f"{entry['key_id']}.pem"
     )
+    if _b64(_public_raw(private.public_key())) != entry.get("public_key"):
+        raise IdentityError("403 Forbidden: signing_key_identity_mismatch")
     return {
         "signed": unsigned,
         "signature": _b64(private.sign(canonical_bytes(unsigned))),
@@ -749,6 +962,23 @@ def verify_envelope(
         except ValueError as exc:
             raise VerificationError("invalid_event_timestamp") from exc
         entry = _verification_key(state, producer, key_id, timestamp)
+        signed_topic = str(unsigned.get("topic") or "")
+        allowed_topics = entry.get("topics") or []
+        if not any(
+            signed_topic == item
+            or (str(item).endswith("/") and signed_topic.startswith(str(item)))
+            for item in allowed_topics
+        ):
+            raise VerificationError("identity_topic_not_allowed")
+        action = unsigned.get("action")
+        action_type = action.get("type") if isinstance(action, dict) else None
+        if action_type not in (entry.get("capabilities") or []):
+            raise VerificationError("identity_capability_not_allowed")
+        if (
+            entry.get("delegated_by") is not None
+            and action_type in PRIVILEGED_DELEGATION_CAPABILITIES
+        ):
+            raise VerificationError("privileged_delegation_forbidden")
         public = Ed25519PublicKey.from_public_bytes(_unb64(entry["public_key"]))
         try:
             public.verify(_unb64(signature), canonical_bytes(unsigned))

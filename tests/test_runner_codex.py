@@ -31,7 +31,14 @@ def test_codex_command_matches_real_headless_cli(tmp_path: Path) -> None:
     assert "--max-turns" not in cmd
 
 
-def test_codex_adapter_supplies_prompt_on_stdin(tmp_path: Path) -> None:
+def test_codex_adapter_supplies_prompt_on_stdin(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("AGENTBUS_SIGNING_KEY", "/private/parent.pem")
+    monkeypatch.setenv("AGENTBUS_IDENTITY_PRIVATE_KEY", "/private/identity.pem")
+    monkeypatch.setenv("AGENTBUS_BROKER_SOCKET", "/run/parent.sock")
+    monkeypatch.setenv("AGENTBUS_TOKEN", "parent-bearer")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/ssh-agent.sock")
     run = MagicMock(
         return_value=subprocess.CompletedProcess(
             args=["codex"], returncode=0, stdout='{"type":"result"}', stderr="",
@@ -43,6 +50,13 @@ def test_codex_adapter_supplies_prompt_on_stdin(tmp_path: Path) -> None:
     assert result.ok
     kwargs = run.call_args.kwargs
     assert kwargs["input"].startswith("# AgentBus headless Codex turn")
+    assert kwargs["close_fds"] is True
+    assert "AGENTBUS_SIGNING_KEY" not in kwargs["env"]
+    assert "AGENTBUS_IDENTITY_PRIVATE_KEY" not in kwargs["env"]
+    assert "AGENTBUS_BROKER_SOCKET" not in kwargs["env"]
+    assert "AGENTBUS_TOKEN" not in kwargs["env"]
+    assert "SSH_AUTH_SOCK" not in kwargs["env"]
+    assert kwargs["env"]["AGENTBUS_PRODUCER_ID"] == "codex"
     assert run.call_args.args[0][0:2] == ["codex", "exec"]
     assert run.call_args.args[0][-1] == "-"
 

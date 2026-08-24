@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from agentbus.identity import delegated_private_key_path
 from agentbus.runner.types import AWAIT_EXIT_CODE, TurnResult, WakeEnvelope
 
 # okf/handoff summary maxLength — keep companion ACK/ERROR under schema limit.
@@ -61,9 +62,18 @@ def runner_subprocess_env(
     producer_id: str,
     wake: WakeEnvelope,
     extra_defaults: dict[str, str] | None = None,
+    delegated_producer_id: str | None = None,
 ) -> dict[str, str]:
-    """Env for headless CLI adapters (workspace + wake id for ``agentbus await``)."""
+    """Minimal child env without inherited AgentBus signer or broker authority."""
     env = os.environ.copy()
+    # A child CLI is untrusted by default.  Ambient AgentBus variables may name
+    # private keys, bearer tokens, broker sockets, or a more privileged peer.
+    # Remove the whole namespace, then add only task-routing metadata below.
+    for key in tuple(env):
+        if key.startswith("AGENTBUS_"):
+            env.pop(key, None)
+    for key in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO"):
+        env.pop(key, None)
     # Authoritative from the active runner; inherited ambient values must not
     # redirect an adapter's `agentbus await` drop to the wrong workspace/producer.
     env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
@@ -73,8 +83,16 @@ def runner_subprocess_env(
     env["AGENTBUS_CHAIN_KEY"] = str(
         wake.causation_id if wake.causation_id is not None else wake.event_id
     )
+    if delegated_producer_id is not None:
+        key_path = delegated_private_key_path(
+            workspace, producer_id, delegated_producer_id
+        )
+        env["AGENTBUS_PRODUCER_ID"] = delegated_producer_id
+        env["AGENTBUS_IDENTITY_PRIVATE_KEY"] = str(key_path)
     if extra_defaults:
         for key, value in extra_defaults.items():
+            if key.startswith("AGENTBUS_"):
+                raise ValueError(f"unsafe_child_env_override: {key}")
             env.setdefault(key, value)
     return env
 

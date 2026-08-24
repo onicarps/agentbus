@@ -230,7 +230,7 @@ def poll_events_snapshot(
         conn = store._conn  # read-only tail for monitor
         rows = conn.execute(
             """
-            SELECT event_id, topic, producer_id, timestamp, payload
+            SELECT *
             FROM events
             WHERE event_id > ?
             ORDER BY event_id DESC
@@ -238,19 +238,10 @@ def poll_events_snapshot(
             """,
             (since_id, limit),
         ).fetchall()
-        events = []
-        for row in reversed(rows):
-            payload = json.loads(row["payload"])
-            events.append(
-                {
-                    "event_id": row["event_id"],
-                    "topic": row["topic"],
-                    "producer_id": row["producer_id"],
-                    "timestamp": row["timestamp"],
-                    "payload": payload,
-                }
-            )
-        return events
+        return [
+            event.to_dict()
+            for event in reversed(store._authoritative_events_from_rows(rows))
+        ]
     finally:
         store.close()
 

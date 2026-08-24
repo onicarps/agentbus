@@ -89,6 +89,7 @@ class CodexAdapter:
                     self.workspace, producer_id="codex", wake=wake,
                 ),
                 input=prompt, capture_output=True, text=True, timeout=timeout,
+                close_fds=True,
             )
         except subprocess.TimeoutExpired as exc:
             return TurnResult(

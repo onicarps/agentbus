@@ -170,6 +170,7 @@ class GrokAdapter:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                close_fds=True,
             )
         except subprocess.TimeoutExpired as exc:
             return TurnResult(

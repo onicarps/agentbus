@@ -3,20 +3,28 @@ from __future__ import annotations
 import base64
 import json
 import hashlib
+import sqlite3
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 import yaml
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from click.testing import CliRunner
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from agentbus.identity import (
     IdentityError,
     VerificationError,
     bootstrap_workspace_identity,
     canonical_bytes,
+    delegate_identity,
     enroll_identity,
     issue_wake_capability,
     load_trust_state,
@@ -27,7 +35,10 @@ from agentbus.identity import (
     strict_json_loads,
     verify_envelope,
 )
+from agentbus.cli import main
 from agentbus.runner import load_runner_config, run_once
+from agentbus.runner.adapters.prompt_common import runner_subprocess_env
+from agentbus.runner.types import WakeEnvelope
 from agentbus.store import EventStore
 from agentbus.wake_ingress import WakeIngressServer
 
@@ -128,6 +139,136 @@ def test_peer_claim_and_capability_escalation_rejected(tmp_path: Path) -> None:
             payload={"from": "agy", "to": "codex", "summary": "green"},
             action={"type": "qa_verdict", "result": "green"},
         )
+
+
+def test_delegated_child_is_bounded_and_cannot_impersonate_factory(
+    tmp_path: Path,
+) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    enroll_identity(
+        tmp_path,
+        "agy",
+        capabilities=("message", "implementation", "qa_verdict", "release"),
+        topics=("okf/handoff", "system/"),
+    )
+    child, key_id = delegate_identity(
+        tmp_path,
+        "agy",
+        "incident-fixture",
+        capabilities=("message",),
+        topics=("okf/handoff",),
+        ttl_seconds=60,
+    )
+    assert child == "agy/subagent/incident-fixture"
+    state = load_trust_state(tmp_path)
+    entry = next(item for item in state.registry["keys"] if item["key_id"] == key_id)
+    assert entry["delegated_by"] == "agy"
+    assert entry["max_delegation_depth"] == 0
+    wake = WakeEnvelope(
+        event_id=14,
+        topic="okf/handoff",
+        from_agent="agy",
+        to=child,
+        summary="bounded child",
+        payload={"from": "agy", "to": child, "summary": "bounded child"},
+        source="wake_file",
+    )
+    delegated_env = runner_subprocess_env(
+        tmp_path,
+        producer_id="agy",
+        wake=wake,
+        delegated_producer_id=child,
+    )
+    assert delegated_env["AGENTBUS_PRODUCER_ID"] == child
+    assert delegated_env["AGENTBUS_IDENTITY_PRIVATE_KEY"].endswith(f"{key_id}.pem")
+    with pytest.raises(IdentityError, match="active_identity_key_not_found"):
+        runner_subprocess_env(
+            tmp_path,
+            producer_id="agy",
+            wake=wake,
+            delegated_producer_id="factory",
+        )
+
+    own = {"from": child, "to": "codex", "summary": "bounded evidence"}
+    assert verify_envelope(
+        tmp_path,
+        sign_event_envelope(
+            tmp_path,
+            topic="okf/handoff",
+            producer_id=child,
+            schema_version="1.0",
+            payload=own,
+        ),
+        stored_payload=own,
+    ).verified
+    expired_envelope = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id=child,
+        schema_version="1.0",
+        payload=own,
+        timestamp=entry["expires_at"],
+    )
+    assert (
+        verify_envelope(tmp_path, expired_envelope, stored_payload=own).reason
+        == "delegation_expired"
+    )
+    with pytest.raises(IdentityError, match="403 Forbidden"):
+        sign_event_envelope(
+            tmp_path,
+            topic="okf/handoff",
+            producer_id=child,
+            schema_version="1.0",
+            payload={"from": "factory", "to": "codex", "summary": "GREEN"},
+        )
+    with pytest.raises(IdentityError, match="capability_not_allowed"):
+        sign_event_envelope(
+            tmp_path,
+            topic="okf/handoff",
+            producer_id=child,
+            schema_version="1.0",
+            payload=own,
+            action={"type": "qa_verdict", "result": "green"},
+        )
+    valid = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id=child,
+        schema_version="1.0",
+        payload=own,
+    )
+    forged_signed = {**valid["signed"], "action": {"type": "qa_verdict"}}
+    child_private = serialization.load_pem_private_key(
+        (
+            tmp_path / ".agentbus" / "identity" / "private" / f"{key_id}.pem"
+        ).read_bytes(),
+        password=None,
+    )
+    assert isinstance(child_private, Ed25519PrivateKey)
+    forged = {
+        "signed": forged_signed,
+        "signature": base64.urlsafe_b64encode(
+            child_private.sign(canonical_bytes(forged_signed))
+        )
+        .rstrip(b"=")
+        .decode("ascii"),
+    }
+    assert (
+        verify_envelope(tmp_path, forged, stored_payload=own).reason
+        == "identity_capability_not_allowed"
+    )
+    with pytest.raises(IdentityError, match="privileged_delegation_forbidden"):
+        delegate_identity(
+            tmp_path,
+            "agy",
+            "fake-factory",
+            capabilities=("qa_verdict",),
+            topics=("okf/handoff",),
+        )
+    with pytest.raises(IdentityError, match="invalid_delegation_ttl"):
+        delegate_identity(tmp_path, "agy", "long-lived", ttl_seconds=3601)
+    with pytest.raises(IdentityError, match="nested_delegation_forbidden"):
+        delegate_identity(tmp_path, child, "grandchild", ttl_seconds=60)
 
 
 def test_policy_signature_and_monotonic_mode(tmp_path: Path) -> None:
@@ -264,6 +405,153 @@ def test_store_rejects_signed_nonce_replay(tmp_path: Path, monkeypatch) -> None:
             schema_version="1.0",
             payload=payload,
             identity_envelope=envelope,
+        )
+    store.close()
+
+
+def test_concurrent_identical_envelope_has_one_commit(tmp_path: Path) -> None:
+    _boot_and_enroll(tmp_path)
+    payload = {"from": "codex", "to": "factory", "summary": "one envelope"}
+    envelope = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id="codex",
+        schema_version="1.0",
+        payload=payload,
+    )
+    EventStore(tmp_path).close()  # finish migrations before concurrent opens
+
+    def submit() -> str:
+        store = EventStore(tmp_path, auto_prune=False)
+        try:
+            store.publish(
+                topic="okf/handoff",
+                producer_id="codex",
+                schema_version="1.0",
+                payload=payload,
+                identity_envelope=envelope,
+            )
+            return "committed"
+        except IdentityError as exc:
+            return str(exc)
+        finally:
+            store.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = list(pool.map(lambda _: submit(), range(4)))
+    assert outcomes.count("committed") == 1
+    assert outcomes.count("identity_nonce_replay") == 3
+
+
+def test_protected_publish_authenticates_before_scoped_dedup(tmp_path: Path) -> None:
+    _boot_and_enroll(tmp_path)
+    enroll_identity(tmp_path, "agy", capabilities=("message",), topics=("okf/handoff",))
+    set_policy_mode(tmp_path, "protected")
+    store = EventStore(tmp_path)
+    original, _ = store.publish(
+        topic="okf/handoff",
+        producer_id="codex",
+        schema_version="1.0",
+        payload={"from": "codex", "to": "factory", "summary": "candidate"},
+        idempotency_key="shared-probe",
+    )
+    with pytest.raises(IdentityError, match="403 Forbidden"):
+        store.publish(
+            topic="okf/handoff",
+            producer_id="agy",
+            schema_version="1.0",
+            payload={"from": "codex", "to": "factory", "summary": "candidate"},
+            idempotency_key="shared-probe",
+        )
+    independent, duplicate = store.publish(
+        topic="okf/handoff",
+        producer_id="agy",
+        schema_version="1.0",
+        payload={"from": "agy", "to": "codex", "summary": "independent"},
+        idempotency_key="shared-probe",
+    )
+    assert duplicate is False
+    assert independent.event_id != original.event_id
+    store.close()
+
+
+def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    key_id = enroll_identity(
+        tmp_path,
+        "factory",
+        capabilities=("message",),
+        topics=("okf/handoff",),
+    )
+    set_policy_mode(tmp_path, "protected")
+    args = [
+        "publish",
+        "--workspace",
+        str(tmp_path),
+        "--topic",
+        "okf/handoff",
+        "--producer-id",
+        "factory",
+        "--payload",
+        json.dumps({"from": "factory", "to": "codex", "summary": "GREEN"}),
+    ]
+    runner = CliRunner()
+    denied = runner.invoke(main, args, env={"AGENTBUS_IDENTITY_PRIVATE_KEY": ""})
+    assert denied.exit_code == 1
+    assert "403 Forbidden" in denied.output
+    store = EventStore(tmp_path, auto_prune=False)
+    assert store.latest_event_id() == 0
+    store.close()
+
+    private_path = tmp_path / ".agentbus" / "identity" / "private" / f"{key_id}.pem"
+    allowed = runner.invoke(
+        main,
+        args,
+        env={"AGENTBUS_IDENTITY_PRIVATE_KEY": str(private_path)},
+    )
+    assert allowed.exit_code == 0, allowed.output
+
+
+def test_protected_reads_filter_database_and_artifact_tampering(tmp_path: Path) -> None:
+    _boot_and_enroll(tmp_path)
+    set_policy_mode(tmp_path, "protected")
+    store = EventStore(tmp_path)
+    event, _ = store.publish(
+        topic="okf/handoff",
+        producer_id="codex",
+        schema_version="1.0",
+        payload={
+            "from": "codex",
+            "to": "factory",
+            "summary": "phase 2",
+            "artifacts": [
+                {"type": "file_content", "name": "proof.txt", "content": "green"}
+            ],
+        },
+        trace_id="phase-2-trace",
+    )
+    store._conn.execute(
+        "UPDATE artifacts SET content_blob='forged' WHERE event_id=?",
+        (event.event_id,),
+    )
+    store._conn.commit()
+
+    assert store.verify_event(event.event_id).reason == "artifact_digest_mismatch"
+    assert store.get_event(event.event_id) is None
+    polled = store.poll("okf/handoff")
+    assert polled["events"] == []
+    assert polled["latest_id"] == event.event_id
+    assert store.fetch_trace_events("phase-2-trace") == []
+    assert store.fetch_unprojected_handoffs() == []
+    from agentbus.tui import fetch_monitor_state
+
+    assert fetch_monitor_state(tmp_path)["events"] == []
+    with pytest.raises(sqlite3.IntegrityError):
+        store._conn.execute(
+            """
+            INSERT INTO artifacts(event_id, type, name, content_blob)
+            VALUES (999999, 'file_content', 'orphan.txt', 'forged')
+            """
         )
     store.close()
 

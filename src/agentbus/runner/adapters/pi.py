@@ -84,6 +84,7 @@ class PiAdapter:
                 cmd, cwd=str(workdir), env=runner_subprocess_env(
                     self.workspace, producer_id="pi", wake=wake,
                 ), capture_output=True, text=True, timeout=timeout,
+                close_fds=True,
             )
         except subprocess.TimeoutExpired as exc:
             return TurnResult(

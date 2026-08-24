@@ -10,6 +10,21 @@
 - Rehydrate protected wake notifications from the event store and recompute AgentID verification before runner execution; reject synthetic or tampered event IDs and caller-controlled wake bodies.
 - Add `agentbus identity` lifecycle and verification commands and an honest audit/shared-UID security guide.
 
+### Added — AgentID Phase 2
+
+- Add bounded `parent/subagent/<id>` delegation with one-hour maximum TTL,
+  non-transitive scope, parent-signed proof, and hard denial of QA, GO,
+  identity-admin, merge, push, and release authority.
+- Scrub AgentBus signing/broker/token state, SSH/GPG agent sockets, and inherited
+  file descriptors from headless adapter children.
+- Authenticate publish envelopes before RBAC and deduplication, reject exact
+  nonce replay, and scope idempotency to the verified producer.
+- Recompute signatures and artifact digests across poll/await, trace, HITL, SLA,
+  TUI/monitor, runner, and log-projection reads; protected consumers fail closed
+  on tampered restricted-topic rows.
+- Require CLI publishers to supply an explicit matching identity private-key
+  handle instead of selecting credentials from caller-controlled `producer_id`.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added

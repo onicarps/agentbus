@@ -27,6 +27,7 @@ from agentbus.intercepts import InterceptRule, add_rule, load_config
 from agentbus.identity import (
     IdentityError,
     bootstrap_workspace_identity,
+    delegate_identity,
     enroll_identity,
     issue_wake_capability,
     load_trust_state,
@@ -449,6 +450,12 @@ def publish(
                 sla_timeout_minutes=sla_timeout_minutes,
                 trace_id=trace_id,
                 parent_span_id=parent_span_id,
+                auto_sign=bool(os.environ.get("AGENTBUS_IDENTITY_PRIVATE_KEY")),
+                signing_key_path=(
+                    Path(os.environ["AGENTBUS_IDENTITY_PRIVATE_KEY"])
+                    if os.environ.get("AGENTBUS_IDENTITY_PRIVATE_KEY")
+                    else None
+                ),
             )
         except (
             ForbiddenError,
@@ -531,8 +538,16 @@ def publish_batch(
                     sla_timeout_minutes=spec.get("sla_timeout_minutes"),
                     trace_id=spec.get("trace_id"),
                     parent_span_id=spec.get("parent_span_id"),
+                    auto_sign=bool(
+                        os.environ.get("AGENTBUS_IDENTITY_PRIVATE_KEY")
+                    ),
+                    signing_key_path=(
+                        Path(os.environ["AGENTBUS_IDENTITY_PRIVATE_KEY"])
+                        if os.environ.get("AGENTBUS_IDENTITY_PRIVATE_KEY")
+                        else None
+                    ),
                 )
-            except (ForbiddenError, PayloadTooLargeError) as exc:
+            except (ForbiddenError, PayloadTooLargeError, IdentityError) as exc:
                 raise click.ClickException(str(exc)) from exc
             results.append(
                 {
@@ -1718,6 +1733,47 @@ def identity_list(workspace: str | None) -> None:
                 "revoked_key_ids": state.registry.get("revoked_key_ids", []),
             },
             indent=2,
+        )
+    )
+
+
+@identity_group.command("delegate")
+@click.argument("parent_producer_id")
+@click.argument("child_id")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--capability", multiple=True, default=("message",))
+@click.option("--topic", multiple=True, default=("okf/handoff",))
+@click.option("--ttl-seconds", type=click.IntRange(min=1, max=3600), default=900)
+def identity_delegate(
+    parent_producer_id: str,
+    child_id: str,
+    workspace: str | None,
+    capability: tuple[str, ...],
+    topic: tuple[str, ...],
+    ttl_seconds: int,
+) -> None:
+    """Issue one non-transitive, least-authority child identity."""
+    ws = _cli_workspace(workspace)
+    try:
+        producer_id, key_id = delegate_identity(
+            ws,
+            parent_producer_id,
+            child_id,
+            capabilities=capability,
+            topics=topic,
+            ttl_seconds=ttl_seconds,
+        )
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        json.dumps(
+            {
+                "producer_id": producer_id,
+                "key_id": key_id,
+                "delegated_by": parent_producer_id,
+                "ttl_seconds": ttl_seconds,
+                "max_delegation_depth": 0,
+            }
         )
     )
 

@@ -147,7 +147,10 @@ def fetch_monitor_state(
             """,
             (limit,),
         ).fetchall()
-        events = [store._row_to_event(r).to_dict() for r in reversed(rows)]
+        events = [
+            event.to_dict()
+            for event in reversed(store._authoritative_events_from_rows(rows))
+        ]
         # Read-only pending query — avoid review_pending() which expires/writes.
         pending_rows = store._conn.execute(
             """
@@ -158,7 +161,10 @@ def fetch_monitor_state(
             """,
             (STATUS_PENDING, pending_limit),
         ).fetchall()
-        pending = [store._row_to_event(r).to_dict() for r in pending_rows]
+        pending = [
+            event.to_dict()
+            for event in store._authoritative_events_from_rows(pending_rows)
+        ]
         producers = {e.get("producer_id") for e in events if e.get("producer_id")}
         system_events = [
             e

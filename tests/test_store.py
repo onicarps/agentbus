@@ -85,6 +85,26 @@ def test_idempotency(store):
     assert e1.event_id == e2.event_id
 
 
+def test_idempotency_is_scoped_to_verified_producer(store):
+    first, first_dup = store.publish(
+        topic="okf/handoff",
+        producer_id="grok",
+        schema_version="1.0",
+        payload={"from": "grok", "to": "agy", "summary": "grok result"},
+        idempotency_key="shared-key",
+    )
+    second, second_dup = store.publish(
+        topic="okf/handoff",
+        producer_id="hermes",
+        schema_version="1.0",
+        payload={"from": "hermes", "to": "agy", "summary": "hermes result"},
+        idempotency_key="shared-key",
+    )
+    assert first_dup is False
+    assert second_dup is False
+    assert first.event_id != second.event_id
+
+
 def test_poll_empty(store):
     result = store.poll("okf/handoff", since_id=0)
     assert result["events"] == []

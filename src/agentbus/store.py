@@ -205,6 +205,7 @@ class EventStore:
         self._migrate_trace_columns()
         self._migrate_artifacts_table()
         self._migrate_identity_columns()
+        self._migrate_scoped_idempotency()
         self._conn.execute(
             "INSERT INTO schema_version(component, version) VALUES('event_store', 20) "
             "ON CONFLICT(component) DO UPDATE SET version=MAX(version, 20)"
@@ -247,6 +248,18 @@ class EventStore:
         self._add_column_if_missing(
             "verification_reason",
             "ALTER TABLE events ADD COLUMN verification_reason TEXT",
+        )
+        self._conn.commit()
+
+    def _migrate_scoped_idempotency(self) -> None:
+        self._add_column_if_missing(
+            "scoped_idempotency_key",
+            "ALTER TABLE events ADD COLUMN scoped_idempotency_key TEXT",
+        )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_producer_idempotency "
+            "ON events(producer_id, scoped_idempotency_key) "
+            "WHERE scoped_idempotency_key IS NOT NULL"
         )
         self._conn.commit()
 
@@ -378,7 +391,9 @@ class EventStore:
         ).fetchall()
         timed_out: list[int] = []
         for row in rows:
-            event = self._row_to_event(row)
+            event = self._authoritative_event_from_row(row)
+            if event is None:
+                continue
             self._conn.execute(
                 "UPDATE events SET status = ? WHERE event_id = ?",
                 (STATUS_TIMEOUT_FAILED, event.event_id),
@@ -465,40 +480,11 @@ class EventStore:
         trace_id: str | None = None,
         parent_span_id: str | None = None,
         identity_envelope: dict | None = None,
+        auto_sign: bool = True,
+        signing_key_path: Path | None = None,
     ) -> tuple[Event, bool]:
         """Return (event, duplicate)."""
-        if idempotency_key:
-            existing = self._conn.execute(
-                "SELECT * FROM events WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            if existing:
-                return self._hydrate_event(self._row_to_event(existing)), True
-
         stored_payload, artifacts = extract_artifacts(payload)
-
-        if not idempotency_key:
-            recent = self._find_recent_content_duplicate(
-                topic, producer_id, stored_payload
-            )
-            if recent:
-                return self._hydrate_event(self._row_to_event(recent)), True
-
-        if not skip_rbac:
-            check_publish_rbac(
-                self.workspace,
-                producer_id=producer_id,
-                topic=topic,
-                payload=stored_payload,
-                auth_token=auth_token,
-            )
-
-        # After RBAC so unauthorized callers never see mcpsafe policy details.
-        if self._mcpsafe is not None:
-            self._mcpsafe.require_payload(stored_payload)
-
-        if causation_id is not None:
-            self._clear_sla(causation_id)
 
         if sla_timeout_minutes is not None:
             if sla_timeout_minutes < 1:
@@ -513,7 +499,7 @@ class EventStore:
         identity_state = None
         if identity_configured(self.workspace):
             identity_state = load_trust_state(self.workspace, update_high_water=True)
-            if identity_envelope is None:
+            if identity_envelope is None and auto_sign:
                 try:
                     identity_envelope = sign_event_envelope(
                         self.workspace,
@@ -525,6 +511,7 @@ class EventStore:
                         causation_id=causation_id,
                         idempotency_key=idempotency_key,
                         trace_id=trace_id,
+                        private_key_path=signing_key_path,
                     )
                 except IdentityError as exc:
                     verification_reason = str(exc)
@@ -546,14 +533,63 @@ class EventStore:
                     verification_reason = None
                 else:
                     verification_reason = verification.reason
+            if verification_status == "verified" and identity_envelope is not None:
+                signed = identity_envelope["signed"]
+                replay = self._conn.execute(
+                    "SELECT 1 FROM identity_nonces WHERE key_id = ? AND nonce = ?",
+                    (str(signed["key_id"]), str(signed["nonce"])),
+                ).fetchone()
+                if replay is not None:
+                    raise IdentityError("identity_nonce_replay")
             if (
                 identity_state.mode in {"protected", "strict"}
                 and topic_restricted(topic, identity_state)
                 and verification_status != "verified"
             ):
                 raise IdentityError(
-                    f"identity_verification_required: {verification_reason or 'unsigned'}"
+                    "403 Forbidden: identity_verification_required: "
+                    f"{verification_reason or 'unsigned'}"
                 )
+
+        # Authentication precedes authorization and every deduplication lookup.
+        # This prevents an unverified caller from probing whether another peer
+        # already published a particular idempotency key or payload.
+        if not skip_rbac:
+            check_publish_rbac(
+                self.workspace,
+                producer_id=producer_id,
+                topic=topic,
+                payload=stored_payload,
+                auth_token=auth_token,
+            )
+
+        if self._mcpsafe is not None:
+            self._mcpsafe.require_payload(stored_payload)
+
+        existing: sqlite3.Row | None = None
+        if idempotency_key:
+            existing = self._conn.execute(
+                """
+                SELECT * FROM events
+                WHERE producer_id = ?
+                  AND (scoped_idempotency_key = ? OR
+                       (scoped_idempotency_key IS NULL AND idempotency_key = ?))
+                ORDER BY event_id DESC LIMIT 1
+                """,
+                (producer_id, idempotency_key, idempotency_key),
+            ).fetchone()
+        else:
+            existing = self._find_recent_content_duplicate(
+                topic, producer_id, stored_payload
+            )
+        if existing is not None:
+            duplicate = self._authoritative_event_from_row(existing)
+            if duplicate is None:
+                raise IdentityError("403 Forbidden: unverified_duplicate_record")
+            return duplicate, True
+
+        if causation_id is not None:
+            self._clear_sla(causation_id)
 
         event_status = status or STATUS_PUBLISHED
         event_pending_until = pending_until
@@ -605,11 +641,12 @@ class EventStore:
                     """
                     INSERT INTO events
                         (topic, producer_id, timestamp, schema_version, payload,
-                         causation_id, idempotency_key, status, pending_until,
+                         causation_id, idempotency_key, scoped_idempotency_key,
+                         status, pending_until,
                          sla_timeout_minutes, sla_deadline, sla_cleared,
                          trace_id, span_id, parent_span_id, identity_envelope,
                          verification_status, verification_reason)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         topic,
@@ -675,8 +712,10 @@ class EventStore:
         row = self._conn.execute(
             "SELECT * FROM events WHERE event_id = ?", (event_id,)
         ).fetchone()
-        event = self._row_to_event(row)
-        return self._hydrate_event(event), False
+        event = self._authoritative_event_from_row(row)
+        if event is None:  # fail closed if storage changed after insertion
+            raise IdentityError("403 Forbidden: inserted_event_failed_verification")
+        return event, False
 
     def _save_artifacts(self, event_id: int, artifacts: list[dict]) -> None:
         import hashlib
@@ -740,6 +779,58 @@ class EventStore:
             hydrated.append(data)
         return hydrated
 
+    def _authoritative_events_from_rows(
+        self, rows: list[sqlite3.Row]
+    ) -> list[Event]:
+        """Recompute identity/artifact integrity before exposing stored events."""
+        if not rows:
+            return []
+        events = [self._row_to_event(row) for row in rows]
+        artifacts = self._fetch_artifacts([event.event_id for event in events])
+        state = (
+            load_trust_state(self.workspace, update_high_water=False)
+            if identity_configured(self.workspace)
+            else None
+        )
+        authoritative: list[Event] = []
+        for event in events:
+            event_artifacts = artifacts.get(event.event_id, [])
+            if state is not None and event.identity_envelope is not None:
+                result = verify_envelope(
+                    self.workspace,
+                    event.identity_envelope,
+                    stored_payload=event.payload,
+                    artifacts=event_artifacts,
+                    expected_topic=event.topic,
+                    expected_producer=event.producer_id,
+                    expected_schema_version=event.schema_version,
+                    expected_causation_id=event.causation_id,
+                    expected_idempotency_key=event.idempotency_key,
+                    expected_trace_id=event.trace_id,
+                )
+                event.verification_status = (
+                    "verified" if result.verified else "unverified"
+                )
+                event.verification_reason = result.reason
+            elif state is not None:
+                event.verification_status = "legacy_unverified"
+                event.verification_reason = "legacy_unverified"
+            if (
+                state is not None
+                and state.mode in {"protected", "strict"}
+                and topic_restricted(event.topic, state)
+                and event.verification_status != "verified"
+            ):
+                continue
+            if event_artifacts:
+                event.payload = {**event.payload, "artifacts": event_artifacts}
+            authoritative.append(event)
+        return authoritative
+
+    def _authoritative_event_from_row(self, row: sqlite3.Row) -> Event | None:
+        events = self._authoritative_events_from_rows([row])
+        return events[0] if events else None
+
     def poll(self, topic: str, since_id: int = 0, limit: int = 50) -> dict:
         self.expire_pending()
         self.expire_sla_breaches()
@@ -754,10 +845,12 @@ class EventStore:
         ).fetchall()
         has_more = len(rows) > limit
         rows = rows[:limit]
-        events = self._hydrate_event_dicts(
-            [self._row_to_event(r).to_dict() for r in rows]
-        )
-        latest_id = events[-1]["event_id"] if events else since_id
+        events = [
+            event.to_dict() for event in self._authoritative_events_from_rows(rows)
+        ]
+        # Advance past filtered tampered rows; otherwise protected consumers can
+        # be pinned forever on the same invalid database record.
+        latest_id = rows[-1]["event_id"] if rows else since_id
         return {"events": events, "latest_id": latest_id, "has_more": has_more}
 
     def review_pending(self, topic: str | None = None, limit: int = 50) -> list[dict]:
@@ -783,7 +876,7 @@ class EventStore:
                 """,
                 (STATUS_PENDING, limit),
             ).fetchall()
-        return [self._row_to_event(r).to_dict() for r in rows]
+        return [event.to_dict() for event in self._authoritative_events_from_rows(rows)]
 
     def fetch_trace_events(self, trace_id: str) -> list[dict]:
         rows = self._conn.execute(
@@ -794,7 +887,7 @@ class EventStore:
             """,
             (trace_id,),
         ).fetchall()
-        return [self._row_to_event(r).to_dict() for r in rows]
+        return [event.to_dict() for event in self._authoritative_events_from_rows(rows)]
 
     def get_event(self, event_id: int) -> Event | None:
         row = self._conn.execute(
@@ -802,7 +895,7 @@ class EventStore:
         ).fetchone()
         if not row:
             return None
-        return self._row_to_event(row)
+        return self._authoritative_event_from_row(row)
 
     def verify_event(self, event_id: int) -> VerificationResult:
         row = self._conn.execute(
@@ -810,6 +903,8 @@ class EventStore:
         ).fetchone()
         if row is None:
             return VerificationResult(False, None, None, None, "event_not_found")
+        # Verification is itself a diagnostic read and must report invalid
+        # records rather than filtering them through protected-mode policy.
         event = self._row_to_event(row)
         if not event.identity_envelope:
             return VerificationResult(False, None, None, None, "legacy_unverified")
@@ -835,7 +930,6 @@ class EventStore:
         if event is not None:
             event.verification_status = "verified" if result.verified else "unverified"
             event.verification_reason = result.reason
-            event = self._hydrate_event(event)
         return event, result
 
     def approve_event(
@@ -856,7 +950,9 @@ class EventStore:
         ).fetchone()
         if not row:
             raise ValueError(f"event_not_found: {event_id}")
-        event = self._row_to_event(row)
+        event = self._authoritative_event_from_row(row)
+        if event is None:
+            raise IdentityError("403 Forbidden: unverified_event")
         if event.status != STATUS_PENDING:
             raise ValueError(f"event_not_pending: {event_id} status={event.status}")
 
@@ -910,7 +1006,9 @@ class EventStore:
         ).fetchone()
         if not row:
             raise ValueError(f"event_not_found: {event_id}")
-        event = self._row_to_event(row)
+        event = self._authoritative_event_from_row(row)
+        if event is None:
+            raise IdentityError("403 Forbidden: unverified_event")
         if event.status not in (STATUS_PENDING,):
             raise ValueError(f"event_not_pending: {event_id} status={event.status}")
 
@@ -960,7 +1058,7 @@ class EventStore:
             """,
             (STATUS_PUBLISHED, limit),
         ).fetchall()
-        return [self._row_to_event(r) for r in rows]
+        return self._authoritative_events_from_rows(rows)
 
     def mark_projected(self, event_ids: list[int]) -> None:
         if not event_ids:
@@ -976,26 +1074,25 @@ class EventStore:
         self.expire_sla_breaches()
         rows = self._conn.execute(
             """
-            SELECT event_id, topic, producer_id, sla_timeout_minutes, sla_deadline
+            SELECT *
             FROM events
             WHERE status = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
             ORDER BY sla_deadline
             """,
             (STATUS_PUBLISHED,),
         ).fetchall()
-        return {
-            "active": [
-                {
-                    "event_id": row["event_id"],
-                    "topic": row["topic"],
-                    "producer_id": row["producer_id"],
-                    "sla_timeout_minutes": row["sla_timeout_minutes"],
-                    "sla_deadline": row["sla_deadline"],
-                }
-                for row in rows
-            ],
-            "sla_active_count": len(rows),
-        }
+        events = self._authoritative_events_from_rows(rows)
+        active = [
+            {
+                "event_id": event.event_id,
+                "topic": event.topic,
+                "producer_id": event.producer_id,
+                "sla_timeout_minutes": event.sla_timeout_minutes,
+                "sla_deadline": event.sla_deadline,
+            }
+            for event in events
+        ]
+        return {"active": active, "sla_active_count": len(active)}
 
     def latest_event_id(self) -> int:
         row = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()
@@ -1004,27 +1101,18 @@ class EventStore:
     def status(self, producer_id: str | None = None) -> dict:
         self.expire_pending()
         self.expire_sla_breaches()
-        count = self._conn.execute("SELECT COUNT(*) AS c FROM events").fetchone()["c"]
-        latest = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()[
-            "m"
-        ]
-        pending = self._conn.execute(
-            "SELECT COUNT(*) AS c FROM events WHERE status = ?",
-            (STATUS_PENDING,),
-        ).fetchone()["c"]
-        sla_active = self._conn.execute(
-            """
-            SELECT COUNT(*) AS c FROM events
-            WHERE status = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
-            """,
-            (STATUS_PUBLISHED,),
-        ).fetchone()["c"]
-        topics = [
-            r["topic"]
-            for r in self._conn.execute(
-                "SELECT DISTINCT topic FROM events ORDER BY topic"
-            ).fetchall()
-        ]
+        rows = self._conn.execute("SELECT * FROM events ORDER BY event_id").fetchall()
+        events = self._authoritative_events_from_rows(rows)
+        count = len(events)
+        latest = max((event.event_id for event in events), default=0)
+        pending = sum(event.status == STATUS_PENDING for event in events)
+        sla_active = sum(
+            event.status == STATUS_PUBLISHED
+            and not event.sla_cleared
+            and event.sla_deadline is not None
+            for event in events
+        )
+        topics = sorted({event.topic for event in events})
         # Live PRAGMA read when available (more accurate than remembered override).
         try:
             live_journal = self._conn.execute("PRAGMA journal_mode").fetchone()[0]
@@ -1061,7 +1149,12 @@ class EventStore:
             schema_version=row["schema_version"],
             payload=json.loads(row["payload"]),
             causation_id=row["causation_id"],
-            idempotency_key=row["idempotency_key"],
+            idempotency_key=(
+                row["scoped_idempotency_key"]
+                if "scoped_idempotency_key" in keys
+                and row["scoped_idempotency_key"] is not None
+                else row["idempotency_key"]
+            ),
             status=row["status"] if "status" in keys else STATUS_PUBLISHED,
             pending_until=row["pending_until"] if "pending_until" in keys else None,
             rejection_reason=row["rejection_reason"]
