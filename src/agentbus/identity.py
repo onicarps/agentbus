@@ -334,7 +334,11 @@ def _load_root_public(root: Path) -> Ed25519PublicKey:
 
 
 def configured(workspace: Path) -> bool:
-    return (_identity_dir(workspace) / "trust-root.json").is_file()
+    root = _identity_dir(workspace)
+    return all(
+        (root / name).is_file()
+        for name in ("trust-root.json", "policy.json", "registry.json")
+    )
 
 
 def load_trust_state(workspace: Path, *, update_high_water: bool = False) -> TrustState:

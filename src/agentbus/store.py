@@ -591,11 +591,30 @@ class EventStore:
                 """,
                 (producer_id, idempotency_key, idempotency_key),
             ).fetchone()
-        else:
+        elif verification_status != "verified":
+            # Advisory content deduplication predates AgentID and cannot consume
+            # or authorize a signed nonce.  Sending an identical signed envelope
+            # is a replay, not a successful duplicate; let the transactional
+            # identity_nonces constraint decide it below.  A caller that wants
+            # signed deduplication must bind an explicit idempotency key into the
+            # envelope.
             existing = self._find_recent_content_duplicate(
                 topic, producer_id, stored_payload
             )
         if existing is not None:
+            if verification_status == "verified" and identity_envelope is not None:
+                existing_raw = existing["identity_envelope"]
+                if existing_raw:
+                    existing_envelope = json.loads(existing_raw)
+                    existing_signed = existing_envelope.get("signed") or {}
+                    submitted_signed = identity_envelope.get("signed") or {}
+                    if (
+                        existing_signed.get("key_id")
+                        == submitted_signed.get("key_id")
+                        and existing_signed.get("nonce")
+                        == submitted_signed.get("nonce")
+                    ):
+                        raise IdentityError("identity_nonce_replay")
             duplicate = self._authoritative_event_from_row(existing)
             if duplicate is None:
                 raise IdentityError("403 Forbidden: unverified_duplicate_record")

@@ -1,8 +1,8 @@
 # AgentBus Roadmap
 
-**Current release:** v0.19.0 (August 2026)
+**Current release:** v0.20.0 (August 2026)
 
-**Next milestone:** v0.20 — AgentID cryptographic identity and anti-impersonation
+**Next milestone:** v0.21 — isolated broker IPC and offline root custody
 
 The v0.20 security contract is:
 
@@ -15,12 +15,20 @@ The v0.20 security contract is:
 - [x] `ABUS-020-002`: canonical Ed25519/RFC 8785 envelope and cross-language fixtures
 - [x] `ABUS-020-003`: signed policy/registry lifecycle, rotation, revocation, nonce and clock state
 - [x] `ABUS-020-010`: protected store-backed wake rehydration and policy-bound ingress capability
-- [ ] `ABUS-020-004`: signer isolation and bounded child delegation
-- [ ] `ABUS-020-005`: mandatory verify-at-read and producer-scoped deduplication
-- [ ] `ABUS-020-006`: typed privileged actions and separation of duties
-- [ ] `ABUS-020-007`: complete SDK/doctor integration and strict readiness diagnostics
-- [ ] `ABUS-020-008`: released-fixture migration and staged rollout
-- [ ] `ABUS-020-009`: full 32-case adversarial suite plus exact July incident fixtures
+- [x] `ABUS-020-004`: signer isolation and bounded child delegation
+- [x] `ABUS-020-005`: mandatory verify-at-read and producer-scoped deduplication
+- [x] `ABUS-020-006`: typed privileged actions and separation of duties
+- [x] `ABUS-020-007`: complete SDK/doctor integration and honest strict readiness diagnostics
+- [x] `ABUS-020-008`: released-fixture migration and staged rollout
+- [x] `ABUS-020-009`: full 32-case adversarial suite plus exact July incident fixtures
+
+## v0.21 Isolated Broker IPC
+
+- [ ] `ABUS-021-001`: Python reference-monitor daemon, framed Unix socket, kernel peer credentials, and broker-only writes
+- [ ] `ABUS-021-002`: Python, Go, and TypeScript broker client transports with strict closed behavior
+- [ ] `ABUS-021-003`: offline root generation, detached policy ceremony, import, rotation, and revocation
+- [ ] `ABUS-021-004`: active strict-readiness probes and expiring isolation receipts
+- [ ] `ABUS-021-005`: distinct service users, systemd deployment, rollback drill, and live strict promotion
 
 ## Shipped
 
