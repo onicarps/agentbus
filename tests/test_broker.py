@@ -26,6 +26,7 @@ from agentbus.broker.server import (
 from agentbus.client import (
     BrokerTransport,
     BrokerTransportError,
+    broker_socket_for_workspace,
     open_event_transport,
 )
 from agentbus.ceremony import (
