@@ -54,6 +54,7 @@ from agentbus.project_log import project_handoffs
 from agentbus.schema_registry import import_schema_file, list_schemas, register_schema
 from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
+from agentbus.client import EventTransport, open_event_transport
 from agentbus.store import EventStore
 from agentbus.workspace_config import resolve_retention_days
 from agentbus.tail import run_tail
@@ -91,11 +92,11 @@ def _producer_id(override: str | None) -> str:
     return pid
 
 
-def _open_store(workspace: str | None, retention_days: int) -> EventStore:
+def _open_store(workspace: str | None, retention_days: int) -> EventTransport:
     ws = _cli_workspace(workspace)
     set_validation_workspace(ws)
     days = resolve_retention_days(ws, retention_days)
-    return EventStore(ws, retention_days=days)
+    return open_event_transport(ws, retention_days=days)
 
 
 def _open_lease_store(workspace: str | None) -> LeaseStore:

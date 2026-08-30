@@ -2,11 +2,13 @@ import { EventEmitter } from "events";
 import { DatabaseWatcher } from "./watcher";
 import { getDatabasePath } from "./locator";
 import { createStdioMcpClient } from "./stdio";
+import { createBrokerMcpClient } from "./broker";
 import type { AgentBusOptions, BusEvent, McpToolClient } from "./types";
 
 export { getDatabasePath } from "./locator";
 export { DatabaseWatcher } from "./watcher";
 export { createStdioMcpClient } from "./stdio";
+export { createBrokerMcpClient } from "./broker";
 export {
   agentIdCanonicalSha256,
   canonicalizeAgentId,
@@ -63,6 +65,10 @@ export class AgentBus extends EventEmitter {
     const spawnedMcpHere = !this.mcp;
     try {
       if (!this.mcp) {
+        const brokerSocket = this.options.brokerSocket ?? process.env.AGENTBUS_BROKER_SOCKET;
+        if (brokerSocket) {
+          this.mcp = createBrokerMcpClient(brokerSocket);
+        } else {
         const producerId =
           this.options.producerId ?? process.env.AGENTBUS_PRODUCER_ID;
         const env: Record<string, string> = {
@@ -79,19 +85,16 @@ export class AgentBus extends EventEmitter {
           env,
         });
         this.ownsMcp = true;
+        }
       }
 
-      const dbPath = getDatabasePath(this.options.workspace);
-      this.watcher = new DatabaseWatcher(
-        dbPath,
-        () => {
-          void this.poll().catch((err: unknown) => {
-            this.reportBackgroundError(err);
-          });
-        },
-        this.options.fallbackMs ?? 5000,
-      );
-      this.watcher.start();
+      if (!this.options.brokerSocket && !process.env.AGENTBUS_BROKER_SOCKET) {
+        const dbPath = getDatabasePath(this.options.workspace);
+        this.watcher = new DatabaseWatcher(dbPath, () => {
+          void this.poll().catch((err: unknown) => this.reportBackgroundError(err));
+        }, this.options.fallbackMs ?? 5000);
+        this.watcher.start();
+      }
 
       // Initial catch-up poll — must succeed before we mark connected.
       await this.poll();

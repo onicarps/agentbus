@@ -23,6 +23,11 @@ from agentbus.broker.server import (
     BrokerServer,
     PeerCredentials,
 )
+from agentbus.client import (
+    BrokerTransport,
+    BrokerTransportError,
+    open_event_transport,
+)
 from agentbus.ceremony import (
     export_policy_request,
     generate_enrollment_request,
@@ -30,6 +35,12 @@ from agentbus.ceremony import (
     import_signed_policy,
     initialize_offline_identity,
     sign_policy_request,
+)
+from agentbus.client import (
+    BrokerTransport,
+    BrokerTransportError,
+    broker_socket_for_workspace,
+    open_event_transport,
 )
 from agentbus.identity import IdentityError, sign_event_envelope
 from agentbus.rbac import ensure_default_roles
@@ -169,6 +180,111 @@ def test_unix_server_uses_length_prefixed_request_response(tmp_path: Path) -> No
         server.server_close()
         thread.join(timeout=2)
     assert not socket_path.exists()
+
+
+def test_python_transport_roundtrip_against_live_broker(tmp_path: Path) -> None:
+    workspace, peer_key, _username = _workspace(tmp_path)
+    socket_path = tmp_path / "run" / "agentbus.sock"
+    server = BrokerServer(socket_path, BrokerApplication(workspace))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    transport = BrokerTransport(workspace, socket_path)
+    try:
+        payload = {"from": "codex", "to": "agy", "summary": "client transport"}
+        event, duplicate = transport.publish(
+            topic="okf/handoff",
+            producer_id="codex",
+            schema_version="1.0",
+            payload=payload,
+            action={"type": "implementation"},
+            signing_key_path=peer_key,
+        )
+        assert duplicate is False
+        assert event.verification_status == "verified"
+        page = transport.poll("okf/handoff", since_id=0, limit=10)
+        assert [item["event_id"] for item in page["events"]] == [event.event_id]
+        assert transport.get_event(event.event_id) == event
+        assert transport.verify_event(event.event_id).verified is True
+        assert transport.status()["event_count"] == 1
+    finally:
+        transport.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_broker_selection_is_mandatory_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing = tmp_path / "missing.sock"
+    monkeypatch.setenv("AGENTBUS_BROKER_SOCKET", str(missing))
+    assert broker_socket_for_workspace(workspace) == missing
+    transport = open_event_transport(workspace)
+    assert isinstance(transport, BrokerTransport)
+    with pytest.raises(BrokerTransportError, match="broker_unavailable"):
+        transport.status()
+    assert not (workspace / ".agentbus" / "events.db").exists()
+
+
+def test_python_transport_selects_direct_only_without_broker_requirement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.delenv("AGENTBUS_BROKER_SOCKET", raising=False)
+    transport = open_event_transport(workspace, auto_prune=False)
+    try:
+        from agentbus.store import EventStore
+
+        assert isinstance(transport, EventStore)
+    finally:
+        transport.close()
+
+
+def test_python_transport_round_trips_over_live_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, _peer_key, _username = _workspace(tmp_path)
+    socket_path = tmp_path / "run" / "agentbus.sock"
+    server = BrokerServer(socket_path, BrokerApplication(workspace))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("AGENTBUS_BROKER_SOCKET", str(socket_path))
+    transport = open_event_transport(workspace)
+    try:
+        assert isinstance(transport, BrokerTransport)
+        event, duplicate = transport.publish(
+            topic="okf/handoff",
+            producer_id="codex",
+            schema_version="1.0",
+            payload={"from": "codex", "to": "agy", "summary": "through broker"},
+            auto_sign=False,
+        )
+        assert duplicate is False
+        assert event.producer_id == "codex"
+        result = transport.poll("okf/handoff", since_id=0, limit=10)
+        assert [item["event_id"] for item in result["events"]] == [event.event_id]
+        assert transport.status()["workspace"] == str(workspace)
+    finally:
+        transport.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_configured_broker_fails_closed_without_creating_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("AGENTBUS_BROKER_SOCKET", str(tmp_path / "missing.sock"))
+    transport = open_event_transport(workspace)
+    assert isinstance(transport, BrokerTransport)
+    with pytest.raises(BrokerTransportError, match="broker_unavailable"):
+        transport.status()
+    assert not (workspace / ".agentbus" / "events.db").exists()
 
 
 def test_protocol_rejects_duplicate_json_and_oversized_frames() -> None:

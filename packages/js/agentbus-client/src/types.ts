@@ -17,6 +17,8 @@ export type BusEvent = {
 };
 
 export type AgentBusOptions = {
+  /** Authenticated broker Unix socket; disables SQLite watcher and stdio MCP. */
+  brokerSocket?: string;
   /** Override workspace (defaults to AGENTBUS_WORKSPACE). */
   workspace?: string;
   /** Fallback poll interval when fs.watch is quiet (ms). */
