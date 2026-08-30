@@ -151,6 +151,8 @@ class BrokerTransport:
         for name in ("status", "pending_until"):
             if kwargs.get(name) is not None:
                 raise BrokerTransportError("broker_publish_direct_override_refused")
+        if kwargs.get("auth_token") is not None:
+            raise BrokerTransportError("broker_publish_auth_token_refused")
         for name in ("skip_intercept", "skip_rbac"):
             if kwargs.get(name):
                 raise BrokerTransportError("broker_publish_direct_override_refused")
@@ -251,6 +253,28 @@ class BrokerTransport:
     def close(self) -> None:
         """Connections are request-scoped; retained for transport parity."""
 
+    def _unsupported(self, operation: str, **kwargs: Any) -> Any:
+        del kwargs
+        raise BrokerTransportError(f"broker_operation_unsupported:{operation}")
+
+    def review_pending(self, topic: str | None = None, limit: int = 50) -> Any:
+        return self._unsupported("review_pending", topic=topic, limit=limit)
+
+    def approve_event(self, event_id: int, **kwargs: Any) -> Any:
+        return self._unsupported("approve_event", event_id=event_id, **kwargs)
+
+    def reject_event(self, event_id: int, **kwargs: Any) -> Any:
+        return self._unsupported("reject_event", event_id=event_id, **kwargs)
+
+    def list_active_slas(self) -> Any:
+        return self._unsupported("list_active_slas")
+
+    def _clear_sla(self, event_id: int) -> Any:
+        return self._unsupported("clear_sla", event_id=event_id)
+
+    def project_handoffs(self, **kwargs: Any) -> Any:
+        return self._unsupported("project_handoffs", **kwargs)
+
 
 def broker_socket_for_workspace(workspace: Path) -> Path | None:
     """Select the broker without ever treating failure as fallback permission."""
@@ -260,7 +284,7 @@ def broker_socket_for_workspace(workspace: Path) -> Path | None:
     if identity_configured(workspace):
         state = load_trust_state(workspace, update_high_water=False)
         if state.mode == "strict":
-            return DEFAULT_BROKER_SOCKET
+            raise BrokerTransportError("broker_socket_required_in_strict_mode")
     try:
         mode = os.lstat(DEFAULT_BROKER_SOCKET).st_mode
     except OSError:

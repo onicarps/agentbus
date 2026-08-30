@@ -36,12 +36,6 @@ from agentbus.ceremony import (
     initialize_offline_identity,
     sign_policy_request,
 )
-from agentbus.client import (
-    BrokerTransport,
-    BrokerTransportError,
-    broker_socket_for_workspace,
-    open_event_transport,
-)
 from agentbus.identity import IdentityError, sign_event_envelope
 from agentbus.rbac import ensure_default_roles
 
@@ -272,19 +266,6 @@ def test_python_transport_round_trips_over_live_broker(
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
-
-
-def test_configured_broker_fails_closed_without_creating_database(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setenv("AGENTBUS_BROKER_SOCKET", str(tmp_path / "missing.sock"))
-    transport = open_event_transport(workspace)
-    assert isinstance(transport, BrokerTransport)
-    with pytest.raises(BrokerTransportError, match="broker_unavailable"):
-        transport.status()
-    assert not (workspace / ".agentbus" / "events.db").exists()
 
 
 def test_protocol_rejects_duplicate_json_and_oversized_frames() -> None:

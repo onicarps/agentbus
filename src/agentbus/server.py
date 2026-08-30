@@ -39,7 +39,9 @@ def _get_store() -> EventTransport:
 
 def _get_lease_store() -> LeaseStore:
     if _lease_store is None:
-        raise RuntimeError("lease store not initialized — run via agentbus serve")
+        from agentbus.client import BrokerTransportError
+
+        raise BrokerTransportError("broker_lease_operations_unsupported")
     return _lease_store
 
 
