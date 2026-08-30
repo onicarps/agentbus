@@ -275,6 +275,15 @@ class BrokerTransport:
     def project_handoffs(self, **kwargs: Any) -> Any:
         return self._unsupported("project_handoffs", **kwargs)
 
+    def fetch_trace_events(self, trace_id: str) -> Any:
+        return self._unsupported("fetch_trace_events", trace_id=trace_id)
+
+    def fetch_unprojected_handoffs(self, limit: int = 100) -> Any:
+        return self._unsupported("fetch_unprojected_handoffs", limit=limit)
+
+    def set_mcpsafe(self, enforcer: Any) -> Any:
+        return self._unsupported("set_mcpsafe", enforcer=enforcer)
+
 
 def broker_socket_for_workspace(workspace: Path) -> Path | None:
     """Select the broker without ever treating failure as fallback permission."""

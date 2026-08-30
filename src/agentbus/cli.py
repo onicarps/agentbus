@@ -447,14 +447,14 @@ def publish(
         raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
     try:
-        enforcer = load_enforcer(
-            ws,
-            enabled=enable_mcpsafe or mcpsafe_enabled_from_env(),
-            lockfile=mcpsafe_lock,
-        )
-        if enforcer is not None:
-            store.set_mcpsafe(enforcer)
         try:
+            enforcer = load_enforcer(
+                ws,
+                enabled=enable_mcpsafe or mcpsafe_enabled_from_env(),
+                lockfile=mcpsafe_lock,
+            )
+            if enforcer is not None:
+                store.set_mcpsafe(enforcer)
             event, duplicate = store.publish(
                 topic=topic,
                 producer_id=_producer_id(producer_id),
@@ -634,6 +634,8 @@ def sla_list(ctx: click.Context) -> None:
     store = _open_store(opts.get("workspace"), opts.get("retention_days", 7))
     try:
         click.echo(json.dumps(store.list_active_slas()))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -648,6 +650,8 @@ def sla_clear(ctx: click.Context, event_id: int) -> None:
     try:
         store._clear_sla(event_id)
         click.echo(json.dumps({"event_id": event_id, "sla_cleared": True}))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -770,6 +774,8 @@ def project_log(
         if dry_run and result["lines"]:
             click.echo("---")
             click.echo("\n\n".join(result["lines"]))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -969,6 +975,8 @@ def review(workspace: str, topic: str | None, limit: int, retention_days: int) -
     store = _open_store(workspace, retention_days)
     try:
         click.echo(json.dumps(store.review_pending(topic=topic, limit=limit)))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -1079,10 +1087,12 @@ def trace(workspace: str, trace_id: str, retention_days: int) -> None:
 
     store = _open_store(workspace, retention_days)
     try:
-        events = store.fetch_trace_events(trace_id)
-        roots = build_trace_tree(events)
         try:
+            events = store.fetch_trace_events(trace_id)
+            roots = build_trace_tree(events)
             click.echo(render_trace_tree(trace_id, roots))
+        except IdentityError as exc:
+            raise click.ClickException(str(exc)) from exc
         except ImportError as exc:
             raise click.ClickException(
                 "rich required for trace visualization — pip install 'okf-agentbus[devex]'"

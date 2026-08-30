@@ -287,7 +287,13 @@ def agentbus_review(topic: str | None = None, limit: int = 50) -> str:
     """List events pending human approval (hidden from standard poll)."""
 
     def _run() -> str:
-        return json.dumps(_get_store().review_pending(topic=topic, limit=min(limit, 100)))
+        try:
+            return json.dumps(
+                _get_store().review_pending(topic=topic, limit=min(limit, 100))
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt("agentbus_review", {"topic": topic, "limit": limit}, _run)
 
@@ -362,10 +368,14 @@ def agentbus_lock_acquire(
     """Acquire an exclusive advisory lease on a workspace resource."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        return json.dumps(
-            _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
-        )
+        try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            return json.dumps(
+                _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt(
         "agentbus_lock_acquire",
@@ -389,10 +399,14 @@ def agentbus_lock_release(
     """Release a held lease (idempotent if already expired)."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        return json.dumps(
-            _get_lease_store().lock_release(resource, lease_id, owner_id)
-        )
+        try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            return json.dumps(
+                _get_lease_store().lock_release(resource, lease_id, owner_id)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt(
         "agentbus_lock_release",
@@ -417,10 +431,14 @@ def agentbus_lock_renew(
     """Extend TTL on an active lease (heartbeat)."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        return json.dumps(
-            _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
-        )
+        try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            return json.dumps(
+                _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt(
         "agentbus_lock_renew",
@@ -440,7 +458,11 @@ def agentbus_lock_status(resource: str) -> str:
     """Check lock state without acquiring (no auth required)."""
 
     def _run() -> str:
-        return json.dumps(_get_lease_store().lock_status(resource))
+        try:
+            return json.dumps(_get_lease_store().lock_status(resource))
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt("agentbus_lock_status", {"resource": resource}, _run)
 
