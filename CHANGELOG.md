@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-08-30
+
+### Fixed
+
+- Align the Python runtime version with release metadata and make the packaging
+  regression test compare those two authoritative values without a hard-coded
+  release number.
+- Prevent concurrent signed-envelope content deduplication from bypassing
+  nonce-replay rejection, and stress the invariant across repeated concurrent
+  submissions.
+
+## [0.20.1] - 2026-08-30
+
+### Fixed
+
+- Contain RBAC rejection of generated runner acknowledgement text: retain the
+  complete adapter output in the private durable run record, publish a
+  schema-controlled fallback acknowledgement, and keep the long-running loop
+  alive after an unexpected iteration error.
+- Treat an explicit `resolve_workspace(path)` argument as authoritative instead
+  of redirecting it to a Git or AgentBus ancestor (`ABUS-ECO-002`).
+
+### Security
+
+- Bound Go framed messages to 4 MiB, add fuzz targets for canonical JSON,
+  Ed25519 verification, and framed-message parsing, and run Go tests with the
+  race detector in CI.
+
+## [0.20.0] - 2026-08-26
+
 ### Added — AgentID Phase 1
 
 - Add root-signed workspace identity policy and public-key registry with Ed25519 enrollment, rotation, immediate revocation, monotonic policy/registry high-water checks, and runtime-specific wake capabilities.
@@ -54,23 +84,6 @@
   certification-substitution plus Grok/Hermes peer-impersonation fixtures.
 - Reject unpaired escaped UTF-16 surrogates at the Go canonicalization boundary
   before JSON decoding can replace and erase the invalid scalar.
-
-## [0.20.1] - 2026-08-30
-
-### Fixed
-
-- Contain RBAC rejection of generated runner acknowledgement text: retain the
-  complete adapter output in the private durable run record, publish a
-  schema-controlled fallback acknowledgement, and keep the long-running loop
-  alive after an unexpected iteration error.
-- Treat an explicit `resolve_workspace(path)` argument as authoritative instead
-  of redirecting it to a Git or AgentBus ancestor (`ABUS-ECO-002`).
-
-### Security
-
-- Bound Go framed messages to 4 MiB, add fuzz targets for canonical JSON,
-  Ed25519 verification, and framed-message parsing, and run Go tests with the
-  race detector in CI.
 
 ## [0.19.0] - 2026-08-23
 

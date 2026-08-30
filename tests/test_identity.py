@@ -536,9 +536,16 @@ def test_store_rejects_signed_nonce_replay(tmp_path: Path, monkeypatch) -> None:
     store.close()
 
 
-def test_concurrent_identical_envelope_has_one_commit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("round_number", range(10))
+def test_concurrent_identical_envelope_has_one_commit(
+    tmp_path: Path, round_number: int
+) -> None:
     _boot_and_enroll(tmp_path)
-    payload = {"from": "codex", "to": "factory", "summary": "one envelope"}
+    payload = {
+        "from": "codex",
+        "to": "factory",
+        "summary": f"one envelope round {round_number}",
+    }
     envelope = sign_event_envelope(
         tmp_path,
         topic="okf/handoff",

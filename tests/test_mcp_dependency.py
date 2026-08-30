@@ -6,6 +6,8 @@ import tomllib
 from importlib.metadata import version
 from pathlib import Path
 
+from agentbus import __version__
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,7 +17,7 @@ def test_project_metadata_pins_supported_mcp_major() -> None:
         "project"
     ]
 
-    assert project["version"] == "0.20.0"
+    assert project["version"] == __version__
     assert "mcp>=2,<3" in project["dependencies"]
 
 

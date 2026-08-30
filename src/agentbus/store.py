@@ -596,6 +596,18 @@ class EventStore:
                 topic, producer_id, stored_payload
             )
         if existing is not None:
+            # A concurrent publisher may have committed the same signed
+            # envelope after the replay check above but before this content
+            # deduplication lookup. Re-check the nonce here so content dedup
+            # cannot turn a signed replay into an apparent successful publish.
+            if verification_status == "verified" and identity_envelope is not None:
+                signed = identity_envelope["signed"]
+                replay = self._conn.execute(
+                    "SELECT 1 FROM identity_nonces WHERE key_id = ? AND nonce = ?",
+                    (str(signed["key_id"]), str(signed["nonce"])),
+                ).fetchone()
+                if replay is not None:
+                    raise IdentityError("identity_nonce_replay")
             duplicate = self._authoritative_event_from_row(existing)
             if duplicate is None:
                 raise IdentityError("403 Forbidden: unverified_duplicate_record")
