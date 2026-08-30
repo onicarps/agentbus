@@ -55,6 +55,23 @@
 - Reject unpaired escaped UTF-16 surrogates at the Go canonicalization boundary
   before JSON decoding can replace and erase the invalid scalar.
 
+## [0.20.1] - 2026-08-30
+
+### Fixed
+
+- Contain RBAC rejection of generated runner acknowledgement text: retain the
+  complete adapter output in the private durable run record, publish a
+  schema-controlled fallback acknowledgement, and keep the long-running loop
+  alive after an unexpected iteration error.
+- Treat an explicit `resolve_workspace(path)` argument as authoritative instead
+  of redirecting it to a Git or AgentBus ancestor (`ABUS-ECO-002`).
+
+### Security
+
+- Bound Go framed messages to 4 MiB, add fuzz targets for canonical JSON,
+  Ed25519 verification, and framed-message parsing, and run Go tests with the
+  race detector in CI.
+
 ## [0.19.0] - 2026-08-23
 
 ### Added
