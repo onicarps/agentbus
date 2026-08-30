@@ -10,6 +10,8 @@ import pytest
 import yaml
 
 from agentbus.runner import load_runner_config, run_once
+from agentbus.runner.loop import run_loop
+from agentbus.runner.types import TurnResult
 from agentbus.runner.adapters import get_adapter
 from agentbus.store import EventStore
 
@@ -303,3 +305,71 @@ def test_companion_ack_copies_slack_links(tmp_path: Path):
         assert "RUNNER_ACK" in ack["payload"]["summary"]
     finally:
         store.close()
+
+
+def test_rbac_rejected_adapter_output_uses_safe_ack_and_runner_marks_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: forbidden adapter prose must not kill the Codex runner."""
+    from agentbus.rbac import ensure_default_roles
+    from agentbus.runner.adapters.echo import EchoAdapter
+
+    ensure_default_roles(tmp_path)
+    cfg_path = _write_runner_yaml(
+        tmp_path / "runner.yaml",
+        producer_id="codex",
+        intake={"mode": "webhook_queue", "runtime": "codex"},
+        accept_to=["codex"],
+    )
+    _enqueue(tmp_path, 10049, to="codex", frm="agy")
+    source = tmp_path / ".agentbus" / "ingress" / "hermes_wake_queue.jsonl"
+    target = tmp_path / ".agentbus" / "ingress" / "codex_wake_queue.jsonl"
+    source.replace(target)
+
+    monkeypatch.setattr(
+        EchoAdapter,
+        "start_turn",
+        lambda self, wake, budget_remaining: TurnResult(
+            ok=True,
+            summary="RUNNER_ACK: analysis says PASS and must stay in run record",
+        ),
+    )
+    cfg = load_runner_config(cfg_path)
+    results = run_once(tmp_path, cfg)
+
+    assert results[0]["status"] == "processed"
+    done = tmp_path / ".agentbus" / "ingress" / "codex_wake_done.ids"
+    assert "10049" in done.read_text(encoding="utf-8")
+    run_record = json.loads(
+        (tmp_path / ".agentbus" / "runs" / "10049" / "result.json").read_text()
+    )
+    assert "PASS" in run_record["result"]["summary"]
+    store = EventStore(tmp_path)
+    try:
+        events = store.poll("okf/handoff")["events"]
+    finally:
+        store.close()
+    assert len(events) == 1
+    assert "PASS" not in events[0]["payload"]["summary"]
+    assert "output withheld by RBAC" in events[0]["payload"]["summary"]
+
+
+def test_run_loop_contains_unexpected_iteration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cfg_path = _write_runner_yaml(tmp_path / "runner.yaml")
+    cfg = load_runner_config(cfg_path)
+    calls = 0
+
+    def fake_run_once(_workspace: Path, _cfg):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("poison turn")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("agentbus.runner.loop.run_once", fake_run_once)
+    monkeypatch.setattr("agentbus.runner.loop.time.sleep", lambda _seconds: None)
+    with pytest.raises(KeyboardInterrupt):
+        run_loop(tmp_path, cfg)
+    assert calls == 2

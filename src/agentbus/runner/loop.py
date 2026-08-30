@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agentbus.resilience import publish_or_spill
+from agentbus.rbac import ForbiddenError
 from agentbus.runner.adapters import get_adapter
 from agentbus.runner.adapters.prompt_common import is_ops_noise_summary
 from agentbus.runner.budget import ChainBudget
@@ -219,6 +220,72 @@ def companion_ack_payload(
     return payload
 
 
+def publish_companion_ack(
+    store: EventStore,
+    *,
+    workspace: Path,
+    cfg: RunnerConfig,
+    wake: WakeEnvelope,
+    reply_to: str,
+    summary: str,
+    spill_context: dict[str, Any],
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Publish an ACK without letting untrusted adapter output kill the runner.
+
+    Adapter output is persisted in ``runs/<event_id>/result.json`` before this
+    function is called.  If that output violates the producer's RBAC payload
+    rules, publish a minimal operational ACK pointing at the durable record.
+    The fallback deliberately contains no adapter-controlled text.
+    """
+    publish_kwargs = {
+        "topic": "okf/handoff",
+        "producer_id": cfg.producer_id,
+        "schema_version": "1.0",
+        "payload": companion_ack_payload(
+            producer_id=cfg.producer_id,
+            reply_to=reply_to,
+            summary=summary,
+            wake=wake,
+        ),
+        "causation_id": wake.event_id,
+        "idempotency_key": idempotency_key
+        or f"runner-ack:{cfg.runner_id}:{wake.event_id}",
+    }
+    try:
+        return publish_or_spill(
+            store,
+            workspace=workspace,
+            publish_kwargs=publish_kwargs,
+            spill_context=spill_context,
+        )
+    except ForbiddenError as exc:
+        log.warning(
+            "runner ack rejected by RBAC event_id=%s; publishing safe fallback: %s",
+            wake.event_id,
+            exc,
+        )
+        safe_summary = (
+            f"RUNNER_ACK: {cfg.producer_id} completed event_id={wake.event_id}; "
+            f"adapter output withheld by RBAC; see "
+            f".agentbus/runs/{wake.event_id}/result.json"
+        )
+        publish_kwargs["payload"] = companion_ack_payload(
+            producer_id=cfg.producer_id,
+            reply_to=reply_to,
+            summary=safe_summary,
+            wake=wake,
+        )
+        fallback_context = dict(spill_context)
+        fallback_context["rbac_fallback"] = True
+        return publish_or_spill(
+            store,
+            workspace=workspace,
+            publish_kwargs=publish_kwargs,
+            spill_context=fallback_context,
+        )
+
+
 def detect_suspend(
     workspace: Path, wake: WakeEnvelope, result: TurnResult
 ) -> TurnResult:
@@ -368,24 +435,16 @@ def process_envelope(
         if result.status == "suspended":
             # Persist the finalized suspended record (matches the published ACK).
             _write_run_log(workspace, cfg, wake, result)
-            pub = publish_or_spill(
+            pub = publish_companion_ack(
                 store,
                 workspace=workspace,
-                publish_kwargs={
-                    "topic": "okf/handoff",
-                    "producer_id": cfg.producer_id,
-                    "schema_version": "1.0",
-                    "payload": companion_ack_payload(
-                        producer_id=cfg.producer_id,
-                        reply_to=reply_to,
-                        summary=result.summary,
-                        wake=wake,
-                    ),
-                    "causation_id": wake.event_id,
-                    "idempotency_key": suspend_ack_idempotency_key(
-                        cfg.runner_id, wake.event_id
-                    ),
-                },
+                cfg=cfg,
+                wake=wake,
+                reply_to=reply_to,
+                summary=result.summary,
+                idempotency_key=suspend_ack_idempotency_key(
+                    cfg.runner_id, wake.event_id
+                ),
                 spill_context={
                     "kind": "runner_suspend_ack",
                     "runner_id": cfg.runner_id,
@@ -460,22 +519,13 @@ def process_envelope(
             "circuit_break": True,
         }
 
-    pub = publish_or_spill(
+    pub = publish_companion_ack(
         store,
         workspace=workspace,
-        publish_kwargs={
-            "topic": "okf/handoff",
-            "producer_id": cfg.producer_id,
-            "schema_version": "1.0",
-            "payload": companion_ack_payload(
-                producer_id=cfg.producer_id,
-                reply_to=reply_to,
-                summary=result.summary,
-                wake=wake,
-            ),
-            "causation_id": wake.event_id,
-            "idempotency_key": f"runner-ack:{cfg.runner_id}:{wake.event_id}",
-        },
+        cfg=cfg,
+        wake=wake,
+        reply_to=reply_to,
+        summary=result.summary,
         spill_context={
             "kind": "runner_ack",
             "runner_id": cfg.runner_id,
@@ -598,7 +648,14 @@ def run_loop(workspace: Path, cfg: RunnerConfig, *, once: bool = False) -> int:
         cfg.producer_id,
     )
     while True:
-        results = run_once(workspace, cfg)
+        try:
+            results = run_once(workspace, cfg)
+        except KeyboardInterrupt:
+            raise
+        except Exception:  # noqa: BLE001 -- keep one poison turn from killing service
+            log.exception("runner iteration failed; continuing after backoff")
+            time.sleep(max(0.05, cfg.poll_interval_ms / 1000.0))
+            continue
         if results:
             log.info("batch size=%s", len(results))
         time.sleep(max(0.05, cfg.poll_interval_ms / 1000.0))

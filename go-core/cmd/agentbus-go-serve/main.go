@@ -33,6 +33,8 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+const maxRPCMessageBytes = 4 * 1024 * 1024
+
 func main() {
 	ws := os.Getenv("AGENTBUS_WORKSPACE")
 	if ws == "" {
@@ -281,6 +283,9 @@ func readMessage(r *bufio.Reader) (*rpcRequest, error) {
 		if err != nil && len(line) == 0 {
 			return nil, err
 		}
+		if len(line) > maxRPCMessageBytes {
+			return nil, fmt.Errorf("message exceeds %d bytes", maxRPCMessageBytes)
+		}
 		var req rpcRequest
 		if err := json.Unmarshal(line, &req); err != nil {
 			return nil, err
@@ -304,6 +309,9 @@ func readMessage(r *bufio.Reader) (*rpcRequest, error) {
 	}
 	if contentLength <= 0 {
 		return nil, fmt.Errorf("missing Content-Length")
+	}
+	if contentLength > maxRPCMessageBytes {
+		return nil, fmt.Errorf("message exceeds %d bytes", maxRPCMessageBytes)
 	}
 	body := make([]byte, contentLength)
 	if _, err := io.ReadFull(r, body); err != nil {

@@ -67,7 +67,7 @@ def test_init_dry_run_and_apply(tmp_path):
     assert (cfg_path.with_suffix(".json.agentbus.bak")).exists()
 
 
-def test_resolve_workspace_explicit_and_git(tmp_path):
+def test_resolve_workspace_explicit_is_authoritative(tmp_path):
     explicit = tmp_path / "ws"
     explicit.mkdir()
     assert resolve_workspace(explicit) == explicit.resolve()
@@ -77,7 +77,26 @@ def test_resolve_workspace_explicit_and_git(tmp_path):
     (git_root / ".git").mkdir()
     sub = git_root / "pkg"
     sub.mkdir()
-    assert resolve_workspace(sub) == git_root.resolve()
+    assert resolve_workspace(sub) == sub.resolve()
+
+
+def test_resolve_workspace_implicit_cwd_walks_to_git_root(
+    tmp_path, monkeypatch
+):
+    git_root = tmp_path / "repo"
+    git_root.mkdir()
+    (git_root / ".git").mkdir()
+    sub = git_root / "pkg"
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    assert resolve_workspace() == git_root.resolve()
+
+
+def test_resolve_workspace_explicit_ignores_ancestor_agentbus_marker(tmp_path):
+    (tmp_path / ".agentbus").mkdir()
+    explicit = tmp_path / "tenant" / "workspace"
+    explicit.mkdir(parents=True)
+    assert resolve_workspace(explicit) == explicit.resolve()
 
 
 def test_format_event_row_extracts_from_to():

@@ -56,6 +56,9 @@ jobs:
           (cd go-core && go build -o bin/agentbus-go-worker ./cmd/agentbus-go-worker)
           test -x go-core/bin/agentbus-go-worker
 
+      - name: Go race detector
+        run: cd go-core && go test -race ./...
+
       - name: Install package and dev dependencies
         run: pip install -e ".[dev]"
 
