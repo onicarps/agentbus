@@ -8,6 +8,7 @@ import os
 import pwd
 import socket
 import socketserver
+import stat
 import struct
 import threading
 from dataclasses import dataclass
@@ -28,6 +29,11 @@ from agentbus.identity import (
     load_trust_state,
 )
 from agentbus.store import EventStore
+
+
+_BIND_UMASK_LOCK = threading.Lock()
+DEFAULT_READ_TIMEOUT_SECONDS = 30.0
+DEFAULT_MAX_CONNECTIONS = 64
 
 
 @dataclass(frozen=True)
@@ -194,6 +200,7 @@ class _BrokerHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         request_id = "unknown"
         try:
+            self.request.settimeout(self.server.read_timeout_seconds)
             peer = peer_credentials(self.request)
             frame = recv_frame(self.request)
             request_id, operation, body = validate_request(frame)
@@ -225,14 +232,115 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     allow_reuse_address = False
 
-    def __init__(self, socket_path: Path, application: BrokerApplication) -> None:
-        self.socket_path = socket_path.resolve()
+    def __init__(
+        self,
+        socket_path: Path,
+        application: BrokerApplication,
+        *,
+        force: bool = False,
+        read_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS,
+        max_connections: int = DEFAULT_MAX_CONNECTIONS,
+    ) -> None:
+        if read_timeout_seconds <= 0:
+            raise ValueError("broker_read_timeout_must_be_positive")
+        if max_connections <= 0:
+            raise ValueError("broker_max_connections_must_be_positive")
+        # Resolve the containing directory separately. Resolving the complete path
+        # would follow an attacker-planted symlink in the socket leaf.
+        raw_path = Path(os.path.abspath(os.fspath(socket_path)))
+        self.socket_path = raw_path.parent.resolve() / raw_path.name
         self.application = application
         self.socket_path.parent.mkdir(parents=True, mode=0o750, exist_ok=True)
-        if self.socket_path.exists():
-            raise IdentityError("broker_socket_already_exists")
-        super().__init__(str(self.socket_path), _BrokerHandler)
+        self._validate_socket_directory()
+        self._prepare_socket_path(force=force)
+        self.read_timeout_seconds = float(read_timeout_seconds)
+        self.max_connections = int(max_connections)
+        self._connection_slots = threading.BoundedSemaphore(self.max_connections)
+
+        # Unix sockets are created from mode 0777. Apply 0117 at bind time so the
+        # path is 0660 from its first observable instant, with no bind/chmod gap.
+        with _BIND_UMASK_LOCK:
+            previous_umask = os.umask(0o117)
+            try:
+                super().__init__(str(self.socket_path), _BrokerHandler)
+            finally:
+                os.umask(previous_umask)
         os.chmod(self.socket_path, 0o660)
+
+    def _validate_socket_directory(self) -> None:
+        try:
+            parent_stat = os.lstat(self.socket_path.parent)
+        except OSError as exc:
+            raise IdentityError("broker_socket_directory_invalid") from exc
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise IdentityError("broker_socket_directory_invalid")
+        if parent_stat.st_uid != os.geteuid():
+            raise IdentityError("broker_socket_directory_wrong_owner")
+        if stat.S_IMODE(parent_stat.st_mode) & 0o022:
+            raise IdentityError("broker_socket_directory_insecure_mode")
+
+    def _prepare_socket_path(self, *, force: bool) -> None:
+        if not os.path.lexists(self.socket_path):
+            return
+        try:
+            before = os.lstat(self.socket_path)
+        except OSError as exc:
+            raise IdentityError("broker_socket_inspection_failed") from exc
+        if not force:
+            raise IdentityError("broker_socket_already_exists")
+        if not stat.S_ISSOCK(before.st_mode):
+            raise IdentityError("broker_socket_reclaim_not_socket")
+        if before.st_uid != os.geteuid():
+            raise IdentityError("broker_socket_reclaim_wrong_owner")
+
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.25)
+        try:
+            probe.connect(str(self.socket_path))
+        except ConnectionRefusedError:
+            pass
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            # Timeouts, permission errors, and other ambiguous outcomes must not
+            # authorize unlinking a possibly live security boundary.
+            raise IdentityError("broker_socket_reclaim_probe_failed") from exc
+        else:
+            raise IdentityError("broker_socket_in_use")
+        finally:
+            probe.close()
+
+        try:
+            after = os.lstat(self.socket_path)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise IdentityError("broker_socket_inspection_failed") from exc
+        if (
+            not stat.S_ISSOCK(after.st_mode)
+            or after.st_uid != os.geteuid()
+            or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            raise IdentityError("broker_socket_changed_during_reclaim")
+        self.socket_path.unlink()
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        if not self._connection_slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._connection_slots.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket, client_address: Any
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connection_slots.release()
 
     def server_close(self) -> None:
         try:
@@ -245,9 +353,13 @@ class BrokerServer(socketserver.ThreadingUnixStreamServer):
             self.application.close()
 
 
-def run_broker(workspace: Path, socket_path: Path) -> None:
+def run_broker(workspace: Path, socket_path: Path, *, force: bool = False) -> None:
     application = BrokerApplication(workspace)
-    server = BrokerServer(socket_path, application)
+    try:
+        server = BrokerServer(socket_path, application, force=force)
+    except Exception:
+        application.close()
+        raise
     try:
         server.serve_forever(poll_interval=0.25)
     finally:

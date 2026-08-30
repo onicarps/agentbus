@@ -2156,14 +2156,19 @@ def broker_group() -> None:
     default="/run/agentbus/agentbus.sock",
     show_default=True,
 )
-def broker_run(workspace: str | None, socket_path: Path) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Reclaim an owner-matched stale socket after proving no broker accepts it.",
+)
+def broker_run(workspace: str | None, socket_path: Path, force: bool) -> None:
     """Serve authenticated, length-prefixed requests over a Unix socket."""
     if os.name != "posix":
         raise click.ClickException("strict broker is supported on POSIX hosts only")
     from agentbus.broker import run_broker
 
     try:
-        run_broker(_cli_workspace(workspace), socket_path)
+        run_broker(_cli_workspace(workspace), socket_path, force=force)
     except (IdentityError, OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
