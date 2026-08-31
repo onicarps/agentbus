@@ -591,7 +591,13 @@ class EventStore:
                 """,
                 (producer_id, idempotency_key, idempotency_key),
             ).fetchone()
-        else:
+        elif verification_status != "verified":
+            # Advisory content deduplication predates AgentID and cannot consume
+            # or authorize a signed nonce.  Sending an identical signed envelope
+            # is a replay, not a successful duplicate; let the transactional
+            # identity_nonces constraint decide it below.  A caller that wants
+            # signed deduplication must bind an explicit idempotency key into the
+            # envelope.
             existing = self._find_recent_content_duplicate(
                 topic, producer_id, stored_payload
             )

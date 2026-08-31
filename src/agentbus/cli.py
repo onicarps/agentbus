@@ -38,6 +38,14 @@ from agentbus.identity import (
     set_policy_mode,
     strict_json_loads,
 )
+from agentbus.ceremony import (
+    export_policy_request,
+    generate_enrollment_request,
+    generate_offline_root,
+    import_signed_policy,
+    initialize_offline_identity,
+    sign_policy_request,
+)
 from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
 from agentbus.mcpsafe import AccessDeniedError
 from agentbus.rbac import ForbiddenError, ensure_default_roles, mint_droid_proof
@@ -46,6 +54,7 @@ from agentbus.project_log import project_handoffs
 from agentbus.schema_registry import import_schema_file, list_schemas, register_schema
 from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
+from agentbus.client import EventTransport, open_event_transport
 from agentbus.store import EventStore
 from agentbus.workspace_config import resolve_retention_days
 from agentbus.tail import run_tail
@@ -83,11 +92,11 @@ def _producer_id(override: str | None) -> str:
     return pid
 
 
-def _open_store(workspace: str | None, retention_days: int) -> EventStore:
+def _open_store(workspace: str | None, retention_days: int) -> EventTransport:
     ws = _cli_workspace(workspace)
     set_validation_workspace(ws)
     days = resolve_retention_days(ws, retention_days)
-    return EventStore(ws, retention_days=days)
+    return open_event_transport(ws, retention_days=days)
 
 
 def _open_lease_store(workspace: str | None) -> LeaseStore:
@@ -438,14 +447,14 @@ def publish(
         raise click.ClickException(str(exc)) from exc
     store = _open_store(workspace, retention_days)
     try:
-        enforcer = load_enforcer(
-            ws,
-            enabled=enable_mcpsafe or mcpsafe_enabled_from_env(),
-            lockfile=mcpsafe_lock,
-        )
-        if enforcer is not None:
-            store.set_mcpsafe(enforcer)
         try:
+            enforcer = load_enforcer(
+                ws,
+                enabled=enable_mcpsafe or mcpsafe_enabled_from_env(),
+                lockfile=mcpsafe_lock,
+            )
+            if enforcer is not None:
+                store.set_mcpsafe(enforcer)
             event, duplicate = store.publish(
                 topic=topic,
                 producer_id=_producer_id(producer_id),
@@ -625,6 +634,8 @@ def sla_list(ctx: click.Context) -> None:
     store = _open_store(opts.get("workspace"), opts.get("retention_days", 7))
     try:
         click.echo(json.dumps(store.list_active_slas()))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -639,6 +650,8 @@ def sla_clear(ctx: click.Context, event_id: int) -> None:
     try:
         store._clear_sla(event_id)
         click.echo(json.dumps({"event_id": event_id, "sla_cleared": True}))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -761,6 +774,8 @@ def project_log(
         if dry_run and result["lines"]:
             click.echo("---")
             click.echo("\n\n".join(result["lines"]))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -960,6 +975,8 @@ def review(workspace: str, topic: str | None, limit: int, retention_days: int) -
     store = _open_store(workspace, retention_days)
     try:
         click.echo(json.dumps(store.review_pending(topic=topic, limit=limit)))
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
 
@@ -1070,10 +1087,12 @@ def trace(workspace: str, trace_id: str, retention_days: int) -> None:
 
     store = _open_store(workspace, retention_days)
     try:
-        events = store.fetch_trace_events(trace_id)
-        roots = build_trace_tree(events)
         try:
+            events = store.fetch_trace_events(trace_id)
+            roots = build_trace_tree(events)
             click.echo(render_trace_tree(trace_id, roots))
+        except IdentityError as exc:
+            raise click.ClickException(str(exc)) from exc
         except ImportError as exc:
             raise click.ClickException(
                 "rich required for trace visualization — pip install 'okf-agentbus[devex]'"
@@ -1692,10 +1711,30 @@ def identity_group() -> None:
     default="audit",
     show_default=True,
 )
-def identity_init(workspace: str | None, mode: str) -> None:
+@click.option(
+    "--offline-root-pubkey",
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+    default=None,
+    help="Initialize public trust state without creating an online root key.",
+)
+def identity_init(
+    workspace: str | None, mode: str, offline_root_pubkey: Path | None
+) -> None:
     """Initialize a root-signed workspace identity policy."""
     ws = _cli_workspace(workspace)
     try:
+        if offline_root_pubkey is not None:
+            state = initialize_offline_identity(ws, offline_root_pubkey)
+            click.echo(
+                json.dumps(
+                    {
+                        **state,
+                        "mode": "pending_offline_policy",
+                        "strict_ready": False,
+                    }
+                )
+            )
+            return
         state = bootstrap_workspace_identity(ws, mode=mode.lower())
     except IdentityError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1710,6 +1749,167 @@ def identity_init(workspace: str | None, mode: str) -> None:
             }
         )
     )
+
+
+@identity_group.group("root")
+def identity_root_group() -> None:
+    """Create root material for storage outside the online workspace."""
+
+
+@identity_root_group.command("generate")
+@click.option(
+    "--private-key",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+)
+@click.option(
+    "--descriptor",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+)
+def identity_root_generate(private_key: Path, descriptor: Path) -> None:
+    """Generate an offline root private key and public descriptor."""
+    try:
+        result = generate_offline_root(private_key, descriptor)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@identity_group.group("key")
+def identity_key_group() -> None:
+    """Generate peer signing keys and public enrollment requests."""
+
+
+@identity_key_group.command("generate")
+@click.argument("producer_id")
+@click.option("--principal", required=True)
+@click.option(
+    "--private-key",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+)
+@click.option(
+    "--request",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+)
+@click.option("--capability", multiple=True, default=("message",))
+@click.option("--topic", multiple=True, default=("okf/handoff",))
+def identity_key_generate(
+    producer_id: str,
+    principal: str,
+    private_key: Path,
+    request: Path,
+    capability: tuple[str, ...],
+    topic: tuple[str, ...],
+) -> None:
+    """Generate one isolated peer key and its public enrollment request."""
+    try:
+        result = generate_enrollment_request(
+            producer_id,
+            principal,
+            private_key,
+            request,
+            capabilities=capability,
+            topics=topic,
+        )
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@identity_group.command("export-policy-request")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["audit", "protected", "strict"]),
+    default="audit",
+)
+@click.option(
+    "--reference-monitor",
+    type=click.Choice(["local_audit", "isolated_broker"]),
+    default="isolated_broker",
+)
+@click.option(
+    "--enrollment",
+    multiple=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option("--revoke-key", "revoke_keys", multiple=True)
+def identity_export_policy_request(
+    workspace: str | None,
+    output: Path,
+    mode: str,
+    reference_monitor: str,
+    enrollment: tuple[Path, ...],
+    revoke_keys: tuple[str, ...],
+) -> None:
+    """Export a canonical policy/registry request for offline signing."""
+    try:
+        result = export_policy_request(
+            _cli_workspace(workspace),
+            output,
+            mode=mode,
+            reference_monitor=reference_monitor,
+            enrollment_paths=enrollment,
+            revoke_key_ids=revoke_keys,
+        )
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@identity_group.group("ceremony")
+def identity_ceremony_group() -> None:
+    """Sign policy requests on an offline administrator machine."""
+
+
+@identity_ceremony_group.command("sign")
+@click.option(
+    "--root-key",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "--request",
+    "request_path",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False, exists=True),
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+)
+def identity_ceremony_sign(
+    root_key: Path, request_path: Path, output: Path
+) -> None:
+    """Sign one canonical request with the offline root."""
+    try:
+        result = sign_policy_request(request_path, root_key, output)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
+
+
+@identity_group.command("import-signed-policy")
+@click.argument(
+    "bundle", type=click.Path(path_type=Path, dir_okay=False, exists=True)
+)
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def identity_import_signed_policy(bundle: Path, workspace: str | None) -> None:
+    """Verify and install a detached root-signed policy bundle."""
+    try:
+        result = import_signed_policy(_cli_workspace(workspace), bundle)
+    except IdentityError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(result, indent=2))
 
 
 @identity_group.command("enroll")
@@ -1951,6 +2151,37 @@ def identity_verify_event(event_id: int, workspace: str | None) -> None:
     )
     if not result.verified:
         raise SystemExit(1)
+
+
+@main.group("broker")
+def broker_group() -> None:
+    """Run the isolated AgentID reference-monitor broker."""
+
+
+@broker_group.command("run")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--socket",
+    "socket_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default="/run/agentbus/agentbus.sock",
+    show_default=True,
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Reclaim an owner-matched stale socket after proving no broker accepts it.",
+)
+def broker_run(workspace: str | None, socket_path: Path, force: bool) -> None:
+    """Serve authenticated, length-prefixed requests over a Unix socket."""
+    if os.name != "posix":
+        raise click.ClickException("strict broker is supported on POSIX hosts only")
+    from agentbus.broker import run_broker
+
+    try:
+        run_broker(_cli_workspace(workspace), socket_path, force=force)
+    except (IdentityError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 if __name__ == "__main__":

@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-31
+
+### Added — isolated broker and offline-root security
+
+- Add authenticated broker IPC transports for Python, Go, and TypeScript.
+- Add offline-root ceremony, monotonic policy bundles, dynamic isolation probes,
+  and multi-user deployment verification.
+- Close CLI and MCP broker error boundaries with stable fail-closed responses.
+
+### Added — v0.21 isolated broker foundations
+
+- Add a Python Unix-domain reference-monitor broker with length-prefixed strict
+  JSON requests, kernel `SO_PEERCRED` authentication, symbolic principal
+  binding, broker-side AgentID verification, and no raw-SQL operation.
+- Add offline root generation, public-only workspace initialization, peer-key
+  enrollment requests, detached policy signing/import, digest-chained rotation,
+  and revocation without an online workspace root key.
+- Fix concurrent signed replay handling so an identical envelope cannot be
+  returned as a successful content duplicate after racing the nonce precheck.
+
 ## [0.20.2] - 2026-08-30
 
 ### Fixed
@@ -30,7 +50,7 @@
   Ed25519 verification, and framed-message parsing, and run Go tests with the
   race detector in CI.
 
-## [0.20.0] - 2026-08-26
+## [0.20.0] - 2026-08-25
 
 ### Added — AgentID Phase 1
 

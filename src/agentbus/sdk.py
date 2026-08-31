@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from agentbus.schema_registry import register_schema
-from agentbus.store import EventStore
+from agentbus.client import open_event_transport
 
 T = TypeVar("T")
 
@@ -56,7 +56,7 @@ class AgentBus:
         if not pid:
             raise ValueError("producer_id required (arg or AGENTBUS_PRODUCER_ID)")
         payload = model.model_dump()
-        store = EventStore(self.workspace)
+        store = open_event_transport(self.workspace)
         try:
             from agentbus.schemas import validate_payload
 

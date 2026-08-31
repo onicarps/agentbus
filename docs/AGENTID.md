@@ -104,3 +104,58 @@ operations cannot certify old events.
 On a host where mutually distrusting runtimes share one Unix UID, file permissions and same-UID sockets provide tamper evidence, not execution prevention. Strict readiness requires the reference monitor and peer runtimes to run under distinct OS principals or equivalently isolated containers. A software signature proves control of an enrolled execution boundary; it does not prove model vendor, model name, persona, or correctness.
 
 The full threat model and accepted residual risks are in [the AgentID trust-boundary ADR](adr/2026-08-25-agentid-trust-boundaries.md).
+
+## v0.21 isolated broker and offline ceremony
+
+The v0.21 strict boundary uses a dedicated Unix principal and a framed Unix
+socket. The broker reads `SO_PEERCRED`, resolves the kernel UID to the symbolic
+username in the root-signed policy, requires the matching AgentID key, and owns
+all authoritative database writes. A caller-supplied producer or credential
+field is ignored.
+
+Create the root on offline storage, initialize only its public descriptor in
+the workspace, generate per-principal peer enrollment requests, and import a
+detached signed bundle:
+
+```bash
+# Offline administrator machine or removable offline environment.
+agentbus identity root generate \
+  --private-key /offline/agentbus-root.pem \
+  --descriptor /transfer/root-public.json
+
+# Online host. This does not create workspace-root.pem.
+agentbus identity init --workspace "$AGENTBUS_WORKSPACE" \
+  --offline-root-pubkey /transfer/root-public.json
+agentbus identity key generate codex --principal agentbus-codex \
+  --private-key /var/lib/agentbus-codex/codex.pem \
+  --request /transfer/codex-enrollment.json
+agentbus identity export-policy-request --workspace "$AGENTBUS_WORKSPACE" \
+  --enrollment /transfer/codex-enrollment.json \
+  --output /transfer/policy-request.json
+
+# Offline signing step.
+agentbus identity ceremony sign --root-key /offline/agentbus-root.pem \
+  --request /transfer/policy-request.json \
+  --output /transfer/signed-policy.json
+
+# Online verification/import and broker start.
+agentbus identity import-signed-policy /transfer/signed-policy.json \
+  --workspace "$AGENTBUS_WORKSPACE"
+agentbus broker run --workspace "$AGENTBUS_WORKSPACE" \
+  --socket /run/agentbus/agentbus.sock
+```
+
+Adding a new enrollment and revoking the previous key in one detached request
+provides an offline-signed rotation:
+
+```bash
+agentbus identity export-policy-request --workspace "$AGENTBUS_WORKSPACE" \
+  --enrollment /transfer/codex-v2-enrollment.json \
+  --revoke-key codex-OLD_KEY_ID \
+  --output /transfer/rotation-request.json
+```
+
+The initial broker is Linux/POSIX only. Merely starting it does not make the
+workspace strict-ready; active deployment probes and client transports are
+delivered by later v0.21 work packages, and non-Linux hosts remain audit or
+protected only.

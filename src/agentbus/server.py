@@ -10,6 +10,7 @@ from typing import Any
 from mcp.server import MCPServer
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
+from agentbus.client import EventTransport, open_event_transport
 from agentbus.identity import IdentityError, configured as identity_configured, load_trust_state
 from agentbus.leases import LeaseStore
 from agentbus.artifacts import PayloadTooLargeError
@@ -21,7 +22,7 @@ from agentbus.wiretap import instrument_call
 
 mcp = MCPServer("agentbus")
 
-_store: EventStore | None = None
+_store: EventTransport | None = None
 _lease_store: LeaseStore | None = None
 _workspace: Path | None = None
 _wiretap_enabled: bool = False
@@ -30,7 +31,7 @@ _wiretap_client: str | None = None
 _mcpsafe: PolicyEnforcer | None = None
 
 
-def _get_store() -> EventStore:
+def _get_store() -> EventTransport:
     if _store is None:
         raise RuntimeError("store not initialized — run via agentbus serve")
     return _store
@@ -38,20 +39,22 @@ def _get_store() -> EventStore:
 
 def _get_lease_store() -> LeaseStore:
     if _lease_store is None:
-        raise RuntimeError("lease store not initialized — run via agentbus serve")
+        from agentbus.client import BrokerTransportError
+
+        raise BrokerTransportError("broker_lease_operations_unsupported")
     return _lease_store
 
 
-def init_store(workspace: Path, retention_days: int = 7) -> EventStore:
+def init_store(workspace: Path, retention_days: int = 7) -> EventTransport:
     global _store, _lease_store, _workspace
     from agentbus.workspace_guard import assert_workspace_supported
 
     _workspace = assert_workspace_supported(workspace)
     set_validation_workspace(_workspace)
-    _store = EventStore(_workspace, retention_days=retention_days)
-    if _mcpsafe is not None:
+    _store = open_event_transport(_workspace, retention_days=retention_days)
+    if _mcpsafe is not None and isinstance(_store, EventStore):
         _store.set_mcpsafe(_mcpsafe)
-    _lease_store = LeaseStore(_workspace)
+    _lease_store = LeaseStore(_workspace) if isinstance(_store, EventStore) else None
     return _store
 
 
@@ -81,7 +84,7 @@ def configure_mcpsafe(
         enabled=enabled,
         lockfile=lockfile,
     )
-    if _store is not None:
+    if isinstance(_store, EventStore):
         _store.set_mcpsafe(_mcpsafe)
     return _mcpsafe
 
@@ -151,6 +154,8 @@ def _wt(
 
     if not _wiretap_enabled:
         return _guarded()
+    if not isinstance(_store, EventStore):
+        raise IdentityError("wiretap_requires_direct_store")
     return instrument_call(
         _get_store(),
         tool,
@@ -282,7 +287,13 @@ def agentbus_review(topic: str | None = None, limit: int = 50) -> str:
     """List events pending human approval (hidden from standard poll)."""
 
     def _run() -> str:
-        return json.dumps(_get_store().review_pending(topic=topic, limit=min(limit, 100)))
+        try:
+            return json.dumps(
+                _get_store().review_pending(topic=topic, limit=min(limit, 100))
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt("agentbus_review", {"topic": topic, "limit": limit}, _run)
 
@@ -357,10 +368,14 @@ def agentbus_lock_acquire(
     """Acquire an exclusive advisory lease on a workspace resource."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        return json.dumps(
-            _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
-        )
+        try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            return json.dumps(
+                _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt(
         "agentbus_lock_acquire",
@@ -384,10 +399,14 @@ def agentbus_lock_release(
     """Release a held lease (idempotent if already expired)."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        return json.dumps(
-            _get_lease_store().lock_release(resource, lease_id, owner_id)
-        )
+        try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            return json.dumps(
+                _get_lease_store().lock_release(resource, lease_id, owner_id)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt(
         "agentbus_lock_release",
@@ -412,10 +431,14 @@ def agentbus_lock_renew(
     """Extend TTL on an active lease (heartbeat)."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        return json.dumps(
-            _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
-        )
+        try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            return json.dumps(
+                _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
+            )
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt(
         "agentbus_lock_renew",
@@ -435,7 +458,11 @@ def agentbus_lock_status(resource: str) -> str:
     """Check lock state without acquiring (no auth required)."""
 
     def _run() -> str:
-        return json.dumps(_get_lease_store().lock_status(resource))
+        try:
+            return json.dumps(_get_lease_store().lock_status(resource))
+        except (ValueError, ForbiddenError) as exc:
+            code = getattr(exc, "code", 400)
+            return json.dumps({"error": str(exc), "code": code})
 
     return _wt("agentbus_lock_status", {"resource": resource}, _run)
 
@@ -458,6 +485,8 @@ def run_stdio(
         enable_mcpsafe = mcpsafe_enabled_from_env()
     configure_mcpsafe(enable_mcpsafe, lockfile=mcpsafe_lock, workspace=ws)
     init_store(ws, retention_days)
+    if wiretap and not isinstance(_store, EventStore):
+        raise IdentityError("wiretap_requires_direct_store")
     log_path: Path | None = None
     if wiretap_log:
         log_path = Path(wiretap_log)
