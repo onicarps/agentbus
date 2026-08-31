@@ -1,8 +1,8 @@
 # AgentBus Roadmap
 
-**Current release:** v0.20.0 (August 2026)
+**Current release:** v0.21.0 (August 2026)
 
-**Next milestone:** v0.21 — isolated broker IPC and offline root custody
+**Next milestone:** v0.22 — post-release hardening and ACL refinement
 
 The v0.20 security contract is:
 

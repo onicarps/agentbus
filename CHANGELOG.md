@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-31
+
+### Added — isolated broker and offline-root security
+
+- Add authenticated broker IPC transports for Python, Go, and TypeScript.
+- Add offline-root ceremony, monotonic policy bundles, dynamic isolation probes,
+  and multi-user deployment verification.
+- Close CLI and MCP broker error boundaries with stable fail-closed responses.
+
 ### Added — v0.21 isolated broker foundations
 
 - Add a Python Unix-domain reference-monitor broker with length-prefixed strict
