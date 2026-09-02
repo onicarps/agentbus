@@ -101,6 +101,29 @@ def test_bootstrap_enroll_sign_and_verify(tmp_path: Path) -> None:
     assert envelope["signed"]["artifact_digests"][0]["size"] == "10"
 
 
+def test_stream_action_can_be_signed_by_message_producer(tmp_path: Path) -> None:
+    _boot_and_enroll(tmp_path)
+    payload = {
+        "from": "codex",
+        "to": "telegram",
+        "summary": "partial response",
+        "action": {
+            "type": "stream",
+            "stream_id": "turn-1",
+            "delta": "hello",
+            "final": True,
+        },
+    }
+    envelope = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id="codex",
+        schema_version="1.0",
+        payload=payload,
+    )
+    assert verify_envelope(tmp_path, envelope, stored_payload=payload).verified
+
+
 def test_enrollment_rejects_path_or_delegated_identity_claims(tmp_path: Path) -> None:
     bootstrap_workspace_identity(tmp_path)
     for producer in ("../factory", "Factory", "agy/subagent/fake", "a" * 65):

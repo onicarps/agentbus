@@ -58,6 +58,7 @@ PRIVILEGED_ACTION_TYPES = frozenset(
 )
 ACTION_CAPABILITIES = {
     "message": "message",
+    "stream": "message",
     "runner_ack": "message",
     "implementation": "implementation",
     "qa_verdict": "qa_verdict",
@@ -426,6 +427,7 @@ def validate_typed_action(action: Any) -> dict[str, Any]:
         raise IdentityError(f"unknown_action_type: {action_type}")
     allowed_fields: dict[str, set[str]] = {
         "message": {"type"},
+        "stream": {"type", "stream_id", "delta", "final"},
         "runner_ack": {"type", "source_event_id", "status"},
         "implementation": {"type", "phase", "task"},
         "qa_verdict": {"type", "result", "mission_id", "candidate"},
@@ -454,6 +456,9 @@ def validate_typed_action(action: Any) -> dict[str, Any]:
         if key == "source_event_id":
             if not isinstance(value, str) or not value.isdigit():
                 raise IdentityError("invalid_runner_ack_source_event_id")
+        elif action_type == "stream" and key == "final":
+            if not isinstance(value, bool):
+                raise IdentityError("invalid_stream_final")
         elif not isinstance(value, str):
             raise IdentityError(f"invalid_action_field: {key}")
     validate_jcs_value(action)

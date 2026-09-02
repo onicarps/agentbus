@@ -85,6 +85,7 @@ KNOWN_TOPICS: dict[str, dict] = {
                     "type": {
                         "enum": [
                             "message",
+                            "stream",
                             "runner_ack",
                             "implementation",
                             "qa_verdict",

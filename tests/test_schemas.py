@@ -60,3 +60,21 @@ def test_hermes_bad_payload_still_fails_without_summary():
             "okf/handoff",
             {"from": "hermes", "to": "grok", "mission_id": "only"},
         )
+
+
+def test_stream_action_is_publishable_with_documented_fields():
+    payload = validate_payload(
+        "okf/handoff",
+        {
+            "from": "agy",
+            "to": "telegram",
+            "summary": "partial response",
+            "action": {
+                "type": "stream",
+                "stream_id": "turn-1",
+                "delta": "hello",
+                "final": True,
+            },
+        },
+    )
+    assert payload["action"]["type"] == "stream"
