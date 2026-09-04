@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sys
 import time
@@ -115,6 +116,33 @@ def test_start_stop_service_and_ps(tmp_path: Path):
         time.sleep(0.05)
     assert not _pid_alive(pid), f"pid {pid} still alive after stop"
     assert list_processes(tmp_path) == []
+
+
+def test_ps_recovers_live_service_after_state_loss(tmp_path: Path):
+    """A supervisor restart must not hide a live workspace service."""
+    cmd = _py_cmd("import time", "time.sleep(60)")
+    _write_swarm(tmp_path, {"sleeper": {"command": cmd}})
+    result = swarm_up(tmp_path, detach=True, run_monitor=False)
+    pid = result["started"][0]["pid"]
+    try:
+        (tmp_path / ".agentbus" / "swarm.state.json").write_text(
+            json.dumps({"workspace": str(tmp_path), "services": {}}) + "\n",
+            encoding="utf-8",
+        )
+
+        rows = list_processes(tmp_path)
+
+        assert any(
+            row["name"] == "sleeper" and row["pid"] == pid for row in rows
+        )
+        recovered = json.loads(
+            (tmp_path / ".agentbus" / "swarm.state.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert recovered["services"]["sleeper"]["pid"] == pid
+    finally:
+        stop_pid(pid)
 
 
 def test_stop_pid_already_dead():

@@ -12,6 +12,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -132,11 +133,34 @@ def _write_state(workspace: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     state["workspace"] = str(workspace.resolve())
     state["updated_at"] = _now_iso()
-    path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    # Replace the state file atomically.  A supervisor interruption must not
+    # leave a valid-looking but empty file that makes `ps` forget live services.
+    tmp_path: Path | None = None
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            tmp.write(json.dumps(state, indent=2) + "\n")
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -166,6 +190,165 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _proc_environment(pid: int) -> dict[str, str]:
+    """Read a Linux process environment without requiring optional psutil."""
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except (OSError, PermissionError):
+        return {}
+    result: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        if b"=" not in item:
+            continue
+        key, value = item.split(b"=", 1)
+        try:
+            result[key.decode()] = value.decode()
+        except UnicodeDecodeError:
+            continue
+    return result
+
+
+def _proc_command(pid: int) -> list[str]:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, PermissionError):
+        return []
+    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _proc_started_at(pid: int) -> str | None:
+    """Return a process start timestamp on Linux, if available."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        rparen = raw.rfind(")")
+        if rparen == -1:
+            return None
+        fields = raw[rparen + 2 :].split()
+        # fields starts at proc stat field 3; starttime is field 22.
+        start_ticks = int(fields[19])
+        clk_tck = os.sysconf("SC_CLK_TCK")
+        boot_time = None
+        for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("btime "):
+                boot_time = int(line.split()[1])
+                break
+        if boot_time is None or clk_tck <= 0:
+            return None
+        return datetime.fromtimestamp(
+            boot_time + (start_ticks / clk_tck), tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OSError, ValueError, IndexError, TypeError):
+        return None
+
+
+def _config_argument(argv: list[str]) -> str | None:
+    for index, token in enumerate(argv):
+        if token == "--config" and index + 1 < len(argv):
+            return argv[index + 1]
+        if token.startswith("--config="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _command_matches(actual: list[str], expected: list[str]) -> bool:
+    """Match a service command inside interpreter/wrapper-prefixed argv."""
+    if not actual or not expected:
+        return False
+    for start in range(len(actual) - len(expected) + 1):
+        candidate = actual[start : start + len(expected)]
+        if candidate == expected:
+            return True
+        # A config may say `agentbus ...`, while the process has the absolute
+        # venv script path.  Only relax the executable token comparison.
+        if (
+            Path(candidate[0]).name == Path(expected[0]).name
+            and candidate[1:] == expected[1:]
+        ):
+            return True
+    return False
+
+
+def _service_match_score(
+    env: dict[str, str], actual: list[str], spec: ServiceSpec
+) -> int:
+    """Return a confidence score for assigning a process to a service."""
+    if env.get("AGENTBUS_SWARM_SERVICE") == spec.name:
+        return 100
+    expected = _parse_command(spec.command)
+    if _command_matches(actual, expected):
+        return 90
+    # Older launchers did not set AGENTBUS_SWARM_SERVICE and the Go worker
+    # replaces `agentbus worker up` in argv.  Its workspace-scoped config path
+    # plus producer identity is still a strong, unambiguous service key.
+    expected_config = _config_argument(expected)
+    actual_config = _config_argument(actual)
+    if (
+        expected_config
+        and expected_config == actual_config
+        and spec.env
+        and all(env.get(key) == value for key, value in spec.env.items())
+    ):
+        return 80
+    return 0
+
+
+def discover_processes(workspace: Path, config: SwarmConfig) -> dict[str, dict[str, Any]]:
+    """Recover live services whose supervisor state was lost or went stale.
+
+    `agentbus up` marks children with the workspace and service name.  The
+    workspace match prevents cross-workspace adoption; command/config matching
+    preserves compatibility with processes started before the service marker
+    existed.  On non-/proc platforms the durable state file remains the source
+    of truth.
+    """
+    if _IS_WINDOWS or not Path("/proc").is_dir():
+        return {}
+
+    root = str(workspace.resolve())
+    processes: list[tuple[int, dict[str, str], list[str]]] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        env = _proc_environment(pid)
+        if env.get("AGENTBUS_WORKSPACE") != root:
+            continue
+        actual = _proc_command(pid)
+        if actual:
+            processes.append((pid, env, actual))
+
+    recovered: dict[str, dict[str, Any]] = {}
+    used_pids: set[int] = set()
+    for name, spec in config.services.items():
+        if not spec.enabled:
+            continue
+        best: tuple[int, int, dict[str, str], list[str]] | None = None
+        for pid, env, actual in processes:
+            if pid in used_pids:
+                continue
+            score = _service_match_score(env, actual, spec)
+            candidate = (score, -pid, env, actual)
+            if score and (best is None or candidate[:2] > best[:2]):
+                best = candidate
+        if best is None:
+            continue
+        _, _, _, actual = best
+        used_pids.add(-best[1])
+        recovered[name] = {
+            "name": name,
+            "pid": -best[1],
+            "pgid": -best[1] if not _IS_WINDOWS else None,
+            "command": spec.command,
+            "argv": actual,
+            "started_at": _proc_started_at(-best[1]),
+            "stdout_log": str(logs_dir(workspace) / f"{name}.stdout.log"),
+            "stderr_log": str(logs_dir(workspace) / f"{name}.stderr.log"),
+            "cwd": root,
+            "discovered": True,
+        }
+    return recovered
 
 
 def _parse_command(command: str) -> list[str]:
@@ -214,6 +397,10 @@ def start_service(
     env.update(spec.env)
     if extra_env:
         env.update(extra_env)
+    # Keep a durable identity on the child so `ps` can recover it after the
+    # supervisor is restarted or its state file is rebuilt.
+    env["AGENTBUS_WORKSPACE"] = str(workspace.resolve())
+    env["AGENTBUS_SWARM_SERVICE"] = spec.name
 
     # Automatically prepend the current venv's bin directory to PATH
     import sys
@@ -347,6 +534,22 @@ def prune_dead(workspace: Path) -> dict[str, Any]:
 
 def list_processes(workspace: Path) -> list[dict[str, Any]]:
     state = prune_dead(workspace)
+    try:
+        config = load_swarm_config(workspace)
+    except (FileNotFoundError, OSError, ValueError):
+        config = None
+    if config is not None:
+        recovered = discover_processes(workspace, config)
+        services = state.setdefault("services", {})
+        changed = False
+        for name, record in recovered.items():
+            current = services.get(name)
+            current_pid = int(current.get("pid") or 0) if isinstance(current, dict) else 0
+            if not current_pid or not _pid_alive(current_pid):
+                services[name] = record
+                changed = True
+        if changed:
+            _write_state(workspace, state)
     rows: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc)
     for name, rec in sorted((state.get("services") or {}).items()):
