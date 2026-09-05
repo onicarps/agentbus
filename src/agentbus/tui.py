@@ -7,7 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agentbus.devex import discover_config_targets, format_event_row
+from agentbus import __version__
+from agentbus.devex import (
+    discover_config_targets,
+    format_event_row,
+    format_timestamp,
+    format_timezone_label,
+)
 from agentbus.schemas import SYSTEM_TOPICS
 from agentbus.store import STATUS_PENDING, EventStore
 from agentbus.tracing import build_trace_tree, format_trace_tree_plain
@@ -218,11 +224,11 @@ def reject_pending_event(
         store.close()
 
 
-def _format_system_row(ev: dict[str, Any]) -> tuple[str, str, str, str]:
+def _format_system_row(ev: dict[str, Any], tz: str | None = None) -> tuple[str, str, str, str]:
     topic = ev.get("topic", "")
     payload = ev.get("payload") or {}
     eid = str(ev.get("event_id", ""))
-    ts = str(ev.get("timestamp", ""))[-8:]
+    ts = format_timestamp(ev.get("timestamp"), tz=tz)
     if topic == "system/mcp":
         summary = f"{payload.get('tool', '?')} {payload.get('latency_ms', '')}ms"
     elif topic == "system/fs":
@@ -242,6 +248,7 @@ def run_monitor_tui(
     *,
     interval: float = 1.0,
     retention_days: int = 7,
+    tz: str | None = None,
 ) -> None:
     try:
         from textual.app import App, ComposeResult
@@ -272,11 +279,18 @@ def run_monitor_tui(
             padding: 0 1;
         }
         #dark-bar { height: 2; color: $error; }
+        #bottom-bar {
+            height: 1;
+            background: $surface;
+            color: $text-muted;
+            padding: 0 1;
+        }
         """
 
         BINDINGS = [
             Binding("a", "approve_pending", "Approve", show=True),
             Binding("r", "reject_pending", "Reject", show=True),
+            Binding("z", "toggle_timezone", "TZ (UTC/Local)", show=True),
             Binding("q", "quit", "Quit", show=True),
         ]
 
@@ -287,6 +301,36 @@ def run_monitor_tui(
             self._cached_events: list[dict[str, Any]] = []
             self._last_fingerprint: tuple[Any, ...] | None = None
             self._last_refresh_error: str | None = None
+            # Timezone list and active selection (canonicalized)
+            custom_tz = None
+            if tz:
+                s = str(tz).strip()
+                if not s or s.upper() == "UTC":
+                    init_tz = "UTC"
+                elif s.lower() == "local":
+                    init_tz = "local"
+                else:
+                    try:
+                        import zoneinfo
+
+                        zi = zoneinfo.ZoneInfo(s)
+                        init_tz = zi.key
+                        custom_tz = zi.key
+                    except Exception:
+                        init_tz = "UTC"
+            else:
+                init_tz = "UTC"
+
+            self._tz_list: list[str] = ["UTC", "local"]
+            if custom_tz and custom_tz not in self._tz_list:
+                self._tz_list.insert(0, custom_tz)
+            self._tz_idx: int = (
+                self._tz_list.index(init_tz) if init_tz in self._tz_list else 0
+            )
+            self._active_tz: str = self._tz_list[self._tz_idx]
+
+        def _get_tz_label(self) -> str:
+            return format_timezone_label(self._active_tz)
 
         def compose(self) -> ComposeResult:
             yield Static("", id="header-bar")
@@ -305,6 +349,7 @@ def run_monitor_tui(
                         "[dim]Wiretap: system/mcp · system/fs · system/shell · monologue[/dim]",
                         id="wiretap-help",
                     )
+            yield Static("", id="bottom-bar")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -343,6 +388,11 @@ def run_monitor_tui(
                 else:
                     dark_bar.update("[dim]No dark agents detected[/dim]")
 
+                bottom_bar = self.query_one("#bottom-bar", Static)
+                bottom_bar.update(
+                    f"[dim]AgentBus v{__version__}  |  TZ: {self._get_tz_label()} [z: toggle]  |  Workspace: {ws}[/dim]"
+                )
+
                 fingerprint = _state_fingerprint(state)
                 if fingerprint == self._last_fingerprint:
                     return
@@ -368,7 +418,7 @@ def run_monitor_tui(
             stream.clear()
             for ev in reversed(state["events"]):
                 # Stream shows cooperative (okf/*) primarily; system still listed
-                row = format_event_row(ev)
+                row = format_event_row(ev, tz=self._active_tz)
                 status = ev.get("status", "PUBLISHED")
                 stream.add_row(
                     row["id"],
@@ -387,7 +437,7 @@ def run_monitor_tui(
             hitl_cursor = hitl.cursor_row
             hitl.clear()
             for ev in reversed(state["pending"]):
-                row = format_event_row(ev)
+                row = format_event_row(ev, tz=self._active_tz)
                 hitl.add_row(
                     str(ev["event_id"]),
                     ev.get("topic", ""),
@@ -403,7 +453,7 @@ def run_monitor_tui(
             wire_cursor = wire.cursor_row
             wire.clear()
             for ev in reversed(state["system_events"][-80:]):
-                eid, ts, topic, detail = _format_system_row(ev)
+                eid, ts, topic, detail = _format_system_row(ev, tz=self._active_tz)
                 wire.add_row(eid, ts, topic, detail, key=f"sys-{ev['event_id']}")
             if (
                 wire.row_count
@@ -493,6 +543,13 @@ def run_monitor_tui(
                     f"Event {selected['event_id']} trace error: "
                     f"{_escape_markup(f'{type(exc).__name__}: {exc}')}"
                 )
+
+        def action_toggle_timezone(self) -> None:
+            self._tz_idx = (self._tz_idx + 1) % len(self._tz_list)
+            self._active_tz = self._tz_list[self._tz_idx]
+            self._last_fingerprint = None
+            self.notify(f"Timezone: {self._get_tz_label()}", timeout=2.0)
+            self.refresh_data()
 
         def action_approve_pending(self) -> None:
             event_id = self._focused_pending_id

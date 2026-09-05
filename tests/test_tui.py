@@ -260,3 +260,103 @@ def test_refresh_data_swallows_fetch_errors():
     assert len(banners) == 2
     assert "database is locked" in banners[0]
     assert "OperationalError" in banners[0]
+
+
+def test_timezone_resolution_and_formatting():
+    from datetime import timezone, timedelta
+    from agentbus.devex import (
+        resolve_timezone,
+        format_timezone_label,
+        format_timestamp,
+        format_event_row,
+    )
+    from agentbus.tui import _format_system_row
+
+    # Resolution
+    assert resolve_timezone(None) == timezone.utc
+    assert resolve_timezone("UTC") == timezone.utc
+    assert resolve_timezone("utc") == timezone.utc
+    assert resolve_timezone("  UTC  ") == timezone.utc
+    assert resolve_timezone("local") is not None
+    assert resolve_timezone("invalid_tz_name_123") == timezone.utc
+    custom_tz = timezone(timedelta(hours=8))
+    assert resolve_timezone(custom_tz) == custom_tz
+
+    # Labels
+    assert format_timezone_label(None) == "UTC"
+    assert format_timezone_label("UTC") == "UTC"
+    assert format_timezone_label("utc") == "UTC"
+    assert format_timezone_label("local").startswith("Local (")
+    assert format_timezone_label("Asia/Tokyo") == "Asia/Tokyo"
+    assert format_timezone_label("invalid_tz_name_123") == "UTC"
+
+    # Timestamp formatting
+    iso_utc = "2026-09-05T00:35:29Z"
+    assert format_timestamp(iso_utc, "UTC") == "00:35:29"
+    assert format_timestamp(iso_utc, custom_tz) == "08:35:29"
+    assert len(format_timestamp(iso_utc, "local")) == 8
+    assert format_timestamp(iso_utc, "invalid_tz_name_123") == "00:35:29"
+
+    # Event row formatting
+    event = {
+        "event_id": 42,
+        "timestamp": iso_utc,
+        "topic": "okf/handoff",
+        "producer_id": "codex",
+        "payload": {"from": "codex", "to": "agy", "summary": "Handoff ready"},
+    }
+    row_utc = format_event_row(event, tz="UTC")
+    assert row_utc["time"] == "00:35:29"
+    assert row_utc["from"] == "codex"
+    assert row_utc["to"] == "agy"
+
+    row_tz8 = format_event_row(event, tz=custom_tz)
+    assert row_tz8["time"] == "08:35:29"
+
+    # System row formatting
+    sys_event = {
+        "event_id": 99,
+        "timestamp": iso_utc,
+        "topic": "system/mcp",
+        "payload": {"tool": "agentbus_publish", "latency_ms": 12},
+    }
+    sys_row_utc = _format_system_row(sys_event, tz="UTC")
+    assert sys_row_utc[1] == "00:35:29"
+    assert "agentbus_publish" in sys_row_utc[3]
+
+    sys_row_tz8 = _format_system_row(sys_event, tz=custom_tz)
+    assert sys_row_tz8[1] == "08:35:29"
+
+
+def test_monitor_table_renders_version_and_timezone(tmp_path):
+    from agentbus import __version__
+    from agentbus.devex import _build_monitor_table
+
+    event = {
+        "event_id": 1,
+        "timestamp": "2026-09-05T00:00:00Z",
+        "topic": "okf/handoff",
+        "producer_id": "agy",
+        "payload": {"from": "agy", "to": "all", "summary": "ping"},
+    }
+    table = _build_monitor_table(tmp_path, [event], tz="UTC")
+    assert f"AgentBus v{__version__}" in str(table.title)
+    assert "TZ: UTC" in str(table.title)
+    assert f"AgentBus v{__version__}" in str(table.caption)
+
+
+def test_tui_app_timezone_list_canonicalization(tmp_path):
+    """Test that _MonitorApp initializes timezone list without duplicates."""
+    try:
+        import textual  # noqa: F401
+    except ImportError:
+        return
+
+    from agentbus.tui import run_monitor_tui
+
+    # We test that run_monitor_tui runs with various tz inputs without raising
+    with patch("textual.app.App.run", return_value=None):
+        run_monitor_tui(tmp_path, tz="utc")
+        run_monitor_tui(tmp_path, tz="LOCAL")
+        run_monitor_tui(tmp_path, tz="Asia/Tokyo")
+        run_monitor_tui(tmp_path, tz="invalid_tz_123")

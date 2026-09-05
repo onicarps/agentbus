@@ -6,8 +6,14 @@ import json
 import shutil
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Any
+
+try:
+    import zoneinfo
+except ImportError:
+    zoneinfo = None  # type: ignore
 
 from agentbus.auth import ensure_ephemeral_token, token_path
 from agentbus.rbac import ensure_default_roles
@@ -246,6 +252,88 @@ def poll_events_snapshot(
         store.close()
 
 
+def resolve_timezone(tz: str | tzinfo | None) -> tzinfo:
+    """Resolve a timezone string or object to a datetime tzinfo.
+
+    Accepts:
+    - None / "utc" / "UTC": timezone.utc
+    - "local" / "LOCAL": local system timezone
+    - IANA timezone name (e.g. "America/New_York", "Asia/Tokyo")
+    """
+    if tz is None:
+        return timezone.utc
+    if isinstance(tz, tzinfo):
+        return tz
+    tz_str = str(tz).strip()
+    if not tz_str or tz_str.upper() == "UTC":
+        return timezone.utc
+    if tz_str.lower() == "local":
+        local_tz = datetime.now().astimezone().tzinfo
+        return local_tz if local_tz is not None else timezone.utc
+    if zoneinfo is not None:
+        try:
+            return zoneinfo.ZoneInfo(tz_str)
+        except Exception:
+            pass
+    return timezone.utc
+
+
+def format_timezone_label(tz: str | tzinfo | None) -> str:
+    """Return a clean human-readable label for the current timezone."""
+    if tz is None:
+        return "UTC"
+    if isinstance(tz, str):
+        s = tz.strip()
+        if not s or s.upper() == "UTC":
+            return "UTC"
+        if s.lower() == "local":
+            now = datetime.now().astimezone()
+            offset = now.strftime("%z")
+            if len(offset) == 5:
+                offset_fmt = f"{offset[:3]}:{offset[3:]}"
+            else:
+                offset_fmt = offset
+            return f"Local ({offset_fmt})"
+        if zoneinfo is not None:
+            try:
+                zi = zoneinfo.ZoneInfo(s)
+                return zi.key
+            except Exception:
+                return "UTC"
+        return "UTC"
+    if tz == timezone.utc:
+        return "UTC"
+    now = datetime.now(tz)
+    offset = now.strftime("%z")
+    if len(offset) == 5:
+        offset_fmt = f"{offset[:3]}:{offset[3:]}"
+    else:
+        offset_fmt = offset
+    name = getattr(tz, "key", None) or str(tz)
+    return f"{name} ({offset_fmt})"
+
+
+def format_timestamp(ts: str | None, tz: str | tzinfo | None = None) -> str:
+    """Format an ISO timestamp to HH:MM:SS in the target timezone."""
+    if not ts:
+        return ""
+    try:
+        raw = str(ts).strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if isinstance(tz, str) and tz.strip().lower() == "local":
+            dt_target = dt.astimezone()
+        else:
+            target_tz = resolve_timezone(tz)
+            dt_target = dt.astimezone(target_tz)
+        return dt_target.strftime("%H:%M:%S")
+    except Exception:
+        return str(ts)[-8:]
+
+
 def _clip(value: Any, max_len: int) -> str:
     s = str(value if value is not None else "")
     if len(s) <= max_len:
@@ -255,7 +343,7 @@ def _clip(value: Any, max_len: int) -> str:
     return s[: max_len - 3] + "..."
 
 
-def format_event_row(event: dict[str, Any]) -> dict[str, str]:
+def format_event_row(event: dict[str, Any], tz: str | tzinfo | None = None) -> dict[str, str]:
     """Normalize one event for monitor tables / plain CLI.
 
     Always extracts payload ``from`` / ``to`` when present (Agy #210 / v0.14).
@@ -276,7 +364,7 @@ def format_event_row(event: dict[str, Any]) -> dict[str, str]:
         summary = str(payload)[:60]
     return {
         "id": str(event.get("event_id", "")),
-        "time": str(event.get("timestamp", ""))[-8:],  # HH:MM:SSZ tail
+        "time": format_timestamp(event.get("timestamp"), tz=tz),
         "topic": _clip(event.get("topic", ""), 16),
         "from": _clip(frm, 14),
         "to": _clip(to, 14),
@@ -284,14 +372,19 @@ def format_event_row(event: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _build_monitor_table(workspace: Path, events: list[dict[str, Any]]):
+def _build_monitor_table(workspace: Path, events: list[dict[str, Any]], tz: str | tzinfo | None = None):
     from rich.table import Table
+    from agentbus import __version__
 
-    table = Table(title=f"AgentBus — {workspace}")
+    tz_label = format_timezone_label(tz)
+    table = Table(
+        title=f"AgentBus v{__version__} — {workspace} (TZ: {tz_label})",
+        caption=f"AgentBus v{__version__}  |  TZ: {tz_label}",
+    )
     for col in ("id", "time", "topic", "from", "to", "summary"):
         table.add_column(col)
     for ev in events[-20:]:
-        row = format_event_row(ev)
+        row = format_event_row(ev, tz=tz)
         table.add_row(
             row["id"],
             row["time"],
@@ -311,13 +404,14 @@ def run_monitor(
     once: bool = False,
     retention_days: int = 7,
     plain: bool = False,
+    tz: str | None = None,
 ) -> None:
     """Tail events.db; Textual TUI (default), rich snapshot, or plain poll."""
     if not once and not plain and topic is None:
         try:
             from agentbus.tui import run_monitor_tui
 
-            run_monitor_tui(workspace, interval=interval, retention_days=retention_days)
+            run_monitor_tui(workspace, interval=interval, retention_days=retention_days, tz=tz)
             return
         except RuntimeError:
             pass
@@ -342,7 +436,7 @@ def run_monitor(
                 retention_days=retention_days,
             )
             for ev in events:
-                row = format_event_row(ev)
+                row = format_event_row(ev, tz=tz)
                 # Dedicated from/to columns (not only arrow-joined)
                 print(
                     f"{row['id']:>4} {row['time']} {row['topic']:<16} "
@@ -363,11 +457,11 @@ def run_monitor(
             limit=50,
             retention_days=retention_days,
         )
-        console.print(_build_monitor_table(workspace, snapshot))
+        console.print(_build_monitor_table(workspace, snapshot, tz=tz))
         return
 
     with Live(
-        _build_monitor_table(workspace, []),
+        _build_monitor_table(workspace, [], tz=tz),
         console=console,
         refresh_per_second=4,
     ) as live:
@@ -388,7 +482,7 @@ def run_monitor(
                 limit=50,
                 retention_days=retention_days,
             )
-            live.update(_build_monitor_table(workspace, snapshot))
+            live.update(_build_monitor_table(workspace, snapshot, tz=tz))
             time.sleep(interval)
 
 

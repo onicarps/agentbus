@@ -873,6 +873,13 @@ def init(
 @click.option("--once", is_flag=True, help="Print snapshot and exit")
 @click.option("--plain", is_flag=True, help="Plain/rich poll loop (no Textual TUI)")
 @click.option("--retention-days", default=7, show_default=True)
+@click.option(
+    "--tz",
+    "--timezone",
+    default=None,
+    envvar="AGENTBUS_TZ",
+    help="Display timezone (e.g. UTC, local, Asia/Tokyo, America/New_York)",
+)
 def monitor(
     workspace: str | None,
     topic: str | None,
@@ -880,6 +887,7 @@ def monitor(
     once: bool,
     plain: bool,
     retention_days: int,
+    tz: str | None,
 ) -> None:
     """Mission-control TUI (Textual) or tail events.db."""
     try:
@@ -893,6 +901,7 @@ def monitor(
         once=once,
         plain=plain,
         retention_days=retention_days,
+        tz=tz,
     )
 
 

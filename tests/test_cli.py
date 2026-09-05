@@ -170,3 +170,15 @@ def test_cli_publish_batch(tmp_path):
         ],
     )
     assert result.exit_code == 0, result.output
+
+
+def test_cli_monitor_with_timezone_option(tmp_path):
+    ws = str(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["monitor", "--workspace", ws, "--once", "--plain", "--tz", "UTC"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "AgentBus v" in result.output
+    assert "TZ: UTC" in result.output
