@@ -1432,12 +1432,18 @@ def worker_init(workspace: str | None, to: str) -> None:
     envvar="AGENTBUS_WEBHOOK_TOKEN",
     help="Runtime-bound ingress capability (mandatory in protected/strict mode)",
 )
+@click.option(
+    "--dev",
+    is_flag=True,
+    help="Allow tokenless localhost ingress for explicit local dogfood only.",
+)
 def wake_ingress_cmd(
     workspace: str | None,
     runtime: str,
     host: str,
     port: int | None,
     token: str | None,
+    dev: bool,
 ) -> None:
     """Mode A localhost ingress: POST /agentbus/wake → JSONL queue (no LLM)."""
     from agentbus.wake_ingress import run_ingress
@@ -1450,6 +1456,7 @@ def wake_ingress_cmd(
             host=host,
             port=port,
             token=token,
+            dev=dev,
         )
     except (ValueError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc

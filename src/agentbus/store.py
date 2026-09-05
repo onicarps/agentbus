@@ -16,6 +16,7 @@ from agentbus.identity import (
     VerificationResult,
     configured as identity_configured,
     load_trust_state,
+    prune_expired_delegations,
     sign_event_envelope,
     topic_restricted,
     validate_typed_action,
@@ -504,6 +505,9 @@ class EventStore:
         verification_reason: str | None = None
         identity_state = None
         if identity_configured(self.workspace):
+            # Keep expired child credentials from making every trust-state
+            # verification grow with historical delegation traffic.
+            prune_expired_delegations(self.workspace)
             identity_state = load_trust_state(self.workspace, update_high_water=True)
             if identity_envelope is None and auto_sign:
                 try:

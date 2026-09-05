@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,7 @@ REPO = Path(__file__).resolve().parents[1]
 
 def test_all_32_adversarial_scenarios_have_executable_evidence() -> None:
     matrix = json.loads((FIXTURES / "negative_matrix.json").read_text(encoding="utf-8"))
-    assert set(matrix) == {f"N{number}" for number in range(1, 33)}
+    assert set(matrix) == {f"N{number}" for number in range(1, 36)}
     for scenario, evidence in matrix.items():
         assert evidence, scenario
         for node_id in evidence:
@@ -260,13 +261,18 @@ def test_policy_clock_workspace_and_rotation_replays_fail_closed(tmp_path: Path)
     bootstrap_workspace_identity(other)
     enroll_identity(other, "codex")
     payload = {"from": "codex", "to": "agy", "summary": "replay fixture"}
+    current_timestamp = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
     first = sign_event_envelope(
         workspace,
         topic="okf/handoff",
         producer_id="codex",
         schema_version="1.0",
         payload=payload,
-        timestamp="2026-08-25T10:00:00.000000Z",
+        timestamp=current_timestamp,
     )
     assert verify_envelope(other, first, stored_payload=payload).reason == (
         "workspace_id_mismatch"
@@ -286,7 +292,9 @@ def test_policy_clock_workspace_and_rotation_replays_fail_closed(tmp_path: Path)
         producer_id="codex",
         schema_version="1.0",
         payload={**payload, "summary": "older clock"},
-        timestamp="2026-08-25T09:00:00.000000Z",
+        timestamp=(datetime.now(timezone.utc) - timedelta(seconds=1))
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z"),
     )
     with pytest.raises(IdentityError, match="event_timestamp_rollback"):
         store.publish(

@@ -30,5 +30,8 @@
   "N29": ["tests/test_identity_phase4.py::test_mode_promotion_downgrade_and_nonretroactive_recovery"],
   "N30": ["tests/test_identity.py::test_strict_json_rejects_ambiguous_inputs", "go-core/internal/identity/canonical_test.go::TestRejectsAmbiguousInputs", "packages/js/agentbus-client/tests/identity.test.ts::rejects values Node would otherwise round or normalize ambiguously"],
   "N31": ["tests/test_identity_platform.py::test_agentid_dependency_versions_and_fixture", "go-core/internal/identity/canonical_test.go::TestCrossLanguageFixture", "packages/js/agentbus-client/tests/identity.test.ts::matches and verifies the Python fixture"],
-  "N32": ["tests/test_identity_phase4.py::test_released_database_fixtures_migrate_additively"]
+  "N32": ["tests/test_identity_phase4.py::test_released_database_fixtures_migrate_additively"],
+  "N33": ["tests/test_identity.py::test_n33_expired_delegation_rejects_backdated_envelope"],
+  "N34": ["tests/test_wake_ingress.py::test_n34_rejects_cross_origin_rebinding_and_non_json"],
+  "N35": ["tests/test_identity.py::test_n35_trust_state_cache_scales_with_registry"]
 }

@@ -15,8 +15,8 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Iterable
+from urllib.parse import urlparse, urlsplit
 
 from agentbus.workspace_guard import assert_workspace_supported
 from agentbus.identity import (
@@ -31,6 +31,7 @@ log = logging.getLogger("agentbus.wake_ingress")
 MAX_BODY = 256 * 1024
 PATH_WAKE = "/agentbus/wake"
 PATH_HEALTH = "/agentbus/wake/health"
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 DEFAULT_PORTS = {
     "hermes": 18787,
@@ -103,6 +104,32 @@ def _client_is_loopback(addr: str | None) -> bool:
     return addr in {"127.0.0.1", "::1", "localhost"} or addr.startswith("127.")
 
 
+def _header_hostname(value: str | None) -> str | None:
+    if not value:
+        return None
+    try:
+        hostname = urlsplit(f"//{value}").hostname
+    except ValueError:
+        return None
+    return hostname.rstrip(".").lower() if hostname else None
+
+
+def _normalized_origin(value: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        if parsed.username or parsed.password or parsed.path not in {"", "/"}:
+            return None
+        if parsed.query or parsed.fragment:
+            return None
+        hostname = parsed.hostname.rstrip(".").lower()
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return parsed.scheme, hostname, port
+    except ValueError:
+        return None
+
+
 class WakeIngressHandler(BaseHTTPRequestHandler):
     server: "WakeIngressServer"  # type: ignore[assignment]
 
@@ -128,7 +155,7 @@ class WakeIngressHandler(BaseHTTPRequestHandler):
                     "runtime": self.server.runtime,
                     "workspace": str(self.server.workspace),
                     "queue_depth": store.queue_depth(),
-                    "token_required": bool(self.server.token),
+                    "token_required": bool(self.server.token) or not self.server.dev,
                 },
             )
             return
@@ -145,7 +172,29 @@ class WakeIngressHandler(BaseHTTPRequestHandler):
             self._json(403, {"ok": False, "error": "loopback_only"})
             return
 
+        if _header_hostname(self.headers.get("Host")) not in LOOPBACK_HOSTS:
+            self._json(403, {"ok": False, "error": "invalid_host"})
+            return
+        origin = self.headers.get("Origin")
+        if origin is not None and (
+            _normalized_origin(origin) not in self.server.allowed_origins
+        ):
+            self._json(403, {"ok": False, "error": "invalid_origin"})
+            return
+        if (self.headers.get("Sec-Fetch-Site") or "").strip().lower() == "cross-site":
+            self._json(403, {"ok": False, "error": "cross_site_request"})
+            return
+        content_type = (self.headers.get("Content-Type") or "").split(";", 1)[
+            0
+        ].strip().lower()
+        if content_type != "application/json":
+            self._json(415, {"ok": False, "error": "json_content_type_required"})
+            return
+
         if self.server.protected and not self.server.token:
+            self._json(503, {"ok": False, "error": "runtime_capability_required"})
+            return
+        if not self.server.token and not self.server.dev:
             self._json(503, {"ok": False, "error": "runtime_capability_required"})
             return
         if self.server.token:
@@ -229,12 +278,33 @@ class WakeIngressServer(ThreadingHTTPServer):
         workspace: Path,
         runtime: str,
         token: str | None,
+        dev: bool = False,
+        allowed_origins: Iterable[str] | None = None,
     ) -> None:
         super().__init__((host, port), WakeIngressHandler)
         self.workspace = workspace
         self.runtime = runtime
         self.token = token or ""
+        self.dev = dev
         self.store = IngressStore(workspace, runtime)
+        configured_origins = (
+            list(allowed_origins)
+            if allowed_origins is not None
+            else [
+                item.strip()
+                for item in os.environ.get("AGENTBUS_WAKE_ALLOWED_ORIGINS", "").split(",")
+                if item.strip()
+            ]
+        )
+        default_origins = {
+            ("http", hostname, self.server_port)
+            for hostname in LOOPBACK_HOSTS
+        }
+        self.allowed_origins = default_origins | {
+            normalized
+            for origin in configured_origins
+            if (normalized := _normalized_origin(origin)) is not None
+        }
         state = load_trust_state(workspace) if identity_configured(workspace) else None
         self.protected = state is not None and state.mode in {"protected", "strict"}
         if self.protected and (
@@ -259,6 +329,7 @@ def run_ingress(
     host: str = "127.0.0.1",
     port: int | None = None,
     token: str | None = None,
+    dev: bool = False,
 ) -> None:
     runtime = runtime.strip().lower()
     if runtime not in DEFAULT_PORTS and port is None:
@@ -279,6 +350,10 @@ def run_ingress(
             "runtime capability required in protected/strict identity mode; "
             "pass --token or AGENTBUS_WEBHOOK_TOKEN"
         )
+    if not token and not dev:
+        raise ValueError(
+            "wake-ingress token required; pass --token or use --dev for local dogfood"
+        )
     if not token:
         log.warning(
             "WARNING: wake-ingress runtime=%s has NO shared token "
@@ -288,7 +363,12 @@ def run_ingress(
         )
 
     server = WakeIngressServer(
-        host, port, workspace=workspace, runtime=runtime, token=token or None
+        host,
+        port,
+        workspace=workspace,
+        runtime=runtime,
+        token=token or None,
+        dev=dev,
     )
     log.info(
         "wake-ingress listening http://%s:%s%s runtime=%s workspace=%s queue=%s",

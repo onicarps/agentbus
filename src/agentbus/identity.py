@@ -16,6 +16,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,7 @@ MODE_ORDER = {"audit": 0, "protected": 1, "strict": 2}
 DEFAULT_RESTRICTED_TOPICS = ("okf/handoff", "okf/approval", "system/")
 MAX_SAFE_INTEGER = (1 << 53) - 1
 MAX_DELEGATION_TTL_SECONDS = 3600
+MAX_ACTIVE_CHILD_DELEGATIONS = 100
 ROOT_PRODUCER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 DELEGATED_PRODUCER_PATTERN = re.compile(
     r"^[a-z][a-z0-9_-]{0,63}/subagent/[a-z0-9][a-z0-9_-]{0,63}$"
@@ -77,6 +79,16 @@ DEFAULT_ACTION_PRODUCERS = {
     "identity_admin": ["identity-admin"],
 }
 _UNSET = object()
+
+# Trust documents are immutable, root-signed snapshots.  Cache the verified
+# snapshot, while retaining the file fingerprint in the cache key so an
+# atomic registry/policy replacement invalidates it immediately.  The lock is
+# also important for concurrent publishers: only one caller should pay the
+# delegation-proof verification cost for a new snapshot.
+_TRUST_STATE_CACHE: dict[
+    str, tuple[tuple[tuple[int, int, str], ...], TrustState]
+] = {}
+_TRUST_STATE_CACHE_LOCK = threading.RLock()
 
 
 class IdentityError(ValueError):
@@ -334,6 +346,26 @@ def _load_root_public(root: Path) -> Ed25519PublicKey:
         raise IdentityNotConfigured("identity_not_configured") from exc
 
 
+def _fingerprinted_file(path: Path) -> tuple[tuple[int, int, str], bytes]:
+    """Read a file and return an mtime/size/content fingerprint plus bytes."""
+    # An atomic writer normally gives us a stable pair on the first attempt.
+    # Retry once if a non-atomic external writer races the read; verification
+    # still fails closed if the file keeps changing.
+    for _ in range(2):
+        before = path.stat()
+        raw = path.read_bytes()
+        after = path.stat()
+        if (before.st_mtime_ns, before.st_size) == (
+            after.st_mtime_ns,
+            after.st_size,
+        ):
+            return (
+                (after.st_mtime_ns, after.st_size, hashlib.sha256(raw).hexdigest()),
+                raw,
+            )
+    raise VerificationError("identity_document_changed_during_read")
+
+
 def configured(workspace: Path) -> bool:
     root = _identity_dir(workspace)
     return all(
@@ -344,64 +376,96 @@ def configured(workspace: Path) -> bool:
 
 def load_trust_state(workspace: Path, *, update_high_water: bool = False) -> TrustState:
     root = _identity_dir(workspace)
-    public = _load_root_public(root)
-    try:
-        policy_doc = strict_json_loads((root / "policy.json").read_bytes())
-        registry_doc = strict_json_loads((root / "registry.json").read_bytes())
-    except OSError as exc:
-        raise VerificationError("identity_documents_missing") from exc
-    policy = _verify_document(policy_doc, public, "policy")
-    registry = _verify_document(registry_doc, public, "registry")
-    if policy.get("workspace_id") != registry.get("workspace_id"):
-        raise VerificationError("workspace_id_mismatch")
-    if policy.get("registry_digest") != _sha256_jcs(registry):
-        raise VerificationError("registry_digest_mismatch")
-    try:
-        policy_version = int(policy["policy_version"])
-        registry_version = int(registry["registry_version"])
-        required_registry = int(policy["registry_version"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise VerificationError("invalid_identity_version") from exc
-    if registry_version != required_registry:
-        raise VerificationError("registry_version_mismatch")
-    mode = str(policy.get("mode") or "")
-    if mode not in MODE_ORDER:
-        raise VerificationError("invalid_identity_mode")
+    workspace_key = str(root)
+    with _TRUST_STATE_CACHE_LOCK:
+        try:
+            root_key, _ = _fingerprinted_file(root / "trust-root.json")
+            policy_key, policy_raw = _fingerprinted_file(root / "policy.json")
+            registry_key, registry_raw = _fingerprinted_file(root / "registry.json")
+        except OSError as exc:
+            raise VerificationError("identity_documents_missing") from exc
+        cache_key = (root_key, policy_key, registry_key)
+        cached = _TRUST_STATE_CACHE.get(workspace_key)
 
-    high_path = root / "high-water.json"
-    high = {"policy_version": 0, "registry_version": 0}
-    if high_path.is_file():
-        loaded = strict_json_loads(high_path.read_bytes())
-        if isinstance(loaded, dict):
-            high = loaded
-    if policy_version < int(high.get("policy_version", 0)):
-        raise VerificationError("policy_rollback")
-    if registry_version < int(high.get("registry_version", 0)):
-        raise VerificationError("registry_rollback")
-    if update_high_water and (
-        policy_version > int(high.get("policy_version", 0))
-        or registry_version > int(high.get("registry_version", 0))
-    ):
-        _atomic_json(
-            high_path,
-            {"policy_version": policy_version, "registry_version": registry_version},
-            mode=0o600,
-        )
-    restricted = policy.get("restricted_topics") or []
-    if not isinstance(restricted, list) or not all(
-        isinstance(x, str) for x in restricted
-    ):
-        raise VerificationError("invalid_restricted_topics")
-    _verify_delegations(registry)
-    return TrustState(
-        workspace_id=str(policy["workspace_id"]),
-        mode=effective_mode(mode),
-        policy_version=policy_version,
-        registry_version=registry_version,
-        restricted_topics=tuple(restricted),
-        policy=policy,
-        registry=registry,
-    )
+        if cached is not None and cached[0] == cache_key:
+            base_state = cached[1]
+        else:
+            public = _load_root_public(root)
+            try:
+                policy_doc = strict_json_loads(policy_raw)
+                registry_doc = strict_json_loads(registry_raw)
+            except OSError as exc:
+                raise VerificationError("identity_documents_missing") from exc
+            policy = _verify_document(policy_doc, public, "policy")
+            registry = _verify_document(registry_doc, public, "registry")
+            if policy.get("workspace_id") != registry.get("workspace_id"):
+                raise VerificationError("workspace_id_mismatch")
+            if policy.get("registry_digest") != _sha256_jcs(registry):
+                raise VerificationError("registry_digest_mismatch")
+            try:
+                policy_version = int(policy["policy_version"])
+                registry_version = int(registry["registry_version"])
+                required_registry = int(policy["registry_version"])
+                replay_window = int(policy["replay_window_seconds"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise VerificationError("invalid_identity_version") from exc
+            if isinstance(policy.get("replay_window_seconds"), bool) or replay_window < 0:
+                raise VerificationError("invalid_replay_window_seconds")
+            if registry_version != required_registry:
+                raise VerificationError("registry_version_mismatch")
+            mode = str(policy.get("mode") or "")
+            if mode not in MODE_ORDER:
+                raise VerificationError("invalid_identity_mode")
+            restricted = policy.get("restricted_topics") or []
+            if not isinstance(restricted, list) or not all(
+                isinstance(x, str) for x in restricted
+            ):
+                raise VerificationError("invalid_restricted_topics")
+            _verify_delegations(registry)
+            base_state = TrustState(
+                workspace_id=str(policy["workspace_id"]),
+                mode=mode,
+                policy_version=policy_version,
+                registry_version=registry_version,
+                restricted_topics=tuple(restricted),
+                policy=policy,
+                registry=registry,
+            )
+            _TRUST_STATE_CACHE[workspace_key] = (cache_key, base_state)
+
+        high_path = root / "high-water.json"
+        high = {"policy_version": 0, "registry_version": 0}
+        if high_path.is_file():
+            loaded = strict_json_loads(high_path.read_bytes())
+            if isinstance(loaded, dict):
+                high = loaded
+        if base_state.policy_version < int(high.get("policy_version", 0)):
+            raise VerificationError("policy_rollback")
+        if base_state.registry_version < int(high.get("registry_version", 0)):
+            raise VerificationError("registry_rollback")
+        if update_high_water and (
+            base_state.policy_version > int(high.get("policy_version", 0))
+            or base_state.registry_version > int(high.get("registry_version", 0))
+        ):
+            _atomic_json(
+                high_path,
+                {
+                    "policy_version": base_state.policy_version,
+                    "registry_version": base_state.registry_version,
+                },
+                mode=0o600,
+            )
+        if base_state.mode != effective_mode(base_state.policy["mode"]):
+            return TrustState(
+                workspace_id=base_state.workspace_id,
+                mode=effective_mode(base_state.policy["mode"]),
+                policy_version=base_state.policy_version,
+                registry_version=base_state.registry_version,
+                restricted_topics=base_state.restricted_topics,
+                policy=base_state.policy,
+                registry=base_state.registry,
+            )
+        return base_state
 
 
 def effective_mode(policy_mode: str) -> str:
@@ -620,6 +684,7 @@ def delegate_identity(
     if ttl_seconds < 1 or ttl_seconds > MAX_DELEGATION_TTL_SECONDS:
         raise IdentityError("invalid_delegation_ttl")
     root = _identity_dir(workspace)
+    prune_expired_delegations(workspace)
     state = load_trust_state(workspace, update_high_water=True)
     parent = _active_key(state, parent_producer_id)
     if parent.get("delegated_by") is not None:
@@ -638,6 +703,20 @@ def delegate_identity(
         raise IdentityError("delegation_capability_escalation")
     if not requested_topics.issubset(set(parent.get("topics") or [])):
         raise IdentityError("delegation_topic_escalation")
+    now = datetime.now(timezone.utc)
+    active_children = 0
+    for existing in state.registry.get("keys", []):
+        if (
+            existing.get("delegated_by_key_id") == parent.get("key_id")
+            and existing.get("state") == "active"
+            and existing.get("expires_at") is not None
+            and _parse_utc_timestamp(
+                existing.get("expires_at"), "invalid_delegation_expiry"
+            ) > now
+        ):
+            active_children += 1
+    if active_children >= MAX_ACTIVE_CHILD_DELEGATIONS:
+        raise IdentityError("delegation_child_limit_exceeded")
 
     private = Ed25519PrivateKey.generate()
     key_id = f"{child_producer_id.replace('/', '-')}-{secrets.token_hex(6)}"
@@ -681,6 +760,45 @@ def delegate_identity(
     return child_producer_id, key_id
 
 
+def prune_expired_delegations(
+    workspace: Path, *, now: datetime | None = None
+) -> int:
+    """Remove expired child credentials from the signed registry.
+
+    Expiry is evaluated against this process's wall clock.  Private key files
+    are intentionally retained for operator recovery/audit; removing the
+    signed registry entry is what stops verification and bounds trust-state
+    validation cost.  Returns the number of entries removed.
+    """
+    root = _identity_dir(workspace)
+    with _TRUST_STATE_CACHE_LOCK:
+        state = load_trust_state(workspace, update_high_water=True)
+        current = now or datetime.now(timezone.utc)
+        keys = state.registry.get("keys", [])
+        keep: list[dict[str, Any]] = []
+        removed = 0
+        for entry in keys:
+            if entry.get("delegated_by") is None:
+                keep.append(entry)
+                continue
+            expires = _parse_utc_timestamp(
+                entry.get("expires_at"), "invalid_delegation_expiry"
+            )
+            if expires <= current:
+                removed += 1
+            else:
+                keep.append(entry)
+        if not removed:
+            return 0
+        registry = dict(state.registry)
+        registry["registry_version"] = str(state.registry_version + 1)
+        registry["keys"] = keep
+        root_private = _load_private(root / "private" / "workspace-root.pem")
+        _write_registry_and_policy(root, state, registry, root_private)
+        load_trust_state(workspace, update_high_water=True)
+        return removed
+
+
 def delegated_private_key_path(
     workspace: Path, parent_producer_id: str, child_producer_id: str
 ) -> Path:
@@ -714,6 +832,7 @@ def rotate_identity(
     if grace_seconds < 0:
         raise IdentityError("invalid_rotation_grace")
     root = _identity_dir(workspace)
+    prune_expired_delegations(workspace)
     state = load_trust_state(workspace, update_high_water=True)
     old = _active_key(state, producer_id)
     root_private = _load_private(root / "private" / "workspace-root.pem")
@@ -979,7 +1098,12 @@ def _active_key(
 
 
 def _verification_key(
-    state: TrustState, producer_id: str, key_id: str, timestamp: str
+    state: TrustState,
+    producer_id: str,
+    key_id: str,
+    timestamp: str,
+    *,
+    now: datetime,
 ) -> dict[str, Any]:
     matches = [
         item
@@ -1008,7 +1132,10 @@ def _verification_key(
         expires = _parse_utc_timestamp(
             entry.get("expires_at"), "invalid_delegation_expiry"
         )
-        if signed_at >= expires:
+        # Keep the signed timestamp boundary as well as wall-clock expiry:
+        # future-dated events cannot extend a delegation, and a verifier that
+        # arrives after expiry cannot accept a backdated event.
+        if signed_at >= expires or now >= expires:
             raise VerificationError("delegation_expired")
     return entry
 
@@ -1153,11 +1280,15 @@ def verify_envelope(
         timestamp = unsigned.get("timestamp")
         if not isinstance(timestamp, str):
             raise VerificationError("invalid_event_timestamp")
+        signed_at = _parse_utc_timestamp(timestamp, "invalid_event_timestamp")
+        now = datetime.now(timezone.utc)
         try:
-            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise VerificationError("invalid_event_timestamp") from exc
-        entry = _verification_key(state, producer, key_id, timestamp)
+            replay_window = int(state.policy["replay_window_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VerificationError("invalid_replay_window_seconds") from exc
+        entry = _verification_key(state, producer, key_id, timestamp, now=now)
+        if abs((now - signed_at).total_seconds()) > replay_window:
+            raise VerificationError("envelope_stale")
         signed_topic = str(unsigned.get("topic") or "")
         allowed_topics = entry.get("topics") or []
         if not any(

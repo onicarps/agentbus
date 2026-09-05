@@ -5,6 +5,8 @@ import json
 import hashlib
 import sqlite3
 import threading
+import time
+from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -12,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+import agentbus.identity as identity_module
 from click.testing import CliRunner
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -28,6 +31,7 @@ from agentbus.identity import (
     enroll_identity,
     issue_wake_capability,
     load_trust_state,
+    prune_expired_delegations,
     revoke_identity_key,
     rotate_identity,
     set_policy_mode,
@@ -419,6 +423,94 @@ def test_delegated_child_is_bounded_and_cannot_impersonate_factory(
         delegate_identity(tmp_path, "agy", "long-lived", ttl_seconds=3601)
     with pytest.raises(IdentityError, match="nested_delegation_forbidden"):
         delegate_identity(tmp_path, child, "grandchild", ttl_seconds=60)
+
+
+def test_n33_expired_delegation_rejects_backdated_envelope(tmp_path: Path) -> None:
+    bootstrap_workspace_identity(tmp_path)
+    enroll_identity(
+        tmp_path,
+        "agy",
+        capabilities=("message",),
+        topics=("okf/handoff",),
+    )
+    child, key_id = delegate_identity(
+        tmp_path, "agy", "expiry-fixture", ttl_seconds=1
+    )
+    state = load_trust_state(tmp_path)
+    entry = next(item for item in state.registry["keys"] if item["key_id"] == key_id)
+    expires = datetime.fromisoformat(entry["expires_at"].replace("Z", "+00:00"))
+    # The timestamp remains inside the 300-second replay window, but is before
+    # the delegation expiry.  A verifier must use wall-clock expiry, not this
+    # signer-controlled backdated timestamp.
+    timestamp = (expires - timedelta(milliseconds=100)).isoformat(
+        timespec="microseconds"
+    ).replace("+00:00", "Z")
+    payload = {"from": child, "to": "codex", "summary": "expired child"}
+    envelope = sign_event_envelope(
+        tmp_path,
+        topic="okf/handoff",
+        producer_id=child,
+        schema_version="1.0",
+        payload=payload,
+        timestamp=timestamp,
+    )
+    time.sleep(1.1)
+    result = verify_envelope(tmp_path, envelope, stored_payload=payload)
+    assert result.verified is False
+    assert result.reason == "delegation_expired"
+    assert prune_expired_delegations(tmp_path) == 1
+    assert all(item["key_id"] != key_id for item in load_trust_state(tmp_path).registry["keys"])
+
+
+def test_n35_trust_state_cache_scales_with_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "scaled"
+    _boot_and_enroll(workspace)
+    state = load_trust_state(workspace)
+    root = workspace / ".agentbus" / "identity"
+    root_private = serialization.load_pem_private_key(
+        (root / "private" / "workspace-root.pem").read_bytes(), password=None
+    )
+    assert isinstance(root_private, Ed25519PrivateKey)
+    public_key = state.registry["keys"][0]["public_key"]
+    keys = [state.registry["keys"][0]]
+    for index in range(1, 500):
+        keys.append(
+            {
+                "key_id": f"fixture-{index}",
+                "producer_id": f"fixture{index}",
+                "algorithm": "Ed25519",
+                "public_key": public_key,
+                "capabilities": ["message"],
+                "topics": ["okf/handoff"],
+                "state": "active",
+            }
+        )
+    registry = dict(state.registry)
+    registry["registry_version"] = str(state.registry_version + 1)
+    registry["keys"] = keys
+    identity_module._write_registry_and_policy(root, state, registry, root_private)
+
+    calls = 0
+    original = identity_module._verify_delegations
+
+    def count_verifications(document):
+        nonlocal calls
+        calls += 1
+        return original(document)
+
+    monkeypatch.setattr(identity_module, "_verify_delegations", count_verifications)
+    started = time.perf_counter()
+    for _ in range(25):
+        assert load_trust_state(workspace).registry_version == 3
+    elapsed = time.perf_counter() - started
+    assert calls == 1
+    # This is a regression guard against O(registry-size) proof verification
+    # on every read; the assertion intentionally avoids a machine-dependent
+    # absolute throughput threshold.
+    assert elapsed < 1.0
+    assert prune_expired_delegations(workspace) == 0
 
 
 def test_policy_signature_and_monotonic_mode(tmp_path: Path) -> None:

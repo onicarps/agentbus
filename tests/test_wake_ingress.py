@@ -21,6 +21,7 @@ def ingress(tmp_path):
         workspace=tmp_path,
         runtime="hermes",
         token=None,
+        dev=True,
     )
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
@@ -106,3 +107,28 @@ def test_health(ingress):
     assert data["ok"] is True
     assert data["runtime"] == "hermes"
     conn.close()
+
+
+def test_n34_rejects_cross_origin_rebinding_and_non_json(ingress):
+    _server, port = ingress
+    body = {"event_id": 99, "payload": {"from": "agy", "to": "hermes"}}
+
+    for headers, expected in (
+        ({"Origin": "https://evil.example"}, 403),
+        ({"Host": "attacker.example"}, 403),
+        ({"Sec-Fetch-Site": "cross-site"}, 403),
+    ):
+        with pytest.raises(urllib.error.HTTPError) as error:
+            _post(port, body, headers=headers)
+        assert error.value.code == expected
+
+    data = json.dumps(body).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/agentbus/wake",
+        data=data,
+        method="POST",
+        headers={"Content-Type": "text/plain"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=3)
+    assert error.value.code == 415
