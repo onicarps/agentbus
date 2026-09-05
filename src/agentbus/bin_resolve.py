@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import platform
 import sys
 from pathlib import Path
+
+log = logging.getLogger("agentbus.bin_resolve")
 
 # Map (sys.platform, machine) → directory name used in wheels / optional npm packages.
 _PLATFORM_DIRS: dict[tuple[str, str], str] = {
@@ -91,9 +94,13 @@ def resolve_go_binary(
     env = os.environ.get(env_var)
     if env:
         p = Path(env).expanduser()
-        if p.is_file():
+        if p.is_file() and os.access(p, os.X_OK):
             return p
-        raise FileNotFoundError(f"{env_var} not found: {env}")
+        log.warning(
+            "%s points to non-existent or non-executable path: %s; falling back to bundled binary / PATH",
+            env_var,
+            env,
+        )
 
     bundled = resolve_bundled_binary(name)
     if bundled is not None:

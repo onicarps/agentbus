@@ -14,7 +14,7 @@ adapter:
   model: openai/qwen3.6-35b-a3b
   extra_args:
     - --env-file
-    - /home/oni/.aider.env
+    - ~/.aider.env
     - --openai-api-base
     - https://yolo-auto.com/v1
     - --no-git

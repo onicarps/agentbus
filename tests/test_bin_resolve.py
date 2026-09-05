@@ -41,3 +41,18 @@ def test_resolve_go_binary_env(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTBUS_GO_WORKER", str(fake))
     p = bin_resolve.resolve_go_binary("agentbus-go-worker", env_var="AGENTBUS_GO_WORKER")
     assert p == fake
+
+
+def test_resolve_go_binary_env_fallback(tmp_path, monkeypatch):
+    # If AGENTBUS_GO_WORKER points to a missing file, fall back to dev candidates / PATH
+    monkeypatch.setenv("AGENTBUS_GO_WORKER", "/nonexistent/path/to/agentbus-go-worker")
+    monkeypatch.setattr(bin_resolve, "resolve_bundled_binary", lambda name: None)
+    dev_fake = tmp_path / "dev-worker"
+    dev_fake.write_text("x")
+    dev_fake.chmod(dev_fake.stat().st_mode | stat.S_IEXEC)
+    p = bin_resolve.resolve_go_binary(
+        "agentbus-go-worker",
+        env_var="AGENTBUS_GO_WORKER",
+        dev_candidates=[dev_fake],
+    )
+    assert p == dev_fake
