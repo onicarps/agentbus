@@ -23,6 +23,10 @@ func LoadCursor(path string) (int64, error) {
 }
 
 func SaveCursor(path string, id int64) error {
+	existing, err := LoadCursor(path)
+	if err == nil && id <= existing && existing > 0 {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

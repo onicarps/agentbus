@@ -508,7 +508,20 @@ def stop_pid(pid: int, *, timeout: float = 5.0) -> str:
 
 
 def stop_all(workspace: Path) -> list[dict[str, Any]]:
-    state = _read_state(workspace)
+    # Prune dead from existing state, then discover any running swarm children
+    # so that untracked/orphan processes are terminated even if state was lost.
+    state = prune_dead(workspace)
+    try:
+        config = load_swarm_config(workspace)
+    except (FileNotFoundError, OSError, ValueError):
+        config = None
+    if config is not None:
+        recovered = discover_processes(workspace, config)
+        services = state.setdefault("services", {})
+        for name, record in recovered.items():
+            if name not in services:
+                services[name] = record
+
     results: list[dict[str, Any]] = []
     services = dict(state.get("services") or {})
     for name, rec in services.items():
@@ -589,16 +602,26 @@ def swarm_up(
     state = _read_state(workspace)
     started: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for name, spec in cfg.services.items():
-        if not spec.enabled:
-            skipped.append({"name": name, "reason": "enabled:false"})
-            continue
-        rec = start_service(workspace, spec)
-        state.setdefault("services", {})[name] = rec
-        started.append(rec)
-    state["config_path"] = str(cfg.path)
-    state["version"] = cfg.version
-    _write_state(workspace, state)
+    try:
+        for name, spec in cfg.services.items():
+            if not spec.enabled:
+                skipped.append({"name": name, "reason": "enabled:false"})
+                continue
+            rec = start_service(workspace, spec)
+            state.setdefault("services", {})[name] = rec
+            started.append(rec)
+        state["config_path"] = str(cfg.path)
+        state["version"] = cfg.version
+        _write_state(workspace, state)
+    except Exception:
+        # Roll back partially started services so none are left orphaned
+        for rec in started:
+            pid = int(rec.get("pid") or 0)
+            if pid:
+                stop_pid(pid)
+        state["services"] = {}
+        _write_state(workspace, state)
+        raise
 
     result: dict[str, Any] = {
         "started": [{"name": r["name"], "pid": r["pid"]} for r in started],

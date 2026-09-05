@@ -106,7 +106,10 @@ def resolve_go_binary(
     if bundled is not None:
         return bundled
 
-    for c in dev_candidates or []:
+    candidates = list(dev_candidates) if dev_candidates is not None else [
+        Path(__file__).resolve().parent.parent.parent / "go-core" / "bin" / _exe_name(name)
+    ]
+    for c in candidates:
         if c.is_file() and os.access(c, os.X_OK):
             return c
 
