@@ -17,3 +17,4 @@ packages/js/go-worker-*/bin/**
 !packages/js/go-worker-*/bin/.gitkeep
 .mypy_cache/
 uv.lock
+log.md
