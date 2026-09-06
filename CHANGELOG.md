@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-09-06
+
+### Added — streaming actions and swarm reliability
+
+- Add progressive `stream` handoff actions with chunk and final markers.
+- Recover stale swarm processes, clean orphaned services, roll back partial
+  starts, and persist monotonic worker cursors.
+- Resolve bundled Go binaries portably across supported platforms.
+- Harden concurrent publish deduplication, CLI error boundaries, trace-tree
+  assembly, doctor diagnostics, AgentID audit readiness, timezone labels, and
+  monitor rendering.
+- Include security fixes for delegation lifetime bounds, loopback ingress
+  binding, and ephemeral trust-cache invalidation.
+
 ## [0.21.0] - 2026-08-31
 
 ### Added — isolated broker and offline-root security

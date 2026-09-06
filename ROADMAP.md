@@ -1,8 +1,8 @@
 # AgentBus Roadmap
 
-**Current release:** v0.21.0 (August 2026)
+**Current release:** v0.22.0 (September 2026)
 
-**Next milestone:** v0.22 — post-release hardening and ACL refinement
+**Next milestone:** v0.23.0 — continued reliability and contract hardening
 
 The v0.20 security contract is:
 
