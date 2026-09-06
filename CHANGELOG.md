@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-09-06
+
+### Fixed — runtime consistency diagnostics
+
+- Restrict `runtime_consistency` drift warnings to non-canonical mirror
+  checkouts, avoiding false positives for healthy release installations.
+- Report the loaded AgentBus version in runtime consistency diagnostic details.
+
 ## [0.22.0] - 2026-09-06
 
 ### Added — streaming actions and swarm reliability
