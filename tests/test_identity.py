@@ -6,7 +6,7 @@ import hashlib
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
