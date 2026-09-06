@@ -486,20 +486,24 @@ def check_runtime_consistency(workspace: Path) -> DiagnosticCheck:
     import agentbus as _agentbus  # local import: report the module actually loaded
 
     loaded = Path(_agentbus.__file__ or "").resolve()
-    details["loaded_module"] = str(loaded)
+    loaded_str = str(loaded)
+    details["loaded_module"] = loaded_str
+    details["loaded_version"] = getattr(_agentbus, "__version__", "unknown")
+    # Drift means loading from a NON-canonical checkout (a mirror worktree like
+    # projects/agentbus-<branch>). Two states are healthy: the canonical
+    # checkout itself, or an installed release from site-packages.
     canonical = workspace / "projects" / "agentbus" / "src" / "agentbus" / "__init__.py"
     if canonical.is_file():
-        canonical_resolved = canonical.resolve()
-        details["canonical_module"] = str(canonical_resolved)
-        if loaded != canonical_resolved:
-            return DiagnosticCheck(
-                "runtime_consistency",
-                "WARN",
-                "runtime imports agentbus from a non-canonical checkout; fixes "
-                "landed in projects/agentbus may not be live. Point the runtime "
-                "venv at projects/agentbus/src or reinstall from canonical.",
-                details,
-            )
+        details["canonical_module"] = str(canonical.resolve())
+    if "projects/agentbus-" in loaded_str and loaded != canonical.resolve():
+        return DiagnosticCheck(
+            "runtime_consistency",
+            "WARN",
+            "runtime imports agentbus from a non-canonical checkout; fixes "
+            "landed in projects/agentbus may not be live. Point the runtime "
+            "venv at projects/agentbus/src or reinstall from canonical.",
+            details,
+        )
     drift: list[str] = []
     state = state_path(workspace)
     if state.is_file():
