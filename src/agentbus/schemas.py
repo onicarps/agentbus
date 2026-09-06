@@ -99,6 +99,8 @@ KNOWN_TOPICS: dict[str, dict] = {
                 },
             },
             "droid_proof": {"type": "string", "minLength": 8, "maxLength": 256},
+            "batch_id": {"type": "string", "maxLength": 256},
+            "mission_id": {"type": "string", "maxLength": 256},
             "tool": {
                 "type": "string",
                 "minLength": 1,

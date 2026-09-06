@@ -15,6 +15,8 @@ import yaml
 ROLES_FILENAME = "roles.yaml"
 DROID_PROOFS_FILENAME = "droid_proofs.json"
 DEFAULT_DROID_PROOF_TTL_MINUTES = 30
+MAX_DROID_PROOF_USES = 100
+MAX_DROID_PROOF_TTL_MINUTES = 60
 
 
 class ForbiddenError(Exception):
@@ -231,42 +233,166 @@ def _save_droid_proofs(workspace: Path, proofs: dict[str, dict]) -> None:
     os.chmod(path, 0o600)
 
 
+def _locked_proofs_update(
+    workspace: Path, mutate: "callable[[dict[str, dict]], object]"
+) -> object:
+    """Read-modify-write the proofs ledger under an exclusive file lock (F4 2.3.6).
+
+    Prevents TOCTOU use-counter races across parallel droid processes.
+    """
+    import fcntl
+
+    path = droid_proofs_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.seek(0)
+            raw = handle.read().strip()
+            proofs = json.loads(raw) if raw else {}
+            result = mutate(proofs)
+            handle.seek(0)
+            handle.truncate()
+            handle.write(json.dumps(proofs, indent=2) + "\n")
+            handle.flush()
+            os.chmod(path, 0o600)
+            return result
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def mint_droid_proof(
     workspace: Path,
     *,
     mission_id: str | None = None,
     ttl_minutes: int = DEFAULT_DROID_PROOF_TTL_MINUTES,
-) -> dict[str, str]:
+    batch_id: str | None = None,
+    max_uses: int = 1,
+) -> dict[str, str | int]:
+    """Mint a droid proof (F4/A8).
+
+    Without ``max_uses`` this is a legacy single-use proof. With ``max_uses=N``
+    (batch-scoped) the proof authorizes up to N publishes bound to
+    ``batch_id``/``mission_id`` under the Agy ruling constraints:
+    max_uses ceiling 100, TTL default 30 minutes, hard ceiling 60 minutes.
+    """
+    uses = max(1, min(int(max_uses), MAX_DROID_PROOF_USES))
+    ttl = max(1, min(int(ttl_minutes), MAX_DROID_PROOF_TTL_MINUTES))
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(minutes=ttl)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    created = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     proof = secrets.token_urlsafe(24)
-    expires = (
-        datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    proofs = _load_droid_proofs(workspace)
-    proofs[proof] = {
+
+    def _add(ledger: dict[str, dict]) -> None:
+        ledger[proof] = {
+            "expires": expires,
+            "mission_id": mission_id or "",
+            "used": False,
+            "batch_id": batch_id or "",
+            "max_uses": uses,
+            "uses_count": 0,
+            "created_at": created,
+        }
+
+    _locked_proofs_update(workspace, _add)
+    return {
+        "droid_proof": proof,
         "expires": expires,
         "mission_id": mission_id or "",
-        "used": False,
+        "batch_id": batch_id or "",
+        "max_uses": uses,
     }
-    _save_droid_proofs(workspace, proofs)
-    return {"droid_proof": proof, "expires": expires, "mission_id": mission_id or ""}
 
 
-def verify_droid_proof(workspace: Path, proof: str | None) -> bool:
+def get_or_mint_proof(
+    workspace: Path,
+    *,
+    mission_id: str | None = None,
+    batch_id: str | None = None,
+    max_uses: int = 1,
+    ttl_minutes: int = DEFAULT_DROID_PROOF_TTL_MINUTES,
+) -> dict[str, str | int]:
+    """SDK helper (F4 2.5.3): reuse a live batch proof or mint a new one.
+
+    Trusted-orchestrator convenience for local workspace context: returns an
+    existing unexpired proof with matching scope and remaining uses when one
+    exists, otherwise mints. Never bypasses verification at publish time.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    proofs = _load_droid_proofs(workspace)
+    want_batch = batch_id or ""
+    want_mission = mission_id or ""
+    for proof, entry in proofs.items():
+        if entry.get("used"):
+            continue
+        if entry.get("expires", "") <= now:
+            continue
+        if int(entry.get("max_uses", 1) or 1) - int(
+            entry.get("uses_count", 0) or 0
+        ) <= 0:
+            continue
+        if entry.get("batch_id", "") != want_batch or entry.get(
+            "mission_id", ""
+        ) != want_mission:
+            continue
+        return {
+            "droid_proof": proof,
+            "expires": entry.get("expires", ""),
+            "mission_id": entry.get("mission_id", ""),
+            "batch_id": entry.get("batch_id", ""),
+            "max_uses": int(entry.get("max_uses", 1) or 1),
+            "reused": True,
+        }
+    minted = mint_droid_proof(
+        workspace,
+        mission_id=mission_id,
+        ttl_minutes=ttl_minutes,
+        batch_id=batch_id,
+        max_uses=max_uses,
+    )
+    minted["reused"] = False
+    return minted
+
+
+def verify_droid_proof(
+    workspace: Path,
+    proof: str | None,
+    *,
+    batch_id: str | None = None,
+    mission_id: str | None = None,
+) -> bool:
     if not proof:
         return False
-    proofs = _load_droid_proofs(workspace)
-    entry = proofs.get(proof)
-    if not entry:
-        return False
-    if entry.get("used"):
-        return False
-    expires = entry.get("expires", "")
-    if expires and expires < datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"):
-        return False
-    entry["used"] = True
-    proofs[proof] = entry
-    _save_droid_proofs(workspace, proofs)
-    return True
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = {"ok": False}
+
+    def _consume(ledger: dict[str, dict]) -> None:
+        entry = ledger.get(proof)
+        if not entry:
+            return
+        # Backwards compatibility (F4 2.4): legacy entries are single-use.
+        max_uses = int(entry.get("max_uses", 1) or 1)
+        uses = int(entry.get("uses_count", 0) or 0)
+        if entry.get("used") or uses >= max_uses:
+            return
+        expires = entry.get("expires", "")
+        if expires and expires <= now:
+            return
+        # Scope matching (F4 2.3.4): a scoped proof must match declared scope.
+        scoped_batch = entry.get("batch_id", "")
+        scoped_mission = entry.get("mission_id", "")
+        if scoped_batch and batch_id is not None and batch_id != scoped_batch:
+            return
+        if scoped_mission and mission_id is not None and mission_id != scoped_mission:
+            return
+        entry["uses_count"] = uses + 1
+        if entry["uses_count"] >= max_uses:
+            entry["used"] = True
+        ledger[proof] = entry
+        result["ok"] = True
+
+    _locked_proofs_update(workspace, _consume)
+    return result["ok"]
 
 
 def check_publish_rbac(
@@ -312,11 +438,18 @@ def check_publish_rbac(
                 )
             return
         proof = payload.get("droid_proof")
+        scope_batch = payload.get("batch_id")
+        scope_mission = payload.get("mission_id")
         if not verify_droid_proof(
-            workspace, proof if isinstance(proof, str) else None
+            workspace,
+            proof if isinstance(proof, str) else None,
+            batch_id=scope_batch if isinstance(scope_batch, str) else None,
+            mission_id=scope_mission if isinstance(scope_mission, str) else None,
         ):
             raise ForbiddenError(
-                f"403 Forbidden: role '{role_name}' requires valid droid_proof"
+                f"403 Forbidden: role '{role_name}' requires valid droid_proof "
+                "(single-use; mint with 'agentbus droid mint', or mint a "
+                "batch-scoped proof with --max-uses for publish-batch)"
             )
 
 

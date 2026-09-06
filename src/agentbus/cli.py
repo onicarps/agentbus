@@ -554,12 +554,20 @@ def publish(
 )
 @click.option("--producer-id", default=None)
 @click.option("--token", default=None)
+@click.option(
+    "--droid-proof",
+    default=None,
+    help="Batch-scoped droid proof (F4): applied to every line whose payload "
+    "lacks its own droid_proof; each publish consumes one use. Mint with "
+    "'agentbus droid mint --max-uses <line-count>'.",
+)
 @click.option("--retention-days", default=7, show_default=True)
 def publish_batch(
     workspace: str | None,
     batch_file: str,
     producer_id: str | None,
     token: str | None,
+    droid_proof: str | None,
     retention_days: int,
 ) -> None:
     """Publish many events in one process (faster than repeated CLI subprocesses)."""
@@ -584,6 +592,9 @@ def publish_batch(
                 raise click.ClickException(
                     f"line {line_no}: require topic and payload object"
                 )
+            if droid_proof and not payload.get("droid_proof"):
+                payload = dict(payload)
+                payload["droid_proof"] = droid_proof
             payload = validate_payload(
                 topic,
                 payload,
@@ -1121,12 +1132,42 @@ def droid() -> None:
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--mission-id", default=None)
 @click.option("--ttl-minutes", default=30, show_default=True)
-def droid_mint(workspace: str, mission_id: str | None, ttl_minutes: int) -> None:
+@click.option(
+    "--batch-id",
+    default=None,
+    help="Scope the proof to a batch (F4). Combine with --max-uses.",
+)
+@click.option(
+    "--max-uses",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of publishes this proof authorizes (1 = legacy single-use; "
+    "ceiling 100). Batch-scoped proofs expire like single-use ones.",
+)
+def droid_mint(
+    workspace: str,
+    mission_id: str | None,
+    ttl_minutes: int,
+    batch_id: str | None,
+    max_uses: int,
+) -> None:
     """Mint a short-lived droid_proof for qa_droid role publishes."""
     ws = _cli_workspace(workspace)
-    click.echo(
-        json.dumps(mint_droid_proof(ws, mission_id=mission_id, ttl_minutes=ttl_minutes))
-    )
+    try:
+        click.echo(
+            json.dumps(
+                mint_droid_proof(
+                    ws,
+                    mission_id=mission_id,
+                    ttl_minutes=ttl_minutes,
+                    batch_id=batch_id,
+                    max_uses=max_uses,
+                )
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.command()

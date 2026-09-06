@@ -9,6 +9,8 @@ granularity (F5), and the root-owned-workspace doctor warning (F7).
 from __future__ import annotations
 
 import json
+import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -285,3 +287,161 @@ def test_doctor_workspace_ok_when_group_writable(tmp_path, monkeypatch):
         assert check.status == "OK"
     else:  # umask stripped the group-write bit; warning is then correct
         assert check.status == "WARN"
+
+
+# ---------------------------------------------------------------------------
+# F4 / A8 — batch-scoped droid proofs (Agy ruling 2026-09-06, APPROVE with
+# constraints: max_uses ceiling 100, TTL ceiling 60m, atomic use-counter,
+# scope binding, legacy single-use compat, no auto-minting in publish)
+# ---------------------------------------------------------------------------
+
+
+from agentbus.rbac import (  # noqa: E402
+    MAX_DROID_PROOF_TTL_MINUTES,
+    MAX_DROID_PROOF_USES,
+    get_or_mint_proof,
+    mint_droid_proof,
+    verify_droid_proof,
+)
+
+
+def _ledger(tmp_path):
+    path = tmp_path / ".agentbus" / "droid_proofs.json"
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
+def test_batch_proof_authorizes_exactly_n_publishes(tmp_path):
+    minted = mint_droid_proof(tmp_path, batch_id="b1", max_uses=3)
+    proof = minted["droid_proof"]
+    for i in range(3):
+        assert verify_droid_proof(tmp_path, proof, batch_id="b1"), i
+    assert not verify_droid_proof(tmp_path, proof, batch_id="b1")  # 4th use rejected
+    entry = _ledger(tmp_path)[proof]
+    assert entry["uses_count"] == 3 and entry["used"] is True
+
+
+def test_batch_proof_scope_mismatch_rejected(tmp_path):
+    minted = mint_droid_proof(tmp_path, batch_id="b1", mission_id="m1", max_uses=5)
+    proof = minted["droid_proof"]
+    assert not verify_droid_proof(tmp_path, proof, batch_id="other")
+    assert not verify_droid_proof(tmp_path, proof, mission_id="other")
+    # Correct scope still works, and mismatches consumed nothing.
+    assert verify_droid_proof(tmp_path, proof, batch_id="b1", mission_id="m1")
+
+
+def test_batch_proof_expiry_rejects_despite_remaining_uses(tmp_path):
+    minted = mint_droid_proof(tmp_path, batch_id="b1", max_uses=5, ttl_minutes=1)
+    proof = minted["droid_proof"]
+    path = tmp_path / ".agentbus" / "droid_proofs.json"
+    ledger = json.loads(path.read_text())
+    ledger[proof]["expires"] = "2000-01-01T00:00:00Z"
+    path.write_text(json.dumps(ledger))
+    assert not verify_droid_proof(tmp_path, proof, batch_id="b1")
+
+
+def test_legacy_proof_without_max_uses_is_single_use(tmp_path):
+    path = tmp_path / ".agentbus"
+    path.mkdir()
+    (path / "droid_proofs.json").write_text(
+        json.dumps(
+            {"legacy-token": {"expires": "2999-01-01T00:00:00Z", "used": False}}
+        )
+    )
+    assert verify_droid_proof(tmp_path, "legacy-token")
+    assert not verify_droid_proof(tmp_path, "legacy-token")
+
+
+def test_mint_clamps_uses_and_ttl_to_ruling_ceilings(tmp_path):
+    minted = mint_droid_proof(tmp_path, max_uses=10_000, ttl_minutes=10_000)
+    assert minted["max_uses"] == MAX_DROID_PROOF_USES
+    entry = _ledger(tmp_path)[minted["droid_proof"]]
+    created = datetime.strptime(entry["created_at"], "%Y-%m-%dT%H:%M:%SZ")
+    expires = datetime.strptime(entry["expires"], "%Y-%m-%dT%H:%M:%SZ")
+    assert (expires - created) <= timedelta(minutes=MAX_DROID_PROOF_TTL_MINUTES)
+
+
+def test_concurrent_verify_never_exceeds_max_uses(tmp_path):
+    minted = mint_droid_proof(tmp_path, batch_id="race", max_uses=5)
+    proof = minted["droid_proof"]
+    successes: list[bool] = []
+    lock = threading.Lock()
+
+    def worker():
+        ok = verify_droid_proof(tmp_path, proof, batch_id="race")
+        with lock:
+            successes.append(ok)
+
+    threads = [threading.Thread(target=worker) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sum(successes) == 5
+    entry = _ledger(tmp_path)[proof]
+    assert entry["uses_count"] == 5 and entry["used"] is True
+
+
+def test_get_or_mint_proof_reuses_matching_scope(tmp_path):
+    first = get_or_mint_proof(tmp_path, mission_id="m1", batch_id="b1", max_uses=5)
+    second = get_or_mint_proof(tmp_path, mission_id="m1", batch_id="b1", max_uses=5)
+    assert first["reused"] is False
+    assert second["reused"] is True
+    assert first["droid_proof"] == second["droid_proof"]
+    other = get_or_mint_proof(tmp_path, mission_id="m1", batch_id="b2", max_uses=5)
+    assert other["reused"] is False
+
+
+def test_publish_batch_global_droid_proof_option(tmp_path):
+    (tmp_path / ".agentbus").mkdir()
+    roles = tmp_path / ".agentbus" / "roles.yaml"
+    roles.write_text(
+        yaml.safe_dump(
+            {
+                "roles": {"qa_droid": {"can_publish_topics": ["okf/handoff"],
+                                       "requires_droid_proof": True}},
+                "producers": {"droidy": "qa_droid"},
+            }
+        )
+    )
+    minted = mint_droid_proof(tmp_path, batch_id="batch-cli", max_uses=3)
+    lines = "\n".join(
+        json.dumps(
+            {
+                "topic": "okf/handoff",
+                "payload": {"from": "droidy", "to": "x",
+                            "summary": f"batch {i}", "batch_id": "batch-cli"},
+            }
+        )
+        for i in range(3)
+    )
+    batch = tmp_path / "batch.jsonl"
+    batch.write_text(lines + "\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        [
+            "publish-batch", "--workspace", str(tmp_path),
+            "--file", str(batch), "--producer-id", "droidy",
+            "--droid-proof", minted["droid_proof"],
+        ],
+        obj={},
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 3
+    # Proof fully consumed: a 4th publish must fail with 403.
+    result2 = runner.invoke(
+        cli_main,
+        [
+            "publish", "--workspace", str(tmp_path),
+            "--topic", "okf/handoff", "--producer-id", "droidy",
+            "--payload", json.dumps(
+                {"from": "droidy", "to": "x", "summary": "late",
+                 "droid_proof": minted["droid_proof"], "batch_id": "batch-cli"}
+            ),
+        ],
+        obj={},
+    )
+    assert result2.exit_code != 0
+    combined = result2.output + "\n" + (result2.stderr or "")
+    assert "droid_proof" in combined
