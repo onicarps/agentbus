@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -190,6 +192,12 @@ def _configure_cli_logging(*, quiet: bool) -> None:
     "--quiet",
     is_flag=True,
     help="Suppress non-critical logs (MCP/CI-safe; logs stay on stderr).",
+)
+@click.version_option(
+    version=None,
+    package_name="okf-agentbus",
+    prog_name="agentbus",
+    message="%(prog)s %(version)s",
 )
 @click.pass_context
 def main(ctx: click.Context, quiet: bool) -> None:
@@ -422,15 +430,25 @@ def publish(
     """Append one event (CLI fallback for non-MCP clients like Agy)."""
     from agentbus.mcpsafe import load_enforcer, mcpsafe_enabled_from_env
 
-    if payload_file:
-        payload = strict_json_loads(Path(payload_file).read_bytes())
-    elif payload_json:
-        payload = strict_json_loads(payload_json)
-    else:
-        raise click.ClickException("Provide --payload or --payload-file")
-    action = strict_json_loads(action_json) if action_json else None
-    if action is not None and not isinstance(action, dict):
-        raise click.ClickException("--action must be a JSON object")
+    try:
+        if payload_file:
+            payload = strict_json_loads(Path(payload_file).read_bytes())
+        elif payload_json:
+            payload = strict_json_loads(payload_json)
+        else:
+            raise click.ClickException("Provide --payload or --payload-file")
+        action = strict_json_loads(action_json) if action_json else None
+        if action is not None and not isinstance(action, dict):
+            raise click.ClickException("--action must be a JSON object")
+        if not isinstance(payload, dict):
+            raise click.ClickException(
+                "invalid_payload: payload must be a JSON object "
+                f"(got {type(payload).__name__})"
+            )
+    except IdentityError as exc:
+        raise click.ClickException(
+            f"invalid input: {exc} — check JSON syntax and encoding"
+        ) from exc
 
     ws = _cli_workspace(workspace)
     _auth(ws, token)
@@ -445,6 +463,12 @@ def publish(
         )
     except PayloadTooLargeError as exc:
         raise click.ClickException(str(exc)) from exc
+    except ValueError as exc:
+        raise click.ClickException(
+            f"invalid_payload for topic '{topic}': {exc} — "
+            f"run 'agentbus schema --topic {topic}' if registered, or check the "
+            "payload against the handoff schema (from/to/summary required)"
+        ) from exc
     store = _open_store(workspace, retention_days)
     try:
         try:
@@ -481,6 +505,12 @@ def publish(
             IdentityError,
         ) as exc:
             raise click.ClickException(str(exc)) from exc
+        except sqlite3.Error as exc:
+            raise click.ClickException(
+                f"storage error during publish: {exc} — "
+                "the workspace database may be locked or corrupted; "
+                "run 'agentbus doctor' for diagnosis"
+            ) from exc
         out = {
             "event_id": event.event_id,
             "topic": event.topic,
@@ -567,6 +597,11 @@ def publish_batch(
                 )
             except (ForbiddenError, PayloadTooLargeError, IdentityError) as exc:
                 raise click.ClickException(str(exc)) from exc
+            except sqlite3.Error as exc:
+                raise click.ClickException(
+                    f"storage error during batch publish: {exc} — "
+                    "run 'agentbus doctor' for diagnosis"
+                ) from exc
             results.append(
                 {
                     "line": line_no,
@@ -585,20 +620,95 @@ def publish_batch(
 @click.option("--topic", required=True)
 @click.option("--since-id", type=int, default=0, show_default=True)
 @click.option("--limit", type=int, default=50, show_default=True)
+@click.option(
+    "--compact",
+    is_flag=True,
+    default=False,
+    help="One line per event: id, time, from→to, trimmed summary (human scan).",
+)
+@click.option(
+    "--since",
+    default=None,
+    help="Filter fetched events to timestamp >= value (ISO 8601 or e.g. 10m, 2h, 1d). "
+    "Applied after the cursor fetch; combine with --limit to widen the window.",
+)
 @click.option("--retention-days", default=7, show_default=True)
 def poll(
     workspace: str,
     topic: str,
     since_id: int,
     limit: int,
+    compact: bool,
+    since: str | None,
     retention_days: int,
 ) -> None:
     """Fetch events after cursor."""
+    since_cutoff = _parse_since(since) if since else None
     store = _open_store(workspace, retention_days)
     try:
-        click.echo(json.dumps(store.poll(topic=topic, since_id=since_id, limit=limit)))
+        result = store.poll(topic=topic, since_id=since_id, limit=limit)
+        if since_cutoff is not None:
+            kept = [
+                e
+                for e in result.get("events", [])
+                if _event_timestamp(e) is not None
+                and _event_timestamp(e) >= since_cutoff
+            ]
+            result = {**result, "events": kept, "count": len(kept)}
+        if compact:
+            for e in result.get("events", []):
+                p = e.get("payload") or {}
+                summary = str(p.get("summary") or "").replace("\n", " ")
+                if len(summary) > 120:
+                    summary = summary[:117] + "..."
+                click.echo(
+                    f"#{e.get('event_id')} {e.get('timestamp', '')} "
+                    f"{p.get('from', e.get('producer_id', '?'))}"
+                    f"->{p.get('to', '?')}: {summary}"
+                )
+        else:
+            click.echo(json.dumps(result))
     finally:
         store.close()
+
+
+def _parse_since(value: str) -> datetime:
+    """Parse --since as ISO 8601 or a relative duration (10m, 2h, 1d)."""
+    raw = value.strip()
+    if raw and raw[-1].isdigit() is False and raw[0].isdigit():
+        unit = raw[-1].lower()
+        try:
+            amount = int(raw[:-1])
+            deltas = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+            if unit in deltas and amount >= 0:
+                return datetime.now(timezone.utc) - timedelta(
+                    seconds=deltas[unit] * amount
+                )
+        except ValueError:
+            pass
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError as exc:
+        raise click.BadParameter(
+            f"cannot parse --since {value!r}: use ISO 8601 or a duration "
+            "like 30s, 10m, 2h, 1d"
+        ) from exc
+
+
+def _event_timestamp(event: dict) -> datetime | None:
+    ts = event.get("timestamp")
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 @main.command()
@@ -687,22 +797,44 @@ def lock_acquire(
 @lock.command("release")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--resource", required=True)
-@click.option("--lease-id", required=True)
+@click.option(
+    "--lease-id",
+    default=None,
+    help="Lease UUID from acquire. Omit to release the caller's active lease "
+    "on the resource (looked up by --owner-id).",
+)
 @click.option("--owner-id", required=True)
 @click.option("--token", default=None)
 def lock_release(
     workspace: str,
     resource: str,
-    lease_id: str,
+    lease_id: str | None,
     owner_id: str,
     token: str | None,
 ) -> None:
-    """Release a held lease."""
+    """Release a held lease (by lease-id, or by resource + owner)."""
     ws = _cli_workspace(workspace)
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
-        click.echo(json.dumps(store.lock_release(resource, lease_id, owner_id)))
+        if lease_id is None:
+            state = store.lock_status(resource)
+            if not state.get("locked"):
+                raise click.ClickException(
+                    f"no active lease on resource '{resource}' — nothing to release"
+                )
+            if state.get("current_owner") != owner_id:
+                raise click.ClickException(
+                    f"resource '{resource}' is held by "
+                    f"'{state.get('current_owner')}', not '{owner_id}' — "
+                    "release requires the holding owner"
+                )
+            lease_id = str(state["lease_id"])
+        try:
+            result = store.lock_release(resource, lease_id, owner_id)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(json.dumps(result))
     finally:
         store.close()
 

@@ -278,6 +278,13 @@ def resolve_timezone(tz: str | tzinfo | None) -> tzinfo:
     return timezone.utc
 
 
+def _format_offset(offset: str) -> str:
+    """Render a %z offset like '+0800' as '+08:00' (no 'UTC' prefix)."""
+    if len(offset) == 5 and offset[0] in "+-":
+        return f"{offset[:3]}:{offset[3:]}"
+    return offset
+
+
 def format_timezone_label(tz: str | tzinfo | None) -> str:
     """Return a clean human-readable label for the current timezone."""
     if tz is None:
@@ -288,12 +295,7 @@ def format_timezone_label(tz: str | tzinfo | None) -> str:
             return "UTC"
         if s.lower() == "local":
             now = datetime.now().astimezone()
-            offset = now.strftime("%z")
-            if len(offset) == 5:
-                offset_fmt = f"{offset[:3]}:{offset[3:]}"
-            else:
-                offset_fmt = offset
-            return f"Local ({offset_fmt})"
+            return f"Local ({_format_offset(now.strftime('%z'))})"
         if zoneinfo is not None:
             try:
                 zi = zoneinfo.ZoneInfo(s)
@@ -304,13 +306,14 @@ def format_timezone_label(tz: str | tzinfo | None) -> str:
     if tz == timezone.utc:
         return "UTC"
     now = datetime.now(tz)
-    offset = now.strftime("%z")
-    if len(offset) == 5:
-        offset_fmt = f"{offset[:3]}:{offset[3:]}"
-    else:
-        offset_fmt = offset
-    name = getattr(tz, "key", None) or str(tz)
-    return f"{name} ({offset_fmt})"
+    name = getattr(tz, "key", None)
+    if not name:
+        # A plain fixed-offset timezone renders str() as 'UTC+08:00'; the
+        # offset alone is the honest label (mission spec: 'Local (+08:00)').
+        if isinstance(tz, timezone) and tz is not timezone.utc:
+            return _format_offset(now.strftime("%z"))
+        name = str(tz)
+    return f"{name} ({_format_offset(now.strftime('%z'))})"
 
 
 def format_timestamp(ts: str | None, tz: str | tzinfo | None = None) -> str:

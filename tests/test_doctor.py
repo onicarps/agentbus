@@ -47,7 +47,12 @@ def test_database_missing_is_honest_warning(tmp_path: Path) -> None:
 def test_identity_diagnostics_are_honest_about_shared_uid(tmp_path: Path) -> None:
     unconfigured = check_identity(tmp_path)
     assert unconfigured.status == "WARN"
-    assert unconfigured.details == {"configured": False, "strict_ready": False}
+    assert unconfigured.details is not None
+    assert unconfigured.details["configured"] is False
+    assert unconfigured.details["strict_ready"] is False
+    # A9: the operator must be able to see the path out of audit mode.
+    steps = unconfigured.details["strict_cutover_steps"]
+    assert isinstance(steps, list) and len(steps) >= 5
     bootstrap_workspace_identity(tmp_path)
     enroll_identity(tmp_path, "codex")
     configured = check_identity(tmp_path)

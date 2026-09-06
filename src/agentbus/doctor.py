@@ -147,14 +147,30 @@ def check_rbac(workspace: Path) -> DiagnosticCheck:
     )
 
 
+_IDENTITY_CUTOVER_STEPS = [
+    "agentbus identity root          # create offline root material (offline admin machine)",
+    "agentbus identity init          # initialize the workspace identity policy",
+    "agentbus identity key           # generate a peer signing key per producer",
+    "agentbus identity enroll        # enroll the public key in the workspace registry",
+    "agentbus identity mode          # raise the workspace identity mode (audit -> protected -> strict)",
+    "agentbus identity reference-monitor  # bind a signed policy to the broker (strict mode)",
+]
+
+
 def check_identity(workspace: Path) -> DiagnosticCheck:
     """Verify AgentID trust state and report isolation claims honestly."""
     if not identity_configured(workspace):
         return DiagnosticCheck(
             "identity",
             "WARN",
-            "AgentID is not initialized; events have no cryptographic producer binding",
-            {"configured": False, "strict_ready": False},
+            "AgentID is not initialized; events have no cryptographic producer "
+            "binding. This is the safe default on shared-UID hosts. To move to "
+            "cryptographic identity, follow the staged cutover steps in details.",
+            {
+                "configured": False,
+                "strict_ready": False,
+                "strict_cutover_steps": _IDENTITY_CUTOVER_STEPS,
+            },
         )
     try:
         state = load_trust_state(workspace, update_high_water=False)
@@ -403,11 +419,118 @@ def check_versions() -> DiagnosticCheck:
     )
 
 
+def check_optional_extras(workspace: Path) -> DiagnosticCheck:
+    """Report optional 'obs' extras against what the workspace actually configures.
+
+    Silent degradation (a configured ``watch`` service exiting, or ``monitor``
+    falling back to plain polling without saying why) is a reliability defect,
+    not a feature. This check makes the missing-dependency state visible.
+    """
+    extras = {"rich": "monitor TUI rendering", "textual": "monitor TUI", "watchdog": "watch service"}
+    missing: dict[str, str] = {}
+    for module, purpose in extras.items():
+        try:
+            __import__(module)
+        except ImportError:
+            missing[module] = purpose
+    configured_watch = False
+    swarm_yaml = workspace / ".agentbus" / "swarm.yaml"
+    if swarm_yaml.is_file():
+        try:
+            data = yaml.safe_load(swarm_yaml.read_text(encoding="utf-8")) or {}
+            services = data.get("services")
+            if isinstance(services, dict):
+                for record in services.values():
+                    if not isinstance(record, dict):
+                        continue
+                    enabled = record.get("enabled", True)
+                    command = " ".join(
+                        str(part) for part in (record.get("command") or [])
+                    )
+                    if enabled and (" watch" in f" {command}" or command.endswith(" watch")):
+                        configured_watch = True
+        except (OSError, yaml.YAMLError):
+            pass
+    if missing and configured_watch:
+        return DiagnosticCheck(
+            "optional_extras",
+            "WARN",
+            "configured services need missing optional extras: "
+            + ", ".join(f"{name} ({missing[name]})" for name in sorted(missing))
+            + ". Install with: pip install 'okf-agentbus[obs]'",
+            {"missing": missing, "swarm_configures_watch": True},
+        )
+    if missing:
+        return DiagnosticCheck(
+            "optional_extras",
+            "OK",
+            "optional extras absent but nothing configured requires them "
+            f"({', '.join(sorted(missing))}); install 'okf-agentbus[obs]' for the "
+            "monitor TUI and watch service",
+            {"missing": missing, "swarm_configures_watch": False},
+        )
+    return DiagnosticCheck(
+        "optional_extras", "OK", "optional extras (rich, textual, watchdog) importable"
+    )
+
+
+def check_runtime_consistency(workspace: Path) -> DiagnosticCheck:
+    """Detect import-path drift between checkouts (A7).
+
+    The recurring failure mode: the active runtime imports agentbus from a
+    mirror checkout (e.g. ``projects/agentbus-<branch>``) while fixes land in
+    the canonical ``projects/agentbus``. Both get patched, drift recurs. This
+    check names the drift instead of letting processes disagree silently.
+    """
+    details: dict[str, Any] = {}
+    import agentbus as _agentbus  # local import: report the module actually loaded
+
+    loaded = Path(_agentbus.__file__ or "").resolve()
+    details["loaded_module"] = str(loaded)
+    canonical = workspace / "projects" / "agentbus" / "src" / "agentbus" / "__init__.py"
+    if canonical.is_file():
+        canonical_resolved = canonical.resolve()
+        details["canonical_module"] = str(canonical_resolved)
+        if loaded != canonical_resolved:
+            return DiagnosticCheck(
+                "runtime_consistency",
+                "WARN",
+                "runtime imports agentbus from a non-canonical checkout; fixes "
+                "landed in projects/agentbus may not be live. Point the runtime "
+                "venv at projects/agentbus/src or reinstall from canonical.",
+                details,
+            )
+    drift: list[str] = []
+    state = state_path(workspace)
+    if state.is_file():
+        try:
+            data = json.loads(state.read_text(encoding="utf-8"))
+            for name, record in (data.get("services") or {}).items():
+                if not isinstance(record, dict):
+                    continue
+                cmd = " ".join(str(part) for part in (record.get("cmdline") or record.get("command") or []))
+                if "agentbus" in cmd and "projects/agentbus-" in cmd.replace("\\", "/"):
+                    drift.append(name)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+    if drift:
+        return DiagnosticCheck(
+            "runtime_consistency",
+            "WARN",
+            "running services reference a mirror checkout: " + ", ".join(sorted(drift)),
+            details,
+        )
+    return DiagnosticCheck(
+        "runtime_consistency", "OK", "runtime imports resolve to canonical agentbus", details
+    )
+
+
 def run_doctor(workspace: Path) -> DoctorReport:
     checks = [
         check_workspace(workspace), check_database(workspace), check_rbac(workspace),
         check_identity(workspace),
         check_schema_registry(workspace), check_go_binaries(), check_process_state(workspace),
+        check_optional_extras(workspace), check_runtime_consistency(workspace),
         check_disk(workspace), check_isolated_publish_poll(), check_mcp_stdio(), check_versions(),
     ]
     overall = "FAIL" if any(c.status == "FAIL" for c in checks) else "WARN" if any(c.status == "WARN" for c in checks) else "OK"

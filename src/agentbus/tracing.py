@@ -33,15 +33,66 @@ def normalize_parent_span_id(parent_span_id: str | None) -> str | None:
 
 
 def build_trace_tree(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return root nodes with nested 'children' for waterfall rendering."""
-    by_span = {e["span_id"]: {**e, "children": []} for e in events if e.get("span_id")}
-    roots: list[dict[str, Any]] = []
+    """Return root nodes with nested 'children' for waterfall rendering.
+
+    Lossless and cycle-safe guarantees:
+    - events are deduplicated by ``event_id`` (callers may merge fetches);
+    - no event silently vanishes: missing/looping lineage demotes a node to a
+      root instead of dropping it (previously cycles and duplicate span_ids
+      made events disappear from the waterfall);
+    - duplicate ``span_id`` claims keep the earliest event as the span owner
+      and preserve later events as its children.
+    """
+    seen_ids: set[Any] = set()
+    unique: list[dict[str, Any]] = []
+    for e in sorted(events, key=lambda e: e.get("event_id", 0)):
+        eid = e.get("event_id")
+        if eid is not None:
+            if eid in seen_ids:
+                continue
+            seen_ids.add(eid)
+        unique.append(e)
+
+    by_span: dict[str, dict[str, Any]] = {}
+    duplicates_by_span: dict[str, list[dict[str, Any]]] = {}
+    spanless: list[dict[str, Any]] = []
+    for e in unique:
+        node = {**e, "children": []}
+        span = e.get("span_id")
+        if not span:
+            spanless.append(node)
+        elif span in by_span:
+            duplicates_by_span.setdefault(span, []).append(node)
+        else:
+            by_span[span] = node
+
+    def _chain_reaches(start_key: str, target_key: str) -> bool:
+        """True if the parent chain from ``start_key`` reaches ``target_key``."""
+        seen: set[str] = set()
+        cur: str | None = start_key
+        while cur and cur in by_span and cur not in seen:
+            seen.add(cur)
+            if cur == target_key:
+                return True
+            cur = by_span[cur].get("parent_span_id")
+        return False
+
+    roots: list[dict[str, Any]] = list(spanless)
     for node in by_span.values():
         parent = node.get("parent_span_id")
-        if parent and parent in by_span:
+        if (
+            parent
+            and parent != node.get("span_id")
+            and parent in by_span
+            and not _chain_reaches(parent, node["span_id"])
+        ):
             by_span[parent]["children"].append(node)
         else:
+            # Missing parent, self-loop, or parent-cycle: render as a root so
+            # the event is never silently dropped from the waterfall.
             roots.append(node)
+    for span, dups in duplicates_by_span.items():
+        by_span[span]["children"].extend(dups)
 
     def sort_tree(nodes: list[dict[str, Any]]) -> None:
         nodes.sort(key=lambda n: n.get("event_id", 0))

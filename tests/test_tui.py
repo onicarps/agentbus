@@ -14,6 +14,7 @@ from agentbus.store import STATUS_PUBLISHED, EventStore
 from agentbus.tui import (
     _escape_markup,
     _state_fingerprint,
+    _trace_detail_text,
     approve_pending_event,
     fetch_monitor_state,
 )
@@ -181,6 +182,26 @@ def test_escape_markup_neutralizes_brackets():
         render(escaped)
     except ImportError:
         pass
+
+
+def test_trace_payload_can_contain_markup_like_text():
+    """Trace detail must render arbitrary event JSON without Rich parsing it."""
+    try:
+        from rich.console import Console
+    except ImportError:
+        return
+
+    payload = {
+        "summary": 'Markdown [link](https://example.test) and [bold] text',
+        "nested": {'quote': '",\n [not-a-tag]'},
+    }
+    detail = _trace_detail_text(11422, payload)
+
+    assert "[link]" in detail.plain
+    assert "[not-a-tag]" in detail.plain
+    assert detail.plain.startswith("Event 11422 (No Trace)")
+    # Rendering the actual Rich renderable must not invoke markup parsing.
+    Console(record=True).print(detail)
 
 
 def test_fetch_monitor_state_survives_concurrent_writers(tmp_path):

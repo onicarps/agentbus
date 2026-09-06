@@ -646,6 +646,11 @@ class EventStore:
         # (companion-ACK / concurrent writers) do not fail the first busy_timeout.
         # Only the write is retried — never re-INSERT after a successful commit
         # (would duplicate when idempotency_key is absent).
+        concurrent_duplicate_event_id: int | None = None
+
+        class _ConcurrentDuplicate(Exception):
+            """Internal: a concurrent publisher committed this idempotency key first."""
+
         def _insert_commit() -> int:
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
@@ -719,6 +724,32 @@ class EventStore:
                 self._save_artifacts(event_id, artifacts)
                 self._conn.commit()
                 return event_id
+            except sqlite3.IntegrityError as exc:
+                # A concurrent publisher may have committed the same
+                # (producer_id, scoped_idempotency_key) after this
+                # transaction's dedup precheck.  That is a benign duplicate,
+                # not an insertion failure: roll back, resolve the winning
+                # event, and report it as a duplicate.  Any IntegrityError
+                # that is not explained by a concurrent winner is re-raised.
+                try:
+                    self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+                winner: sqlite3.Row | None = None
+                if idempotency_key:
+                    winner = self._conn.execute(
+                        """
+                        SELECT event_id FROM events
+                        WHERE producer_id = ?
+                          AND (scoped_idempotency_key = ? OR
+                               (scoped_idempotency_key IS NULL AND idempotency_key = ?))
+                        ORDER BY event_id DESC LIMIT 1
+                        """,
+                        (producer_id, idempotency_key, idempotency_key),
+                    ).fetchone()
+                if winner is not None:
+                    raise _ConcurrentDuplicate(int(winner["event_id"])) from exc
+                raise
             except (sqlite3.OperationalError, IdentityError):
                 try:
                     self._conn.rollback()
@@ -732,12 +763,24 @@ class EventStore:
                 policy=default_publish_policy(),
                 is_retryable=is_transient_sqlite_error,
             )
+        except _ConcurrentDuplicate as exc:
+            concurrent_duplicate_event_id = exc.args[0]
         except RetryExhaustedError as exc:
             # Re-raise the underlying SQLite error for API compatibility; callers
             # that want DLQ escalation should use agentbus.resilience helpers.
             if exc.last_error is not None:
                 raise exc.last_error from exc
             raise
+
+        if concurrent_duplicate_event_id is not None:
+            row = self._conn.execute(
+                "SELECT * FROM events WHERE event_id = ?",
+                (concurrent_duplicate_event_id,),
+            ).fetchone()
+            event = self._authoritative_event_from_row(row)
+            if event is None:  # fail closed if storage changed after insertion
+                raise IdentityError("403 Forbidden: inserted_event_failed_verification")
+            return event, True
 
         # Prune is best-effort; lock on prune must not fail a successful insert.
         try:

@@ -35,6 +35,20 @@ def _escape_markup(text: str) -> str:
         return text.replace("[", "\\[")
 
 
+def _trace_detail_text(event_id: int, payload: Any) -> Any:
+    """Build no-trace detail with payload content that is never markup-parsed."""
+    import json
+
+    from rich.text import Text
+
+    payload_str = json.dumps(payload, indent=2)
+    detail = Text(f"Event {event_id} (No Trace)\n\n")
+    detail.append("Payload Detail:", style="dim")
+    detail.append("\n")
+    detail.append(payload_str)
+    return detail
+
+
 def _parse_ts(ts: str | None) -> datetime | None:
     if not ts:
         return None
@@ -515,19 +529,24 @@ def run_monitor_tui(
         def _update_trace(self, selected: dict[str, Any] | None) -> None:
             trace_widget = self.query_one("#trace-content", Static)
             if not selected:
-                trace_widget.update("Select an event with trace_id")
+                from rich.text import Text
+
+                trace_widget.update(Text("Select an event with trace_id"))
                 return
             trace_id = selected.get("trace_id")
             if not trace_id:
-                import json
-
-                payload_str = json.dumps(selected.get("payload", {}), indent=2)
+                # Static.update(str) parses Rich markup.  Event payloads are
+                # untrusted and commonly contain Markdown/Rich-looking
+                # brackets, so append them to a Text object as plain content.
+                # Otherwise a highlighted event can raise MarkupError and
+                # terminate the Textual app from the event callback.
                 trace_widget.update(
-                    f"Event {selected['event_id']} (No Trace)\n\n"
-                    f"[dim]Payload Detail:[/dim]\n{_escape_markup(payload_str)}"
+                    _trace_detail_text(selected["event_id"], selected.get("payload", {}))
                 )
                 return
             try:
+                from rich.text import Text
+
                 store = EventStore(
                     ws, retention_days=retention_days, auto_prune=False
                 )
@@ -537,11 +556,15 @@ def run_monitor_tui(
                     store.close()
                 roots = build_trace_tree(events)
                 text = format_trace_tree_plain(trace_id, roots)
-                trace_widget.update(_escape_markup(text))
+                trace_widget.update(Text(text))
             except Exception as exc:
+                from rich.text import Text
+
                 trace_widget.update(
-                    f"Event {selected['event_id']} trace error: "
-                    f"{_escape_markup(f'{type(exc).__name__}: {exc}')}"
+                    Text(
+                        f"Event {selected['event_id']} trace error: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
                 )
 
         def action_toggle_timezone(self) -> None:
