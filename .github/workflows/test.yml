@@ -27,7 +27,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install package and dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,devex]"
 
       - name: Verify AgentID dependency and signature fixture
         run: python -m pytest tests/test_identity_platform.py -q --tb=short
@@ -60,7 +60,7 @@ jobs:
         run: cd go-core && go test -race ./...
 
       - name: Install package and dev dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,devex]"
 
       - name: Pytest
         run: python -m pytest tests/ -q --tb=short
