@@ -220,6 +220,42 @@ def test_await_cli_timeout_minutes_writes_fractional_hours(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Cold start — `init --apply` creates a missing workspace directory
+# (lab finding: bootstrap demanded a pre-existing directory)
+# ---------------------------------------------------------------------------
+
+
+def test_init_apply_creates_missing_workspace_directory(tmp_path):
+    target = tmp_path / "fresh" / "ws"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        ["init", "--workspace", str(target), "--producer-id", "codex", "--apply"],
+        obj={},
+    )
+    assert result.exit_code == 0, result.output
+    assert target.is_dir()
+    assert (target / ".agentbus" / "workspace").is_file()
+
+
+def test_non_init_commands_still_reject_missing_workspace(tmp_path):
+    target = tmp_path / "does-not-exist"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main,
+        [
+            "publish", "--workspace", str(target), "--producer-id", "codex",
+            "--topic", "okf/handoff",
+            "--payload", '{"from":"codex","to":"x","summary":"s"}',
+        ],
+        obj={},
+    )
+    assert result.exit_code != 0
+    combined = result.output + "\n" + (result.stderr or "")
+    assert "Workspace not found" in combined
+
+
+# ---------------------------------------------------------------------------
 # F7 — doctor warns on root-owned / other-owned non-writable workspaces
 # ---------------------------------------------------------------------------
 

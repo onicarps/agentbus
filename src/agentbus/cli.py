@@ -72,13 +72,27 @@ from agentbus.swarm import (
 )
 
 
-def _cli_workspace(workspace: str | None) -> Path:
+def _cli_workspace(workspace: str | None, create: bool = False) -> Path:
     from agentbus.workspace_guard import assert_workspace_supported
 
     if workspace:
         explicit = Path(workspace).expanduser().resolve()
         if not explicit.is_dir():
-            raise ValueError(f"Workspace not found: {explicit}")
+            # init is the bootstrap command: it may create the target dir
+            # (lab finding: cold-start demanded a pre-existing directory).
+            if create:
+                try:
+                    explicit.mkdir(parents=True, exist_ok=True)
+                    click.echo(f"created workspace directory: {explicit}")
+                except OSError as exc:
+                    raise ValueError(
+                        f"Workspace not found and could not be created: {explicit} ({exc})"
+                    ) from exc
+            else:
+                raise ValueError(
+                    f"Workspace not found: {explicit} (create it first, or run "
+                    "init with --apply to create it)"
+                )
         return assert_workspace_supported(explicit)
     env = os.environ.get("AGENTBUS_WORKSPACE")
     if env:
@@ -450,7 +464,10 @@ def publish(
             f"invalid input: {exc} — check JSON syntax and encoding"
         ) from exc
 
-    ws = _cli_workspace(workspace)
+    try:
+        ws = _cli_workspace(workspace)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     _auth(ws, token)
     try:
         if attach:
@@ -789,7 +806,11 @@ def lock_acquire(
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
-        click.echo(json.dumps(store.lock_acquire(resource, owner_id, ttl_seconds)))
+        try:
+            result = store.lock_acquire(resource, owner_id, ttl_seconds)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(json.dumps(result))
     finally:
         store.close()
 
@@ -859,9 +880,11 @@ def lock_renew(
     _auth(ws, token)
     store = _open_lease_store(workspace)
     try:
-        click.echo(
-            json.dumps(store.lock_renew(resource, lease_id, owner_id, ttl_seconds))
-        )
+        try:
+            result = store.lock_renew(resource, lease_id, owner_id, ttl_seconds)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(json.dumps(result))
     finally:
         store.close()
 
@@ -983,7 +1006,7 @@ def init(
 ) -> None:
     """Auto-discover MCP clients and wire agentbus (idempotent)."""
     try:
-        ws = _cli_workspace(workspace)
+        ws = _cli_workspace(workspace, create=apply)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     pid = _producer_id(producer_id)
