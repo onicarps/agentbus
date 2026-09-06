@@ -91,6 +91,25 @@ def clamp_timeout_hours(hours: float | int | None) -> float:
     return min(h, float(MAX_TIMEOUT_HOURS))
 
 
+def timeout_hours_from(minutes: float | int | None, hours: float | int | None) -> float:
+    """Resolve effective timeout hours; fractional values are honored (F5).
+
+    ``--timeout-minutes`` takes precedence over ``--timeout-hours`` when both
+    are given. Non-finite or non-positive values fall back to the other
+    argument, then the default. Returns hours (minutes are converted).
+    """
+    for is_minutes, value in ((True, minutes), (False, hours)):
+        if value is None:
+            continue
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v) and v > 0:
+            return min(v / 60.0 if is_minutes else v, float(MAX_TIMEOUT_HOURS))
+    return float(DEFAULT_TIMEOUT_HOURS)
+
+
 def new_wait_id() -> str:
     return f"w_{uuid.uuid4().hex[:12]}"
 
@@ -523,7 +542,7 @@ class WaitStore:
         now: datetime | None = None,
     ) -> WaitRegistration:
         now_dt = now or self._now()
-        hours = clamp_timeout_hours(timeout_hours)
+        hours = timeout_hours_from(None, timeout_hours)
         timeout_at = utc_now_iso(now_dt + timedelta(hours=hours))
         wid = wait_id or new_wait_id()
         # Do not silently reopen or replace an existing wait (pending or

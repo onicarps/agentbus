@@ -60,6 +60,26 @@ def check_workspace(workspace: Path) -> DiagnosticCheck:
         return DiagnosticCheck("workspace", "FAIL", reason, {"path": str(workspace)})
     if not os.access(workspace, os.R_OK | os.W_OK | os.X_OK):
         return DiagnosticCheck("workspace", "FAIL", "workspace is not readable and writable")
+    details: dict[str, Any] = {"path": str(workspace)}
+    # F7: root-owned workspaces break multi-user / multi-agent setups — other
+    # agents cannot write to the bus and every publish fails at open time.
+    try:
+        st = workspace.stat()
+        details["uid"] = st.st_uid
+        details["mode"] = oct(st.st_mode & 0o777)
+        effective_uid = os.geteuid()
+        if st.st_uid != effective_uid and (st.st_mode & 0o022) == 0:
+            owner = "root" if st.st_uid == 0 else f"uid {st.st_uid}"
+            return DiagnosticCheck(
+                "workspace", "WARN",
+                f"workspace is owned by {owner} but you run as uid {effective_uid} "
+                "and it is not group/other writable; other agents or runners will "
+                "fail to write the bus. Fix ownership, e.g.: "
+                f"chown -R {effective_uid} {workspace}",
+                details,
+            )
+    except OSError:
+        pass
     marker = workspace / ".agentbus" / "workspace"
     if marker.is_file():
         configured = marker.read_text(encoding="utf-8").strip()
@@ -419,6 +439,37 @@ def check_versions() -> DiagnosticCheck:
     )
 
 
+def check_hitl_reviewers(workspace: Path) -> DiagnosticCheck:
+    """Warn when RBAC is on but no role grants can_approve (F3).
+
+    Hand-rolled roles.yaml files routinely omit an approving role, which makes
+    every approve/reject fail with 403. HITL is flagship functionality; a
+    workspace configured for intercepts but unable to ever approve should say
+    so before the first blocked review, not after.
+    """
+    from agentbus.rbac import load_rbac_config
+
+    config = load_rbac_config(workspace)
+    if config is None:
+        return DiagnosticCheck(
+            "hitl_reviewers", "OK", "RBAC not configured; HITL review unrestricted"
+        )
+    approving = sorted(name for name, role in config.roles.items() if role.can_approve)
+    if not approving:
+        return DiagnosticCheck(
+            "hitl_reviewers", "WARN",
+            "no role grants can_approve; approve/reject will fail with 403. "
+            "Add to .agentbus/roles.yaml:  roles: {approver: {can_approve: true}} "
+            "producers: {<reviewer-id>: approver}   (or run: agentbus config init-rbac)",
+            {"approving_roles": []},
+        )
+    return DiagnosticCheck(
+        "hitl_reviewers", "OK",
+        "HITL approver roles present: " + ", ".join(approving),
+        {"approving_roles": approving},
+    )
+
+
 def check_optional_extras(workspace: Path) -> DiagnosticCheck:
     """Report optional 'obs' extras against what the workspace actually configures.
 
@@ -457,7 +508,8 @@ def check_optional_extras(workspace: Path) -> DiagnosticCheck:
             "WARN",
             "configured services need missing optional extras: "
             + ", ".join(f"{name} ({missing[name]})" for name in sorted(missing))
-            + ". Install with: pip install 'okf-agentbus[obs]'",
+            + ". Install with: pip install 'okf-agentbus[obs]' (obs includes the "
+            "devex TUI dependencies rich and textual as of 0.22.2)",
             {"missing": missing, "swarm_configures_watch": True},
         )
     if missing:
@@ -466,7 +518,7 @@ def check_optional_extras(workspace: Path) -> DiagnosticCheck:
             "OK",
             "optional extras absent but nothing configured requires them "
             f"({', '.join(sorted(missing))}); install 'okf-agentbus[obs]' for the "
-            "monitor TUI and watch service",
+            "monitor TUI and watch service (obs now includes rich/textual)",
             {"missing": missing, "swarm_configures_watch": False},
         )
     return DiagnosticCheck(
@@ -535,6 +587,7 @@ def run_doctor(workspace: Path) -> DoctorReport:
         check_identity(workspace),
         check_schema_registry(workspace), check_go_binaries(), check_process_state(workspace),
         check_optional_extras(workspace), check_runtime_consistency(workspace),
+        check_hitl_reviewers(workspace),
         check_disk(workspace), check_isolated_publish_poll(), check_mcp_stdio(), check_versions(),
     ]
     overall = "FAIL" if any(c.status == "FAIL" for c in checks) else "WARN" if any(c.status == "WARN" for c in checks) else "OK"

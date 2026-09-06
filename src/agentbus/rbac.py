@@ -333,12 +333,18 @@ def check_approve_rbac(
     role_name = resolve_role(workspace, producer_id=reviewer_id, auth_token=auth_token)
     if not role_name:
         raise ForbiddenError(
-            f"403 Forbidden: no RBAC role for reviewer '{reviewer_id}'"
+            f"403 Forbidden: no RBAC role for reviewer '{reviewer_id}'. "
+            "Map the reviewer to a role that grants can_approve, e.g. add to "
+            ".agentbus/roles.yaml:  roles: {approver: {can_approve: true}}  "
+            f"producers: {{{reviewer_id}: approver}}   "
+            "(or run: agentbus config init-rbac)"
         )
     role = config.roles.get(role_name)
     if not role or not role.can_approve:
         raise ForbiddenError(
-            f"403 Forbidden: role '{role_name}' cannot approve/reject HITL events"
+            f"403 Forbidden: role '{role_name}' cannot approve/reject HITL events. "
+            "Add 'can_approve: true' to that role in .agentbus/roles.yaml, or map "
+            f"the reviewer to an approving role:  producers: {{{reviewer_id}: approver}}"
         )
 
 

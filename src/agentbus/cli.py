@@ -1218,6 +1218,32 @@ def schema_list(workspace: str) -> None:
     click.echo(json.dumps(list_schemas(_cli_workspace(workspace))))
 
 
+@main.command("topic-list")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def topic_list(workspace: str) -> None:
+    """List publishable topics: built-ins plus registered custom schemas (F2)."""
+    from agentbus.schemas import KNOWN_TOPICS
+
+    ws = _cli_workspace(workspace)
+    try:
+        custom = {
+            entry["topic_name"]: entry.get("version", "1.0")
+            for entry in list_schemas(ws)
+        }
+    except Exception:
+        custom = {}
+    payload = {
+        "builtin": sorted(KNOWN_TOPICS.keys()),
+        "dynamic": ["okf/status/<initiative> (pattern: okf/status/<name>)"],
+        "custom_registered": dict(sorted(custom.items())),
+        "hint": (
+            "custom topics must be schema-registered before first publish: "
+            "agentbus schema register --topic <topic> --schema-file <schema.json>"
+        ),
+    }
+    click.echo(json.dumps(payload, indent=2))
+
+
 @main.command()
 @click.argument("trace_id")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
@@ -1671,9 +1697,16 @@ def run_cmd(workspace: str | None, config_path: str, once: bool) -> None:
 @click.option(
     "--timeout-hours",
     type=float,
-    default=4.0,
-    show_default=True,
-    help="Mandatory wait timeout (max 24h). Default 4h.",
+    default=None,
+    help="Mandatory wait timeout in hours, max 24h (default 4h). Fractional "
+    "values honored; ignored when --timeout-minutes is given.",
+)
+@click.option(
+    "--timeout-minutes",
+    type=float,
+    default=None,
+    help="Mandatory wait timeout in minutes (F5 convenience; takes precedence "
+    "over --timeout-hours).",
 )
 @click.option(
     "--reason",
@@ -1718,7 +1751,8 @@ def await_cmd(
     action_type: str | None,
     action_result: str | None,
     topic: str,
-    timeout_hours: float,
+    timeout_hours: float | None,
+    timeout_minutes: float | None,
     reason: str,
     producer_id: str | None,
     runner_id: str | None,
@@ -1736,8 +1770,8 @@ def await_cmd(
     from agentbus.runner.wait_store import (
         WaitPredicate,
         WaitStore,
-        clamp_timeout_hours,
         new_wait_id,
+        timeout_hours_from,
         validate_agent_id,
         write_await_drop,
     )
@@ -1754,8 +1788,11 @@ def await_cmd(
         )
     if action_result is not None and action_type is None:
         raise click.ClickException("--action-result requires --action-type")
+    if timeout_hours is None and timeout_minutes is None:
+        # Preserve the documented default rather than a silent fallback.
+        timeout_hours = 4.0
 
-    hours = clamp_timeout_hours(timeout_hours)
+    hours = timeout_hours_from(timeout_minutes, timeout_hours)
     wid = wait_id or new_wait_id()
     raw_producer = (
         producer_id or os.environ.get("AGENTBUS_PRODUCER_ID") or "agent"

@@ -241,7 +241,13 @@ def validate_topic(topic: str, *, workspace: Path | None = None) -> None:
 
         if load_schema(ws, topic) is not None:
             return
-    raise ValueError(f"unknown_topic: {topic}")
+    raise ValueError(
+        f"unknown_topic: {topic} (built-in topics: okf/handoff, okf/dead-letter, "
+        f"system/*; for a custom topic register a schema first with: "
+        f"agentbus schema register --topic {topic} --schema-file <schema.json>"
+        + (f" --workspace {ws}" if ws is not None else "")
+        + ")"
+    )
 
 
 def _resolve_schema(topic: str, workspace: Path | None = None) -> dict:
@@ -256,7 +262,12 @@ def _resolve_schema(topic: str, workspace: Path | None = None) -> dict:
         custom = load_schema(ws, topic)
         if custom is not None:
             return custom
-    raise ValueError(f"unknown_topic: {topic}")
+    raise ValueError(
+        f"unknown_topic: {topic} (register a schema first with: "
+        f"agentbus schema register --topic {topic} --schema-file <schema.json>"
+        + (f" --workspace {ws}" if ws is not None else "")
+        + ")"
+    )
 
 
 def normalize_handoff_payload(payload: dict) -> dict:

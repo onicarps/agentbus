@@ -26,7 +26,11 @@ def normalize_resource(workspace: Path, resource: str) -> str:
     try:
         path.relative_to(ws)
     except ValueError as exc:
-        raise ValueError(f"resource_outside_workspace: {resource}") from exc
+        raise ValueError(
+            f"resource_outside_workspace: {resource} (lease resources must live "
+            f"inside the workspace at {ws}; use a path under it, e.g. "
+            f"{ws}/<shared-file>)"
+        ) from exc
     return str(path)
 
 
