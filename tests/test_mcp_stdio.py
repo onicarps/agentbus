@@ -9,6 +9,10 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.server.mcpserver.exceptions import ToolError
+
+import agentbus.server as server
+from agentbus.rbac import ensure_default_roles
 
 ROOT = Path(__file__).resolve().parents[1]
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
@@ -29,6 +33,29 @@ def server_params(tmp_path):
         },
     )
     return ws, params
+
+
+def test_mcp_publish_rbac_denial_raises_tool_error_without_writing(
+    tmp_path, monkeypatch
+):
+    ensure_default_roles(tmp_path)
+    monkeypatch.setenv("AGENTBUS_AUTH", "off")
+    store = server.init_store(tmp_path)
+
+    try:
+        with pytest.raises(ToolError, match="403 Forbidden"):
+            server.agentbus_publish(
+                topic="okf/handoff",
+                payload={
+                    "from": "nobody",
+                    "to": "codex",
+                    "summary": "This publish must be rejected",
+                },
+                producer_id="nobody",
+            )
+        assert store.status()["event_count"] == 0
+    finally:
+        store.close()
 
 
 @pytest.mark.asyncio
@@ -104,3 +131,33 @@ async def test_mcp_publish_poll_roundtrip(server_params):
                     },
                 )
                 assert json.loads(release.content[0].text)["released"] is True
+
+
+@pytest.mark.asyncio
+async def test_mcp_rbac_denial_sets_error_envelope_without_writing(server_params):
+    ws, params = server_params
+    ensure_default_roles(ws)
+    params.env["AGENTBUS_PRODUCER_ID"] = "nobody"
+
+    async with asyncio.timeout(90):
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                denied = await session.call_tool(
+                    "agentbus_publish",
+                    {
+                        "topic": "okf/handoff",
+                        "payload": {
+                            "from": "nobody",
+                            "to": "codex",
+                            "summary": "This publish must be rejected",
+                        },
+                    },
+                )
+
+                assert denied.is_error is True
+                assert "403 Forbidden" in denied.content[0].text
+
+                status = await session.call_tool("agentbus_status", {})
+                assert json.loads(status.content[0].text)["event_count"] == 0

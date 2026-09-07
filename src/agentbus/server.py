@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from agentbus.auth import check_publish_token, ensure_ephemeral_token
 from agentbus.client import EventTransport, open_event_transport
@@ -114,15 +115,14 @@ def _bound_publish_producer(override: str | None) -> str:
     return bound
 
 
-def _check_mcpsafe_tool(tool: str) -> str | None:
-    """Return JSON error if tool blocked; else None."""
+def _check_mcpsafe_tool(tool: str) -> None:
+    """Raise an MCP tool error if the tool is blocked."""
     if _mcpsafe is None:
-        return None
+        return
     try:
         _mcpsafe.require(tool)
     except AccessDeniedError as exc:
-        return json.dumps({"error": str(exc), "code": exc.code})
-    return None
+        raise ToolError(str(exc)) from exc
 
 
 def _wt(
@@ -134,9 +134,7 @@ def _wt(
 ) -> Any:
     """Run tool body with optional wiretap; mcpsafe tool gate unless skip_mcpsafe."""
     if not skip_mcpsafe:
-        denied = _check_mcpsafe_tool(tool)
-        if denied is not None:
-            return denied
+        _check_mcpsafe_tool(tool)
 
     def _guarded() -> Any:
         if (
@@ -149,7 +147,7 @@ def _wt(
                 try:
                     _mcpsafe.require_payload(payload)
                 except AccessDeniedError as exc:
-                    return json.dumps({"error": str(exc), "code": exc.code})
+                    raise ToolError(str(exc)) from exc
         return fn()
 
     if not _wiretap_enabled:
@@ -186,7 +184,7 @@ def agentbus_publish(
     try:
         check_publish_token(_auth_workspace(), auth_token=auth_token)
     except ValueError as exc:
-        return json.dumps({"error": str(exc), "code": 401})
+        raise ToolError(str(exc)) from exc
 
     def _run() -> str:
         try:
@@ -214,14 +212,13 @@ def agentbus_publish(
                 ),
             )
         except (ForbiddenError, IdentityError) as exc:
-            code = getattr(exc, "code", 403)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
         except ValueError as exc:
-            return json.dumps({"error": str(exc), "code": 400})
+            raise ToolError(str(exc)) from exc
         except AccessDeniedError as exc:
-            return json.dumps({"error": str(exc), "code": exc.code})
+            raise ToolError(str(exc)) from exc
         except PayloadTooLargeError as exc:
-            return json.dumps({"error": str(exc), "code": exc.code})
+            raise ToolError(str(exc)) from exc
         out = {
             "event_id": event.event_id,
             "topic": event.topic,
@@ -292,8 +289,7 @@ def agentbus_review(topic: str | None = None, limit: int = 50) -> str:
                 _get_store().review_pending(topic=topic, limit=min(limit, 100))
             )
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt("agentbus_review", {"topic": topic, "limit": limit}, _run)
 
@@ -307,15 +303,14 @@ def agentbus_approve(
     """Approve a pending event so agents can see it on poll."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
         try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
             return json.dumps(
                 _get_store().approve_event(event_id, reviewer_id=rid, auth_token=auth_token)
             )
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt(
         "agentbus_approve",
@@ -334,17 +329,16 @@ def agentbus_reject(
     """Reject a pending event and notify the originating agent."""
 
     def _run() -> str:
-        check_publish_token(_auth_workspace(), auth_token=auth_token)
-        rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
         try:
+            check_publish_token(_auth_workspace(), auth_token=auth_token)
+            rid = reviewer_id or os.environ.get("AGENTBUS_PRODUCER_ID", "agy")
             return json.dumps(
                 _get_store().reject_event(
                     event_id, reviewer_id=rid, reason=reason, auth_token=auth_token
                 )
             )
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt(
         "agentbus_reject",
@@ -374,8 +368,7 @@ def agentbus_lock_acquire(
                 _get_lease_store().lock_acquire(resource, owner_id, ttl_seconds)
             )
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt(
         "agentbus_lock_acquire",
@@ -405,8 +398,7 @@ def agentbus_lock_release(
                 _get_lease_store().lock_release(resource, lease_id, owner_id)
             )
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt(
         "agentbus_lock_release",
@@ -437,8 +429,7 @@ def agentbus_lock_renew(
                 _get_lease_store().lock_renew(resource, lease_id, owner_id, ttl_seconds)
             )
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt(
         "agentbus_lock_renew",
@@ -461,8 +452,7 @@ def agentbus_lock_status(resource: str) -> str:
         try:
             return json.dumps(_get_lease_store().lock_status(resource))
         except (ValueError, ForbiddenError) as exc:
-            code = getattr(exc, "code", 400)
-            return json.dumps({"error": str(exc), "code": code})
+            raise ToolError(str(exc)) from exc
 
     return _wt("agentbus_lock_status", {"resource": resource}, _run)
 

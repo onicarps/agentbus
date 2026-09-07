@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from click.testing import CliRunner
+from mcp.server.mcpserver.exceptions import ToolError
 
 import agentbus.server as server
 from agentbus.cli import main
@@ -127,7 +128,7 @@ def test_cli_mcpsafe_configuration_is_cleanly_refused_over_broker(
         ),
     ],
 )
-def test_mcp_unsupported_broker_operations_return_json_errors(
+def test_mcp_unsupported_broker_operations_raise_tool_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tool: str,
@@ -139,6 +140,5 @@ def test_mcp_unsupported_broker_operations_return_json_errors(
     monkeypatch.setattr(server, "_lease_store", None)
     monkeypatch.setattr(server, "_workspace", tmp_path)
 
-    result = json.loads(getattr(server, tool)(**kwargs))
-
-    assert result == {"error": expected, "code": 400}
+    with pytest.raises(ToolError, match=rf"^{expected}$"):
+        getattr(server, tool)(**kwargs)
