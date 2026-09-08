@@ -207,7 +207,7 @@ def test_out_preview_preserves_newlines_and_fills_budget():
     assert len(out) > 500
 
 
-def test_prompt_common_slack_primary_guidance():
+def test_prompt_common_human_ingress_routing_guidance():
     wake = WakeEnvelope(
         event_id=1,
         topic="okf/handoff",
@@ -226,7 +226,9 @@ def test_prompt_common_slack_primary_guidance():
     assert "primary UI = Slack" in prompt
     assert "to `slack`" in prompt or "substance handoff to `slack`" in prompt
     assert "legacy Telegram" in prompt
-    assert "Telegram bridge" not in prompt
+    assert "to `telegram`" in prompt
+    assert "telegram://{chat}/{message_id}" in prompt
+    assert "originating human channel" in prompt
 
 
 def test_turn_result_error_with_chain_break_still_suppresses():
