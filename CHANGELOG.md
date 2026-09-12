@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added — PostHog outbound telemetry
+
+- Add a read-only, globally ordered event exporter with an atomic durable cursor,
+  deterministic UUIDv5 delivery IDs, bounded HTTP retry, poison quarantine, and
+  singleton process locking.
+- Add metadata-only golden schemas for handoffs, QA verdicts, runner LLM usage,
+  and swarm lock operations; prompts, completions, summaries, credentials, raw
+  URLs, and stack traces are excluded.
+- Add `agentbus posthog test|stream|status` and local runner/lease telemetry
+  hooks. Inbound webhook ingress remains explicitly out of scope.
+
 ## [0.22.1] - 2026-09-06
 
 ### Fixed — runtime consistency diagnostics

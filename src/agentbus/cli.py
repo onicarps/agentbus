@@ -912,6 +912,52 @@ def lock_status(workspace: str, resource: str) -> None:
         store.close()
 
 
+@main.group()
+def posthog() -> None:
+    """Outbound PostHog telemetry (no inbound webhook handling)."""
+
+
+@posthog.command("stream")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--once", is_flag=True, help="Process at most one source batch")
+def posthog_stream(workspace: str | None, once: bool) -> None:
+    """Stream allowlisted AgentBus event metadata to PostHog."""
+    from agentbus.posthog import load_config, run_stream
+
+    ws = _cli_workspace(workspace)
+    try:
+        config = load_config()
+        run_stream(ws, config, once=once)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@posthog.command("test")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def posthog_test(workspace: str | None) -> None:
+    """Verify TLS, endpoint connectivity, and the project API key."""
+    from agentbus.posthog import PostHogExporter, load_config
+
+    ws = _cli_workspace(workspace)
+    try:
+        click.echo(json.dumps(PostHogExporter(ws, load_config()).send_test()))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@posthog.command("status")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+def posthog_status(workspace: str | None) -> None:
+    """Show durable cursor, lag, delivery, and quarantine health."""
+    from agentbus.posthog import PostHogExporter, load_config
+
+    ws = _cli_workspace(workspace)
+    try:
+        click.echo(json.dumps(PostHogExporter(ws, load_config(require_key=False)).status()))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("project-log")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option(

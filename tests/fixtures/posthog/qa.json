@@ -1,0 +1,30 @@
+{
+  "source": {
+    "event_id": 12,
+    "topic": "okf/handoff",
+    "producer_id": "factory",
+    "timestamp": "2026-09-12T01:03:03Z",
+    "schema_version": "1.0",
+    "causation_id": 11,
+    "payload": {
+      "from": "factory",
+      "to": "agy",
+      "initiative": "agentbus",
+      "summary": "private evidence",
+      "action": {"type": "qa_verdict", "result": "green", "mission_id": "qa-123", "target_commit": "abc123", "coverage": 97.5}
+    }
+  },
+  "event": "swarm_qa_verdict",
+  "properties": {
+    "verdict": "GREEN",
+    "initiative": "agentbus",
+    "causation_id": 11,
+    "mission_id": "qa-123",
+    "target_commit": "abc123",
+    "coverage": 97.5,
+    "agentbus_event_id": 12,
+    "agentbus_schema_version": "1.0",
+    "$lib": "agentbus",
+    "distinct_id": "agentbus:00000000-0000-0000-0000-000000000123:factory"
+  }
+}

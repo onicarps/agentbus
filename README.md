@@ -32,8 +32,9 @@ The SQLite bus instantly captures it, without requiring the MCP server. Once you
 | LangSmith | Cloud-only, backward-looking | Local SQLite, forward-looking Execution TUI |
 | Redis pub/sub | Extra daemon, complex setup | Zero-config SQLite, native stdio MCP |
 
-## Feature Arsenal (v0.3 - v0.18)
+## Feature Arsenal (v0.3 - v0.24)
 
+*   **PostHog outbound telemetry (v0.24):** privacy-first, cursor-driven export of handoff, QA, runner generation, and lock metadata with deterministic delivery IDs and bounded retries.
 *   **MCP Python SDK v2 (v0.18):** migrated the stdio MCP server while preserving the existing event-store contract.
 *   **Resilient delivery (v0.16.4):** bounded retry with jitter, retry-exhausted dead letters and file spillover for SQLite contention.
 *   **Async suspend/resume (v0.16):** durable waits and correlated wake events let headless agents yield without busy polling.
@@ -160,6 +161,7 @@ agentbus down
 ## Documentation
 
 - [AgentID security model and identity CLI](docs/AGENTID.md)
+- [PostHog outbound telemetry](docs/POSTHOG.md)
 
 For full architectural documentation, see the `docs/` directory.
 

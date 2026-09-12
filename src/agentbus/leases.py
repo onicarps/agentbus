@@ -83,7 +83,55 @@ class LeaseStore:
             CREATE INDEX IF NOT EXISTS idx_leases_expires ON leases(expires_at);
             """
         )
+        columns = {
+            row[1] for row in self._conn.execute("PRAGMA table_info(leases)").fetchall()
+        }
+        if "renew_count" not in columns:
+            try:
+                self._conn.execute(
+                    "ALTER TABLE leases ADD COLUMN renew_count INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
         self._conn.commit()
+
+    def _emit_lock_event(
+        self,
+        *,
+        path: str,
+        owner_id: str,
+        action: str,
+        lease_id: str,
+        duration_held_s: float,
+        renew_count: int,
+    ) -> None:
+        """Best-effort metadata hook; lock correctness never depends on telemetry."""
+        try:
+            from agentbus.store import EventStore
+
+            lock_name = Path(path).relative_to(self.workspace).as_posix()
+            events = EventStore(self.workspace, auto_prune=False)
+            try:
+                events.publish(
+                    topic="system/lock",
+                    producer_id="lock-telemetry",
+                    schema_version="1.0",
+                    payload={
+                        "type": "swarm_lock_event",
+                        "lock_name": lock_name,
+                        "holder": owner_id,
+                        "action": action,
+                        "duration_held_s": round(max(0.0, duration_held_s), 3),
+                        "renew_count": max(0, renew_count),
+                    },
+                    idempotency_key=f"lock:{lease_id}:{action}:{renew_count}",
+                    skip_rbac=True,
+                )
+            finally:
+                events.close()
+        except Exception:
+            return
 
     def close(self) -> None:
         self._conn.close()
@@ -137,6 +185,14 @@ class LeaseStore:
             (lease_id, path, owner_id, _fmt(now), _fmt(expires)),
         )
         self._conn.commit()
+        self._emit_lock_event(
+            path=path,
+            owner_id=owner_id,
+            action="acquire",
+            lease_id=lease_id,
+            duration_held_s=0,
+            renew_count=0,
+        )
         return {
             "acquired": True,
             "lease_id": lease_id,
@@ -156,11 +212,21 @@ class LeaseStore:
             return {"released": True, "resource": path}
         if row["owner_id"] != owner_id:
             raise ValueError("invalid_owner: owner_id does not hold this lease")
+        duration = max(0.0, (_utc_now() - _parse(row["acquired_at"])).total_seconds())
+        renew_count = int(row["renew_count"] or 0)
         self._conn.execute(
             "DELETE FROM leases WHERE lease_id = ?",
             (lease_id,),
         )
         self._conn.commit()
+        self._emit_lock_event(
+            path=path,
+            owner_id=owner_id,
+            action="release",
+            lease_id=lease_id,
+            duration_held_s=duration,
+            renew_count=renew_count,
+        )
         return {"released": True, "resource": path}
 
     def lock_renew(
@@ -180,12 +246,23 @@ class LeaseStore:
         ).fetchone()
         if not row or row["owner_id"] != owner_id:
             return {"renewed": False, "resource": path}
-        expires = _utc_now() + timedelta(seconds=ttl)
+        now = _utc_now()
+        expires = now + timedelta(seconds=ttl)
+        renew_count = int(row["renew_count"] or 0) + 1
         self._conn.execute(
-            "UPDATE leases SET expires_at = ? WHERE lease_id = ?",
-            (_fmt(expires), lease_id),
+            "UPDATE leases SET expires_at = ?, renew_count = ? WHERE lease_id = ?",
+            (_fmt(expires), renew_count, lease_id),
         )
         self._conn.commit()
+        duration = max(0.0, (now - _parse(row["acquired_at"])).total_seconds())
+        self._emit_lock_event(
+            path=path,
+            owner_id=owner_id,
+            action="renew",
+            lease_id=lease_id,
+            duration_held_s=duration,
+            renew_count=renew_count,
+        )
         return {"renewed": True, "expires_at": _fmt(expires), "resource": path}
 
     def lock_status(self, resource: str) -> dict:

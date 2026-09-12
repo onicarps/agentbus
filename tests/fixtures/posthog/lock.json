@@ -1,0 +1,12 @@
+{
+  "source": {
+    "event_id": 14,
+    "topic": "system/lock",
+    "producer_id": "lock-telemetry",
+    "timestamp": "2026-09-12T01:05:03Z",
+    "schema_version": "1.0",
+    "payload": {"type": "swarm_lock_event", "lock_name": "projects/a", "holder": "codex", "action": "renew", "duration_held_s": 4.2, "renew_count": 1, "secret": "never export"}
+  },
+  "event": "swarm_lock_event",
+  "properties": {"lock_name": "projects/a", "holder": "codex", "action": "renew", "duration_held_s": 4.2, "renew_count": 1, "agentbus_event_id": 14, "agentbus_schema_version": "1.0", "$lib": "agentbus", "distinct_id": "agentbus:00000000-0000-0000-0000-000000000123:lock-telemetry"}
+}

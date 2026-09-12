@@ -931,6 +931,35 @@ class EventStore:
         latest_id = rows[-1]["event_id"] if rows else since_id
         return {"events": events, "latest_id": latest_id, "has_more": has_more}
 
+    def poll_all(self, since_id: int = 0, limit: int = 50) -> dict:
+        """Read published events across topics in global event-id order.
+
+        This is the cursor contract used by read-only exporters.  As with
+        :meth:`poll`, the returned cursor advances past records hidden by
+        protected-mode verification so a consumer cannot become pinned on a
+        tampered row.
+        """
+        if since_id < 0:
+            raise ValueError("since_id must be >= 0")
+        if limit < 1 or limit > 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        rows = self._conn.execute(
+            """
+            SELECT * FROM events
+            WHERE event_id > ? AND status = ?
+            ORDER BY event_id ASC
+            LIMIT ?
+            """,
+            (since_id, STATUS_PUBLISHED, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        events = [
+            event.to_dict() for event in self._authoritative_events_from_rows(rows)
+        ]
+        latest_id = rows[-1]["event_id"] if rows else since_id
+        return {"events": events, "latest_id": latest_id, "has_more": has_more}
+
     def review_pending(self, topic: str | None = None, limit: int = 50) -> list[dict]:
         self.expire_pending()
         self.expire_sla_breaches()

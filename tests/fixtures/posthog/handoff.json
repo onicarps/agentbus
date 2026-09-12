@@ -1,0 +1,33 @@
+{
+  "source": {
+    "event_id": 11,
+    "topic": "okf/handoff",
+    "producer_id": "agy",
+    "timestamp": "2026-09-12T01:02:03Z",
+    "schema_version": "1.0",
+    "causation_id": 9,
+    "payload": {
+      "from": "agy",
+      "to": "codex",
+      "initiative": "agentbus",
+      "summary": "do not export this secret phc_abcdefghijklmnopqrstuvwxyz012345",
+      "links": ["slack://C1/123?token=secret", "/safe/local/link"],
+      "api_key": "secret"
+    }
+  },
+  "event": "swarm_handoff_dispatched",
+  "properties": {
+    "from_agent": "agy",
+    "to_agent": "codex",
+    "topic": "okf/handoff",
+    "initiative": "agentbus",
+    "has_slack_origin": true,
+    "has_telegram_origin": false,
+    "link_count": 2,
+    "summary_length": 62,
+    "agentbus_event_id": 11,
+    "agentbus_schema_version": "1.0",
+    "$lib": "agentbus",
+    "distinct_id": "agentbus:00000000-0000-0000-0000-000000000123:agy"
+  }
+}

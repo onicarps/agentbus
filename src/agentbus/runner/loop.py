@@ -354,6 +354,7 @@ def process_envelope(
         )
     else:
         remaining = budget.remaining(chain)
+        turn_started = time.perf_counter()
         try:
             adapter = get_adapter(
                 cfg.adapter.type,
@@ -372,6 +373,26 @@ def process_envelope(
                 detail={"error": str(exc)},
             )
         result = detect_suspend(workspace, wake, result)
+        try:
+            from agentbus.posthog import emit_runner_generation
+
+            emit_runner_generation(
+                store,
+                runner_id=cfg.runner_id,
+                adapter=cfg.adapter.type,
+                model=(
+                    str(cfg.adapter.options.get("model"))
+                    if cfg.adapter.options.get("model")
+                    else None
+                ),
+                wake_event_id=wake.event_id,
+                trace_id=wake.trace_id,
+                latency_ms=(time.perf_counter() - turn_started) * 1000.0,
+                is_error=result.status == "error",
+                detail=result.detail,
+            )
+        except Exception:  # telemetry must never break runner execution
+            log.exception("runner telemetry hook failed event_id=%s", wake.event_id)
 
     reply_to = wake.from_agent or "agy"
     if not reply_to or reply_to == cfg.producer_id:

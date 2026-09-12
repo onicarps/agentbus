@@ -1,0 +1,13 @@
+{
+  "source": {
+    "event_id": 13,
+    "topic": "system/runner",
+    "producer_id": "runner-telemetry",
+    "timestamp": "2026-09-12T01:04:03Z",
+    "schema_version": "1.0",
+    "trace_id": "trace-13",
+    "payload": {"type": "ai_generation", "$ai_model": "gpt-x", "$ai_provider": "codex", "$ai_input_tokens": 100, "$ai_output_tokens": 20, "$ai_cache_read_tokens": 50, "$ai_latency_ms": 1200, "$ai_cost_usd": 0.01, "$ai_cost_source": "adapter_reported", "$ai_is_error": false, "prompt": "never export"}
+  },
+  "event": "$ai_generation",
+  "properties": {"$ai_trace_id": "trace-13", "$ai_model": "gpt-x", "$ai_provider": "codex", "$ai_input_tokens": 100, "$ai_output_tokens": 20, "$ai_cache_read_tokens": 50, "$ai_latency_ms": 1200.0, "$ai_cost_usd": 0.01, "$ai_cost_source": "adapter_reported", "$ai_is_error": false, "agentbus_event_id": 13, "agentbus_schema_version": "1.0", "$lib": "agentbus", "distinct_id": "agentbus:00000000-0000-0000-0000-000000000123:runner-telemetry"}
+}
