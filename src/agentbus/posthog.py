@@ -26,6 +26,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from agentbus.pricing import estimate_llm_cost
 from agentbus.store import EventStore
 from agentbus.wiretap import redact_text
 
@@ -872,21 +873,13 @@ def runner_generation_payload(
         "$ai_cache_read_tokens": ("cache_read_tokens", "cached_input_tokens"),
     }
     usage: dict[str, int] = {key: 0 for key in aliases}
-    cost = 0.0
-    cost_source = "unavailable"
-
     def walk(value: Any) -> None:
-        nonlocal cost, cost_source
         if isinstance(value, dict):
             for target, names in aliases.items():
                 for name in names:
                     raw = value.get(name)
                     if isinstance(raw, (int, float)) and raw >= 0:
                         usage[target] = max(usage[target], int(raw))
-            raw_cost = value.get("cost_usd")
-            if isinstance(raw_cost, (int, float)) and raw_cost >= 0:
-                cost = max(cost, float(raw_cost))
-                cost_source = "adapter_reported"
             for child in value.values():
                 if isinstance(child, (dict, list)):
                     walk(child)
@@ -896,11 +889,15 @@ def runner_generation_payload(
 
     for candidate in candidates:
         walk(candidate)
+    cost, cost_source = estimate_llm_cost(
+        model or "", usage["$ai_input_tokens"], usage["$ai_output_tokens"],
+        usage["$ai_cache_read_tokens"],
+    )
     return {
         "type": "ai_generation",
         "$ai_trace_id": trace_id or "",
         "$ai_model": model or "unknown",
-        "$ai_provider": adapter,
+        "$ai_provider": _provider_for_model(model, adapter),
         "$ai_latency_ms": round(max(0.0, latency_ms), 2),
         "$ai_cost_usd": cost,
         "$ai_cost_source": cost_source,
@@ -910,16 +907,29 @@ def runner_generation_payload(
     }
 
 
+def _provider_for_model(model: str | None, fallback: str) -> str:
+    normalized = (model or "").strip().lower()
+    if normalized.startswith(("gpt", "o1", "o3")):
+        return "openai"
+    if normalized.startswith("claude"):
+        return "anthropic"
+    if normalized.startswith("gemini"):
+        return "google"
+    return fallback
+
+
 def emit_runner_generation(
     store: EventStore, *, runner_id: str, adapter: str, model: str | None,
     wake_event_id: int, trace_id: str | None, latency_ms: float,
-    is_error: bool, detail: dict[str, Any] | None,
+    is_error: bool, detail: dict[str, Any] | None, turn_number: int = 1,
 ) -> None:
     if not _env_bool("POSTHOG_TELEMETRY_ENABLED", True):
         return
     if adapter == "echo" or (isinstance(detail, dict) and detail.get("dry_run") is True):
         return
-    effective_trace_id = trace_id or f"runner:{runner_id}:{wake_event_id}"
+    # The wake event is the direct cause of this generation.  Do not derive an
+    # observability trace from prompts or adapter output.
+    effective_trace_id = f"event-{wake_event_id}"
     try:
         store.publish(
             topic="system/runner",
@@ -931,6 +941,7 @@ def emit_runner_generation(
                     latency_ms=latency_ms, is_error=is_error, detail=detail,
                 ),
                 "runner_id": runner_id,
+                "turn_number": max(1, int(turn_number)),
             },
             causation_id=wake_event_id,
             idempotency_key=f"runner-generation:{runner_id}:{wake_event_id}",

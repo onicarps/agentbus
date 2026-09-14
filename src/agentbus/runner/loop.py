@@ -390,6 +390,7 @@ def process_envelope(
                 latency_ms=(time.perf_counter() - turn_started) * 1000.0,
                 is_error=result.status == "error",
                 detail=result.detail,
+                turn_number=cfg.budget.max_turns_per_chain - remaining + 1,
             )
         except Exception:  # telemetry must never break runner execution
             log.exception("runner telemetry hook failed event_id=%s", wake.event_id)

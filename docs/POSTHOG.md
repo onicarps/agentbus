@@ -59,3 +59,12 @@ is set; content export requires a later, explicit privacy-reviewed schema.
 Supported output events are `swarm_handoff_dispatched`, `swarm_qa_verdict`,
 `$ai_generation`, and `swarm_lock_event`. UUIDv5 identifiers make restart replay
 idempotent in PostHog.
+
+## LLM generation telemetry
+
+Runner turns emit `$ai_generation` records containing only model/provider,
+numeric token counts, latency, deterministic local USD estimate, error state,
+and the causation event trace ID. Prompt and completion content is never put in
+the event. The static `agentbus_pricing_v1` catalog covers common GPT, Claude,
+and Gemini models; an unknown model reports `$ai_cost_usd: 0.0` with
+`$ai_cost_source: unpriced`.

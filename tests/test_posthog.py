@@ -138,7 +138,7 @@ def test_crash_between_send_and_cursor_save_replays_same_uuid(
 def test_runner_usage_extraction_is_numeric_only() -> None:
     payload = runner_generation_payload(
         adapter="codex",
-        model="gpt-x",
+        model="gpt-5",
         trace_id="trace-x",
         latency_ms=12.5,
         is_error=False,
@@ -150,8 +150,30 @@ def test_runner_usage_extraction_is_numeric_only() -> None:
     assert payload["$ai_input_tokens"] == 12
     assert payload["$ai_output_tokens"] == 3
     assert payload["$ai_cache_read_tokens"] == 8
+    assert payload["$ai_cost_usd"] == pytest.approx(0.000046)
+    assert payload["$ai_cost_source"] == "agentbus_pricing_v1"
+    assert payload["$ai_provider"] == "openai"
     assert "private" not in json.dumps(payload)
     assert "secret" not in json.dumps(payload)
+
+
+def test_runner_generation_uses_causation_trace_and_never_content(tmp_path: Path) -> None:
+    from agentbus.posthog import emit_runner_generation
+
+    store = EventStore(tmp_path)
+    try:
+        emit_runner_generation(
+            store, runner_id="codex-1", adapter="codex", model="gpt-5",
+            wake_event_id=42, trace_id="untrusted-trace", latency_ms=12.3,
+            is_error=False, detail={"stdout": '{"usage":{"input_tokens":2}}', "prompt": "private"},
+        )
+        event = store.poll("system/runner", limit=1)["events"][0]
+    finally:
+        store.close()
+    payload = event["payload"]
+    assert payload["$ai_trace_id"] == "event-42"
+    assert payload["turn_number"] == 1
+    assert "private" not in json.dumps(payload)
 
 
 def test_https_configuration_is_mandatory(monkeypatch: pytest.MonkeyPatch) -> None:
