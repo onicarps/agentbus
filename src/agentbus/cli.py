@@ -1025,6 +1025,121 @@ def posthog_report(workspace: str | None, preset: str, output_format: str) -> No
         raise click.ClickException(str(exc)) from exc
 
 
+@main.group("pricing")
+def pricing() -> None:
+    """Manage dynamic LLM pricing catalogs and OpenRouter sync."""
+
+
+@pricing.command("sync")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--endpoint",
+    default="https://openrouter.ai/api/v1/models",
+    show_default=True,
+    help="OpenRouter models endpoint",
+)
+@click.option("--timeout", default=5.0, show_default=True, type=float, help="Request timeout in seconds")
+@click.option(
+    "--output-format",
+    type=click.Choice(["json", "text"]),
+    default="text",
+    show_default=True,
+)
+def pricing_sync(
+    workspace: str | None,
+    endpoint: str,
+    timeout: float,
+    output_format: str,
+) -> None:
+    """Fetch live model pricing from OpenRouter and update local disk cache."""
+    from agentbus.pricing import sync_openrouter_pricing
+
+    ws = _cli_workspace(workspace)
+    try:
+        res = sync_openrouter_pricing(workspace=ws, endpoint=endpoint, timeout=timeout)
+        if output_format == "json":
+            click.echo(json.dumps(res, indent=2))
+        else:
+            click.echo(
+                f"Synced {res['models_count']} model aliases ({res['raw_models_count']} raw models) "
+                f"from OpenRouter to {res['cache_path']}"
+            )
+    except Exception as exc:
+        raise click.ClickException(f"Failed to sync pricing: {exc}") from exc
+
+
+@pricing.command("status")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--output-format",
+    type=click.Choice(["json", "text"]),
+    default="text",
+    show_default=True,
+)
+def pricing_status(workspace: str | None, output_format: str) -> None:
+    """Show pricing catalog status and cache details."""
+    from agentbus.pricing import get_pricing_status
+
+    ws = _cli_workspace(workspace)
+    st = get_pricing_status(ws)
+    if output_format == "json":
+        click.echo(json.dumps(st, indent=2))
+    else:
+        click.echo(f"Cache path:        {st['cache_path']}")
+        click.echo(f"Cache exists:      {st['cache_exists']}")
+        click.echo(f"Last updated:      {st['updated_at'] or 'never'}")
+        click.echo(f"Dynamic models:    {st['dynamic_models_count']}")
+        click.echo(f"Fallback models:   {st['fallback_models_count']}")
+        click.echo(f"Primary source:    {st['primary_source']}")
+
+
+@pricing.command("estimate")
+@click.argument("model")
+@click.option("--input-tokens", default=0, type=int, help="Input / prompt tokens")
+@click.option("--output-tokens", default=0, type=int, help="Output / completion tokens")
+@click.option("--cache-tokens", default=0, type=int, help="Cache read tokens")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option(
+    "--output-format",
+    type=click.Choice(["json", "text"]),
+    default="text",
+    show_default=True,
+)
+def pricing_estimate(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_tokens: int,
+    workspace: str | None,
+    output_format: str,
+) -> None:
+    """Calculate estimated USD cost for a model and token usage."""
+    from agentbus.pricing import estimate_llm_cost
+
+    ws = _cli_workspace(workspace)
+    cost, source = estimate_llm_cost(
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_tokens,
+        workspace=ws,
+    )
+    result = {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_tokens": cache_tokens,
+        "estimated_cost_usd": cost,
+        "pricing_source": source,
+    }
+    if output_format == "json":
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"Model:           {model}")
+        click.echo(f"Estimated Cost:  ${cost:.6f} USD")
+        click.echo(f"Pricing Source:  {source}")
+
+
 @main.command("project-log")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option(
