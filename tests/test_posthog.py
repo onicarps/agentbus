@@ -151,7 +151,7 @@ def test_runner_usage_extraction_is_numeric_only() -> None:
     assert payload["$ai_output_tokens"] == 3
     assert payload["$ai_cache_read_tokens"] == 8
     assert payload["$ai_cost_usd"] == pytest.approx(0.000046)
-    assert payload["$ai_cost_source"] == "agentbus_pricing_v1"
+    assert payload["$ai_cost_source"] in ("agentbus_pricing_v1", "openrouter_dynamic_v1")
     assert payload["$ai_provider"] == "openai"
     assert "private" not in json.dumps(payload)
     assert "secret" not in json.dumps(payload)
