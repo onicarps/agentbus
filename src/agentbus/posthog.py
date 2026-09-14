@@ -39,6 +39,19 @@ MAX_RETRIES = 5
 DEFAULT_QUERY_LIMIT = 50
 MAX_QUERY_LIMIT = 100
 MAX_QUERY_RANGE_DAYS = 90
+MAX_QUERY_TIMEOUT_SECONDS = 5.0
+ALLOWED_QUERY_PROPERTY_FIELDS = frozenset(
+    {
+        "$ai_cost_usd",
+        "$ai_input_tokens",
+        "$ai_is_error",
+        "$ai_latency_ms",
+        "$ai_output_tokens",
+        "action",
+        "to_agent",
+        "verdict",
+    }
+)
 SENSITIVE_RESULT_KEYS = frozenset(
     {
         "api_key",
@@ -53,6 +66,10 @@ SENSITIVE_RESULT_KEYS = frozenset(
         "summary",
         "token",
     }
+)
+SENSITIVE_VALUE_RE = re.compile(
+    r"(?:api[_-]?key|authorization|cookie|password|secret|token)\s*[:=]",
+    flags=re.IGNORECASE,
 )
 
 
@@ -102,24 +119,54 @@ class PostHogQueryConfig:
 
 
 def _load_dotenv() -> None:
-    candidate_paths = [
-        Path(os.environ.get("AGENTBUS_WORKSPACE", "")).resolve() / ".env" if os.environ.get("AGENTBUS_WORKSPACE") else None,
-        Path.cwd() / ".env",
-        Path.home() / "okf_agent_workspace" / ".env",
-    ]
-    for p in candidate_paths:
-        if p and p.is_file():
-            try:
-                for line in p.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k, v = k.strip(), v.strip().strip("'\"")
-                    if k and k not in os.environ:
-                        os.environ[k] = v
-            except Exception:
-                pass
+    """Load only the explicit coordination-workspace dotenv file.
+
+    In particular, never discover a dotenv file from the current directory:
+    a query credential inherited from the process must not be redirected by an
+    untrusted checkout's configuration.
+    """
+    workspace = os.environ.get("AGENTBUS_WORKSPACE")
+    if not workspace:
+        return
+    dotenv = Path(workspace).resolve() / ".env"
+    if not dotenv.is_file():
+        return
+    try:
+        for line in dotenv.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip().strip("'\"")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        # A dotenv file is optional; configuration validation below remains
+        # authoritative when it cannot be read.
+        return
+
+
+def _validate_posthog_host(host: str) -> str:
+    """Validate a credential destination against PostHog production/dev hosts."""
+    parsed = urlparse(host)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    allow_insecure = _env_bool("POSTHOG_ALLOW_INSECURE_DEV", False)
+    is_posthog = hostname.endswith(".posthog.com")
+    is_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+    if parsed.scheme != "https" and not (allow_insecure and parsed.scheme == "http" and is_loopback):
+        raise ValueError("POSTHOG_HOST must use HTTPS (HTTP is localhost dev-only)")
+    if (
+        not hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise ValueError("POSTHOG_HOST must be a hostname URL without credentials/query/path")
+    if not is_posthog and not is_loopback:
+        raise ValueError("POSTHOG_HOST must target *.posthog.com or localhost development")
+    return host
 
 
 def load_config(*, require_key: bool = True) -> PostHogConfig:
@@ -132,24 +179,7 @@ def load_config(*, require_key: bool = True) -> PostHogConfig:
     if require_key and not key:
         raise ValueError("POSTHOG_PROJECT_API_KEY or POSTHOG_API_KEY is required")
     host = (os.environ.get("POSTHOG_HOST") or DEFAULT_HOST).strip().rstrip("/")
-    parsed = urlparse(host)
-    allow_insecure = _env_bool("POSTHOG_ALLOW_INSECURE_DEV", False)
-    if parsed.scheme != "https" and not (
-        allow_insecure
-        and parsed.scheme == "http"
-        and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-    ):
-        raise ValueError("POSTHOG_HOST must use HTTPS (HTTP is localhost dev-only)")
-    if (
-        not parsed.hostname
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("POSTHOG_HOST must be a hostname URL without credentials/query")
-    if parsed.path not in {"", "/"}:
-        raise ValueError("POSTHOG_HOST must not include an endpoint path")
+    _validate_posthog_host(host)
     try:
         batch_size = int(os.environ.get("POSTHOG_BATCH_SIZE", "50"))
         interval = float(os.environ.get("POSTHOG_POLL_INTERVAL_SECONDS", "2"))
@@ -184,18 +214,13 @@ def load_query_config() -> PostHogQueryConfig:
     if not project_id or not project_id.isdecimal():
         raise ValueError("POSTHOG_PROJECT_ID must be a numeric project ID")
     host = (os.environ.get("POSTHOG_HOST") or DEFAULT_HOST).strip().rstrip("/")
-    parsed = urlparse(host)
-    allow_insecure = _env_bool("POSTHOG_ALLOW_INSECURE_DEV", False)
-    if parsed.scheme != "https" and not (
-        allow_insecure and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-    ):
-        raise ValueError("POSTHOG_HOST must use HTTPS (HTTP is localhost dev-only)")
-    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
-        raise ValueError("POSTHOG_HOST must be a hostname URL without credentials/query/path")
+    _validate_posthog_host(host)
     try:
-        timeout = float(os.environ.get("POSTHOG_QUERY_TIMEOUT_SECONDS", "30.0"))
-    except ValueError:
-        timeout = 30.0
+        timeout = float(os.environ.get("POSTHOG_QUERY_TIMEOUT_SECONDS", str(MAX_QUERY_TIMEOUT_SECONDS)))
+    except ValueError as exc:
+        raise ValueError("POSTHOG_QUERY_TIMEOUT_SECONDS must be a finite number between 0 and 5") from exc
+    if not math.isfinite(timeout) or not 0 < timeout <= MAX_QUERY_TIMEOUT_SECONDS:
+        raise ValueError("POSTHOG_QUERY_TIMEOUT_SECONDS must be a finite number between 0 and 5")
     return PostHogQueryConfig(api_key=api_key, project_id=project_id, host=host, request_timeout_seconds=timeout)
 
 
@@ -265,6 +290,14 @@ def sanitize_hogql(sql: str, *, limit: int = DEFAULT_QUERY_LIMIT) -> str:
         raise ValueError("HogQL may not select sensitive or raw payload fields")
     if re.search(r"\bFROM\s+events\b", normalized, flags=re.IGNORECASE) and not re.search(r"\btimestamp\s*>=", normalized, flags=re.IGNORECASE):
         raise ValueError("event queries must include a timestamp >= time predicate")
+    if re.search(r"(?:^|[\s,(])\*(?:\s|,|$)|\b[A-Za-z_][A-Za-z0-9_]*\.\*", normalized):
+        raise ValueError("HogQL wildcard projections are not allowed")
+    property_references = re.findall(r"\bproperties\.([A-Za-z_$][A-Za-z0-9_$]*)\b", normalized, flags=re.IGNORECASE)
+    if re.search(r"\bproperties\b", normalized, flags=re.IGNORECASE) and not property_references:
+        raise ValueError("HogQL raw properties dictionaries are not allowed")
+    for field in property_references:
+        if field not in ALLOWED_QUERY_PROPERTY_FIELDS:
+            raise ValueError("HogQL property is not in the telemetry allowlist")
     requested_limit = min(max(1, limit), MAX_QUERY_LIMIT)
     if re.search(r"\bLIMIT\s+\d+\b", normalized, flags=re.IGNORECASE):
         def clamp(match: re.Match[str]) -> str:
@@ -301,6 +334,10 @@ def _redact_query_result(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_query_result(item) for item in value[:MAX_QUERY_LIMIT]]
     if isinstance(value, str):
+        # Column aliases are caller-controlled, so a value must be screened
+        # even when its associated column name appears harmless.
+        if SENSITIVE_VALUE_RE.search(value):
+            return "***REDACTED***"
         return redact_text(value, max_len=500)
     return value
 

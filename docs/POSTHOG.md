@@ -25,16 +25,20 @@ the configured PostHog host and is never included in command output.
 ```bash
 agentbus posthog query --preset swarm_health --time-range 7d --format summary
 agentbus posthog query --preset agent_throughput --format table
-agentbus posthog query --sql "SELECT count() FROM events WHERE timestamp >= now() - INTERVAL 1 DAY"
 agentbus posthog report --preset weekly_digest
 ```
 
-Queries are strictly read-only: one `SELECT`/`WITH` statement, a maximum 5 s
-request, a default 50-row limit and 100-row ceiling. Event queries must carry a
-`timestamp >=` predicate; raw result fields that could contain secrets or event
-payloads are removed before output.
+Curated presets are the primary interface. Advanced `--sql` use is deliberately
+restricted to read-only, time-bounded queries with allowlisted scalar telemetry
+properties; raw `properties` dictionaries and wildcard projections are rejected.
+All queries have a maximum 5 s request, a default 50-row limit and 100-row
+ceiling. Event queries must carry a `timestamp >=` predicate; raw result fields
+that could contain secrets or event payloads are removed before output.
 
-`POSTHOG_TELEMETRY_ENABLED=false` disables delivery. Optional tuning variables
+`POSTHOG_TELEMETRY_ENABLED=false` disables delivery. Configuration is read only
+from `AGENTBUS_WORKSPACE/.env` (when present), never from the current directory.
+Query credentials are sent only to `*.posthog.com`, or a localhost development
+receiver. Optional tuning variables
 are `POSTHOG_BATCH_SIZE` (default 50) and `POSTHOG_POLL_INTERVAL_SECONDS`
 (default 2). Plain HTTP is rejected. A local development receiver may be used
 only with `POSTHOG_ALLOW_INSECURE_DEV=true` and a loopback hostname.

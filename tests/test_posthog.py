@@ -17,6 +17,7 @@ from agentbus.posthog import (
     PostHogQueryConfig,
     deterministic_uuid,
     load_config,
+    load_query_config,
     map_event,
     parse_time_range,
     preset_hogql,
@@ -215,6 +216,17 @@ def test_hogql_sanitizer_rejects_mutations_and_unbounded_event_scans() -> None:
         sanitize_hogql("SELECT 1 FROM events WHERE timestamp >= now() - INTERVAL 1 DAY DELETE")
     with pytest.raises(ValueError, match="payload"):
         sanitize_hogql("SELECT payload FROM events WHERE timestamp >= now() - INTERVAL 1 DAY")
+    with pytest.raises(ValueError, match="raw properties"):
+        sanitize_hogql("SELECT properties FROM events WHERE timestamp >= now() - INTERVAL 1 DAY")
+    with pytest.raises(ValueError, match="telemetry allowlist"):
+        sanitize_hogql("SELECT properties.customer_secret FROM events WHERE timestamp >= now() - INTERVAL 1 DAY")
+    with pytest.raises(ValueError, match="wildcard"):
+        sanitize_hogql("SELECT * FROM events WHERE timestamp >= now() - INTERVAL 1 DAY")
+    with pytest.raises(ValueError, match="wildcard"):
+        sanitize_hogql("SELECT e.* FROM events e WHERE timestamp >= now() - INTERVAL 1 DAY")
+    assert "properties.verdict" in sanitize_hogql(
+        "SELECT properties.verdict FROM events WHERE timestamp >= now() - INTERVAL 1 DAY"
+    )
     assert sanitize_hogql("SELECT 1", limit=500).endswith("LIMIT 100")
     assert sanitize_hogql("SELECT 1 LIMIT 999", limit=50).endswith("LIMIT 50")
     assert parse_time_range("7d") == 7
@@ -228,7 +240,7 @@ def test_query_client_uses_query_endpoint_bounded_body_and_redacts_results() -> 
     def send(url: str, body: bytes, timeout: float, headers: dict[str, str]) -> HTTPResult:
         assert timeout == 5.0
         calls.append((url, json.loads(body), headers))
-        return HTTPResult(200, {}, json.dumps({"columns": ["metric", "payload"], "results": [[1, "ok"]], "secret": "nope", "payload": {"token": "nope"}}).encode())
+        return HTTPResult(200, {}, json.dumps({"columns": ["metric", "payload", "innocent_alias"], "results": [[1, "ok", "secret=short-value"]], "secret": "nope", "payload": {"token": "nope"}}).encode())
 
     client = PostHogQueryClient(PostHogQueryConfig("phx_test", "123"), send=send)
     result = client.query("SELECT count() FROM events WHERE timestamp >= now() - INTERVAL 7 DAY", limit=500)
@@ -238,4 +250,47 @@ def test_query_client_uses_query_endpoint_bounded_body_and_redacts_results() -> 
     assert calls[0][2]["Authorization"] == "Bearer phx_test"
     assert "secret" not in result["result"]
     assert "payload" not in result["result"]
-    assert result["result"]["columns"] == ["metric"]
+    assert result["result"]["columns"] == ["metric", "innocent_alias"]
+    assert result["result"]["results"] == [[1, "***REDACTED***"]]
+
+
+def test_query_config_uses_only_workspace_dotenv_and_allowlisted_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "POSTHOG_HOST=https://attacker.example\nPOSTHOG_PROJECT_ID=999\n"
+    )
+    monkeypatch.setenv("AGENTBUS_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("POSTHOG_PERSONAL_API_KEY", "phx_test")
+    monkeypatch.setenv("POSTHOG_PROJECT_ID", "123")
+    monkeypatch.delenv("POSTHOG_HOST", raising=False)
+    assert load_query_config().host == "https://us.i.posthog.com"
+
+    monkeypatch.setenv("POSTHOG_HOST", "https://attacker.example")
+    with pytest.raises(ValueError, match="posthog.com"):
+        load_query_config()
+
+
+@pytest.mark.parametrize("timeout", ["6", "0", "-1", "NaN", "Infinity", "not-a-number"])
+def test_query_timeout_must_be_finite_positive_and_at_most_five_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: str
+) -> None:
+    monkeypatch.setenv("AGENTBUS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("POSTHOG_PERSONAL_API_KEY", "phx_test")
+    monkeypatch.setenv("POSTHOG_PROJECT_ID", "123")
+    monkeypatch.setenv("POSTHOG_QUERY_TIMEOUT_SECONDS", timeout)
+    with pytest.raises(ValueError, match="between 0 and 5"):
+        load_query_config()
+
+
+def test_query_timeout_defaults_to_and_accepts_hard_five_second_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTBUS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("POSTHOG_PERSONAL_API_KEY", "phx_test")
+    monkeypatch.setenv("POSTHOG_PROJECT_ID", "123")
+    monkeypatch.delenv("POSTHOG_QUERY_TIMEOUT_SECONDS", raising=False)
+    assert load_query_config().request_timeout_seconds == 5.0
+    monkeypatch.setenv("POSTHOG_QUERY_TIMEOUT_SECONDS", "5.0")
+    assert load_query_config().request_timeout_seconds == 5.0

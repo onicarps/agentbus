@@ -987,14 +987,14 @@ def _posthog_output(result: dict, output_format: str) -> str:
 @posthog.command("query")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--preset", type=click.Choice(["swarm_health", "agent_throughput", "qa_summary", "lock_concurrency", "llm_cost_latency"]))
-@click.option("--sql", default=None, help="One read-only, time-bounded HogQL statement")
+@click.option("--sql", default=None, help="Advanced: one restricted, read-only, time-bounded HogQL statement (prefer --preset)")
 @click.option("--time-range", default="7d", show_default=True)
 @click.option("--limit", default=50, show_default=True, type=click.IntRange(1, 100))
 @click.option("--format", "output_format", default="summary", show_default=True, type=click.Choice(["summary", "json", "table"]))
 def posthog_query(
     workspace: str | None, preset: str | None, sql: str | None, time_range: str, limit: int, output_format: str
 ) -> None:
-    """Run a bounded read-only HogQL query or curated swarm KPI preset."""
+    """Run a curated swarm KPI preset (preferred) or restricted HogQL query."""
     from agentbus.posthog import PostHogQueryClient, load_query_config, parse_time_range, preset_hogql
 
     _cli_workspace(workspace)
