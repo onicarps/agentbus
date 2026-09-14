@@ -63,8 +63,19 @@ idempotent in PostHog.
 ## LLM generation telemetry
 
 Runner turns emit `$ai_generation` records containing only model/provider,
-numeric token counts, latency, deterministic local USD estimate, error state,
+numeric token counts, latency, deterministic USD estimate, error state,
 and the causation event trace ID. Prompt and completion content is never put in
-the event. The static `agentbus_pricing_v1` catalog covers common GPT, Claude,
-and Gemini models; an unknown model reports `$ai_cost_usd: 0.0` with
-`$ai_cost_source: unpriced`.
+the event.
+
+Cost estimates use the dynamic OpenRouter-backed catalog (`agentbus pricing sync`),
+which caches 440+ models in `.agentbus/pricing_cache.json`. When offline, a static
+fallback catalog (`agentbus_pricing_v1`) covers common frontier models across
+OpenAI, Anthropic, Google, DeepSeek, Meta, and Qwen. An unknown model reports
+`$ai_cost_usd: 0.0` with `$ai_cost_source: unpriced`.
+
+Manage pricing via CLI:
+```bash
+agentbus pricing sync        # Fetch live rates from OpenRouter
+agentbus pricing status      # View cache and model count
+agentbus pricing estimate <model> --input-tokens N --output-tokens N
+```
