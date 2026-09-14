@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import random
+import re
 import signal
 import threading
 import time
@@ -35,6 +36,24 @@ TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 NON_RETRYABLE_STATUS = frozenset({400, 401, 403, 422})
 UUID_NAMESPACE = uuid.NAMESPACE_DNS
 MAX_RETRIES = 5
+DEFAULT_QUERY_LIMIT = 50
+MAX_QUERY_LIMIT = 100
+MAX_QUERY_RANGE_DAYS = 90
+SENSITIVE_RESULT_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "body",
+        "content",
+        "cookie",
+        "payload",
+        "password",
+        "prompt",
+        "secret",
+        "summary",
+        "token",
+    }
+)
 
 
 def _utc_now() -> str:
@@ -68,10 +87,50 @@ class PostHogConfig:
         return f"{self.host.rstrip('/')}/batch/"
 
 
+@dataclass(frozen=True)
+class PostHogQueryConfig:
+    """Credentials and endpoint settings for the read-only PostHog query API."""
+
+    api_key: str
+    project_id: str
+    host: str = DEFAULT_HOST
+    request_timeout_seconds: float = 5.0
+
+    @property
+    def query_url(self) -> str:
+        return f"{self.host.rstrip('/')}/api/projects/{self.project_id}/query/"
+
+
+def _load_dotenv() -> None:
+    candidate_paths = [
+        Path(os.environ.get("AGENTBUS_WORKSPACE", "")).resolve() / ".env" if os.environ.get("AGENTBUS_WORKSPACE") else None,
+        Path.cwd() / ".env",
+        Path.home() / "okf_agent_workspace" / ".env",
+    ]
+    for p in candidate_paths:
+        if p and p.is_file():
+            try:
+                for line in p.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip("'\"")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+            except Exception:
+                pass
+
+
 def load_config(*, require_key: bool = True) -> PostHogConfig:
-    key = (os.environ.get("POSTHOG_PROJECT_API_KEY") or "").strip()
+    _load_dotenv()
+    key = (
+        os.environ.get("POSTHOG_PROJECT_API_KEY")
+        or os.environ.get("POSTHOG_API_KEY")
+        or ""
+    ).strip()
     if require_key and not key:
-        raise ValueError("POSTHOG_PROJECT_API_KEY is required")
+        raise ValueError("POSTHOG_PROJECT_API_KEY or POSTHOG_API_KEY is required")
     host = (os.environ.get("POSTHOG_HOST") or DEFAULT_HOST).strip().rstrip("/")
     parsed = urlparse(host)
     allow_insecure = _env_bool("POSTHOG_ALLOW_INSECURE_DEV", False)
@@ -108,6 +167,174 @@ def load_config(*, require_key: bool = True) -> PostHogConfig:
         batch_size=batch_size,
         poll_interval_seconds=interval,
     )
+
+
+def load_query_config() -> PostHogQueryConfig:
+    """Load query-only credentials without changing exporter configuration."""
+    _load_dotenv()
+    api_key = (
+        os.environ.get("POSTHOG_PERSONAL_API_KEY")
+        or os.environ.get("POSTHOG_PROJECT_API_KEY")
+        or os.environ.get("POSTHOG_API_KEY")
+        or ""
+    ).strip()
+    project_id = (os.environ.get("POSTHOG_PROJECT_ID") or "").strip()
+    if not api_key:
+        raise ValueError("POSTHOG_PERSONAL_API_KEY or POSTHOG_PROJECT_API_KEY is required")
+    if not project_id or not project_id.isdecimal():
+        raise ValueError("POSTHOG_PROJECT_ID must be a numeric project ID")
+    host = (os.environ.get("POSTHOG_HOST") or DEFAULT_HOST).strip().rstrip("/")
+    parsed = urlparse(host)
+    allow_insecure = _env_bool("POSTHOG_ALLOW_INSECURE_DEV", False)
+    if parsed.scheme != "https" and not (
+        allow_insecure and parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    ):
+        raise ValueError("POSTHOG_HOST must use HTTPS (HTTP is localhost dev-only)")
+    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        raise ValueError("POSTHOG_HOST must be a hostname URL without credentials/query/path")
+    try:
+        timeout = float(os.environ.get("POSTHOG_QUERY_TIMEOUT_SECONDS", "30.0"))
+    except ValueError:
+        timeout = 30.0
+    return PostHogQueryConfig(api_key=api_key, project_id=project_id, host=host, request_timeout_seconds=timeout)
+
+
+def parse_time_range(value: str) -> int:
+    """Return a bounded whole-day query window from a compact CLI duration."""
+    match = re.fullmatch(r"([1-9][0-9]*)([dD])", value.strip())
+    if not match:
+        raise ValueError("time range must be whole days, for example 7d")
+    days = int(match.group(1))
+    if days > MAX_QUERY_RANGE_DAYS:
+        raise ValueError(f"time range must be between 1d and {MAX_QUERY_RANGE_DAYS}d")
+    return days
+
+
+def _event_window(days: int) -> str:
+    return f"timestamp >= now() - INTERVAL {days} DAY"
+
+
+def preset_hogql(name: str, days: int) -> str:
+    """Build an allowlisted aggregate HogQL query for one swarm KPI preset."""
+    window = _event_window(days)
+    presets = {
+        "swarm_health": (
+            "SELECT count() AS total_events, countIf(event = 'swarm_handoff_dispatched') AS handoff_volume, "
+            "countIf(properties.$ai_is_error = true OR properties.verdict = 'RED') AS error_count "
+            f"FROM events WHERE {window}"
+        ),
+        "agent_throughput": (
+            "SELECT properties.to_agent AS agent, count() AS task_count "
+            f"FROM events WHERE event = 'swarm_handoff_dispatched' AND {window} "
+            "GROUP BY agent ORDER BY task_count DESC"
+        ),
+        "qa_summary": (
+            "SELECT properties.verdict AS verdict, count() AS mission_count "
+            f"FROM events WHERE event = 'swarm_qa_verdict' AND {window} "
+            "GROUP BY verdict ORDER BY mission_count DESC"
+        ),
+        "lock_concurrency": (
+            "SELECT properties.action AS action, count() AS operation_count "
+            f"FROM events WHERE event = 'swarm_lock_event' AND {window} "
+            "GROUP BY action ORDER BY operation_count DESC"
+        ),
+        "llm_cost_latency": (
+            "SELECT count() AS generation_count, sum(toInt(properties.$ai_input_tokens)) + sum(toInt(properties.$ai_output_tokens)) AS token_burn, "
+            "avg(toFloat(properties.$ai_latency_ms)) AS avg_latency_ms, sum(toFloat(properties.$ai_cost_usd)) AS total_cost_usd "
+            f"FROM events WHERE event = '$ai_generation' AND {window}"
+        ),
+    }
+    try:
+        return presets[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown preset {name!r}; choose from {', '.join(sorted(presets))}") from exc
+
+
+def sanitize_hogql(sql: str, *, limit: int = DEFAULT_QUERY_LIMIT) -> str:
+    """Constrain raw HogQL to one bounded, time-scoped read-only statement."""
+    if not isinstance(sql, str) or not sql.strip():
+        raise ValueError("HogQL query is required")
+    if ";" in sql:
+        raise ValueError("multi-statement HogQL is not allowed")
+    normalized = " ".join(sql.split())
+    if not re.match(r"^(SELECT|WITH)\b", normalized, flags=re.IGNORECASE):
+        raise ValueError("only SELECT or WITH HogQL queries are allowed")
+    if re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|GRANT|REVOKE)\b", normalized, flags=re.IGNORECASE):
+        raise ValueError("mutating HogQL is not allowed")
+    if re.search(r"\b(payload|secret|token|password|authorization|cookie)\b", normalized, flags=re.IGNORECASE):
+        raise ValueError("HogQL may not select sensitive or raw payload fields")
+    if re.search(r"\bFROM\s+events\b", normalized, flags=re.IGNORECASE) and not re.search(r"\btimestamp\s*>=", normalized, flags=re.IGNORECASE):
+        raise ValueError("event queries must include a timestamp >= time predicate")
+    requested_limit = min(max(1, limit), MAX_QUERY_LIMIT)
+    if re.search(r"\bLIMIT\s+\d+\b", normalized, flags=re.IGNORECASE):
+        def clamp(match: re.Match[str]) -> str:
+            return f"LIMIT {min(int(match.group(1)), requested_limit, MAX_QUERY_LIMIT)}"
+        return re.sub(r"\bLIMIT\s+(\d+)\b", clamp, normalized, flags=re.IGNORECASE)
+    return f"{normalized} LIMIT {requested_limit}"
+
+
+def _redact_query_result(value: Any) -> Any:
+    if isinstance(value, dict):
+        columns = value.get("columns")
+        rows = value.get("results")
+        if isinstance(columns, list) and isinstance(rows, list):
+            kept = [
+                index
+                for index, column in enumerate(columns)
+                if str(column).lower() not in SENSITIVE_RESULT_KEYS
+                and not any(token in str(column).lower() for token in ("secret", "token", "password", "credential"))
+            ]
+            value = {
+                **value,
+                "columns": [columns[index] for index in kept],
+                "results": [
+                    [row[index] for index in kept if index < len(row)] if isinstance(row, list) else row
+                    for row in rows[:MAX_QUERY_LIMIT]
+                ],
+            }
+        return {
+            str(key): _redact_query_result(item)
+            for key, item in value.items()
+            if str(key).lower() not in SENSITIVE_RESULT_KEYS
+            and not any(token in str(key).lower() for token in ("secret", "token", "password", "credential"))
+        }
+    if isinstance(value, list):
+        return [_redact_query_result(item) for item in value[:MAX_QUERY_LIMIT]]
+    if isinstance(value, str):
+        return redact_text(value, max_len=500)
+    return value
+
+
+class PostHogQueryClient:
+    """Minimal read-only client for PostHog's HogQL query endpoint."""
+
+    def __init__(self, config: PostHogQueryConfig, *, send: Callable[[str, bytes, float, dict[str, str]], HTTPResult] | None = None) -> None:
+        self.config = config
+        self.send = send or self._send
+
+    def _send(self, url: str, body: bytes, timeout: float, headers: dict[str, str]) -> HTTPResult:
+        request = Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urlopen(request, timeout=timeout) as response:  # noqa: S310 - validated HTTPS
+                return HTTPResult(int(response.status), dict(response.headers.items()), response.read(1_000_000))
+        except HTTPError as exc:
+            return HTTPResult(int(exc.code), dict(exc.headers.items()), exc.read(4096))
+
+    def query(self, sql: str, *, limit: int = DEFAULT_QUERY_LIMIT) -> dict[str, Any]:
+        safe_sql = sanitize_hogql(sql, limit=limit)
+        body = json.dumps({"query": {"kind": "HogQLQuery", "query": safe_sql}}, separators=(",", ":")).encode("utf-8")
+        headers = {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json", "User-Agent": "agentbus-posthog-query/1"}
+        try:
+            response = self.send(self.config.query_url, body, self.config.request_timeout_seconds, headers)
+        except (OSError, URLError, TimeoutError) as exc:
+            raise RuntimeError(f"PostHog query unavailable: {type(exc).__name__}") from exc
+        if response.status != 200:
+            raise RuntimeError(f"PostHog query returned HTTP {response.status}")
+        try:
+            payload = json.loads(response.body)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("PostHog query returned invalid JSON") from exc
+        return {"query": safe_sql, "result": _redact_query_result(payload)}
 
 
 def _fsync_dir(path: Path) -> None:

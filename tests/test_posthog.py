@@ -13,10 +13,15 @@ from agentbus.posthog import (
     HTTPResult,
     PostHogConfig,
     PostHogExporter,
+    PostHogQueryClient,
+    PostHogQueryConfig,
     deterministic_uuid,
     load_config,
     map_event,
+    parse_time_range,
+    preset_hogql,
     runner_generation_payload,
+    sanitize_hogql,
 )
 from agentbus.store import EventStore
 
@@ -191,3 +196,46 @@ def test_cli_status_does_not_require_api_key(tmp_path: Path) -> None:
     status = json.loads(result.output)
     assert status["event_lag"] == 0
     assert status["host"] == "https://us.i.posthog.com"
+
+
+def test_query_presets_are_time_bounded_and_aggregate_only() -> None:
+    for name in ("swarm_health", "agent_throughput", "qa_summary", "lock_concurrency", "llm_cost_latency"):
+        sql = preset_hogql(name, 7)
+        assert "FROM events" in sql
+        assert "timestamp >= now() - INTERVAL 7 DAY" in sql
+        assert ";" not in sql
+
+
+def test_hogql_sanitizer_rejects_mutations_and_unbounded_event_scans() -> None:
+    with pytest.raises(ValueError, match="multi-statement"):
+        sanitize_hogql("SELECT 1; SELECT 2")
+    with pytest.raises(ValueError, match="timestamp"):
+        sanitize_hogql("SELECT * FROM events")
+    with pytest.raises(ValueError, match="mutating"):
+        sanitize_hogql("SELECT 1 FROM events WHERE timestamp >= now() - INTERVAL 1 DAY DELETE")
+    with pytest.raises(ValueError, match="payload"):
+        sanitize_hogql("SELECT payload FROM events WHERE timestamp >= now() - INTERVAL 1 DAY")
+    assert sanitize_hogql("SELECT 1", limit=500).endswith("LIMIT 100")
+    assert sanitize_hogql("SELECT 1 LIMIT 999", limit=50).endswith("LIMIT 50")
+    assert parse_time_range("7d") == 7
+    with pytest.raises(ValueError):
+        parse_time_range("7h")
+
+
+def test_query_client_uses_query_endpoint_bounded_body_and_redacts_results() -> None:
+    calls: list[tuple[str, dict, dict]] = []
+
+    def send(url: str, body: bytes, timeout: float, headers: dict[str, str]) -> HTTPResult:
+        assert timeout == 5.0
+        calls.append((url, json.loads(body), headers))
+        return HTTPResult(200, {}, json.dumps({"columns": ["metric", "payload"], "results": [[1, "ok"]], "secret": "nope", "payload": {"token": "nope"}}).encode())
+
+    client = PostHogQueryClient(PostHogQueryConfig("phx_test", "123"), send=send)
+    result = client.query("SELECT count() FROM events WHERE timestamp >= now() - INTERVAL 7 DAY", limit=500)
+    assert calls[0][0] == "https://us.i.posthog.com/api/projects/123/query/"
+    assert calls[0][1]["query"]["kind"] == "HogQLQuery"
+    assert calls[0][1]["query"]["query"].endswith("LIMIT 100")
+    assert calls[0][2]["Authorization"] == "Bearer phx_test"
+    assert "secret" not in result["result"]
+    assert "payload" not in result["result"]
+    assert result["result"]["columns"] == ["metric"]

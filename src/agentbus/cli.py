@@ -958,6 +958,73 @@ def posthog_status(workspace: str | None) -> None:
         raise click.ClickException(str(exc)) from exc
 
 
+def _posthog_output(result: dict, output_format: str) -> str:
+    """Render bounded query data without introducing an optional CLI dependency."""
+    if output_format == "json":
+        return json.dumps(result, sort_keys=True)
+    payload = result.get("result", {})
+    if output_format == "summary":
+        values = payload.get("results", payload) if isinstance(payload, dict) else payload
+        return json.dumps(values, sort_keys=True)
+    if not isinstance(payload, dict):
+        return json.dumps(payload, sort_keys=True)
+    columns = payload.get("columns")
+    rows = payload.get("results")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return json.dumps(payload, sort_keys=True)
+    labels = [str(column) for column in columns]
+    rendered_rows = [[str(value) for value in row] if isinstance(row, list) else [str(row)] for row in rows]
+    widths = [len(label) for label in labels]
+    for row in rendered_rows:
+        for index, value in enumerate(row[: len(widths)]):
+            widths[index] = max(widths[index], len(value))
+    line = " | ".join(label.ljust(widths[index]) for index, label in enumerate(labels))
+    separator = "-+-".join("-" * width for width in widths)
+    body = [" | ".join(value.ljust(widths[index]) for index, value in enumerate(row[: len(widths)])) for row in rendered_rows]
+    return "\n".join([line, separator, *body])
+
+
+@posthog.command("query")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--preset", type=click.Choice(["swarm_health", "agent_throughput", "qa_summary", "lock_concurrency", "llm_cost_latency"]))
+@click.option("--sql", default=None, help="One read-only, time-bounded HogQL statement")
+@click.option("--time-range", default="7d", show_default=True)
+@click.option("--limit", default=50, show_default=True, type=click.IntRange(1, 100))
+@click.option("--format", "output_format", default="summary", show_default=True, type=click.Choice(["summary", "json", "table"]))
+def posthog_query(
+    workspace: str | None, preset: str | None, sql: str | None, time_range: str, limit: int, output_format: str
+) -> None:
+    """Run a bounded read-only HogQL query or curated swarm KPI preset."""
+    from agentbus.posthog import PostHogQueryClient, load_query_config, parse_time_range, preset_hogql
+
+    _cli_workspace(workspace)
+    if bool(preset) == bool(sql):
+        raise click.ClickException("provide exactly one of --preset or --sql")
+    try:
+        query = preset_hogql(preset, parse_time_range(time_range)) if preset else str(sql)
+        result = PostHogQueryClient(load_query_config()).query(query, limit=limit)
+        click.echo(_posthog_output(result, output_format))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@posthog.command("report")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--preset", default="weekly_digest", type=click.Choice(["weekly_digest"]))
+@click.option("--format", "output_format", default="summary", show_default=True, type=click.Choice(["summary", "json", "table"]))
+def posthog_report(workspace: str | None, preset: str, output_format: str) -> None:
+    """Produce a bounded executive report from curated seven-day KPI queries."""
+    from agentbus.posthog import PostHogQueryClient, load_query_config, preset_hogql
+
+    _cli_workspace(workspace)
+    try:
+        client = PostHogQueryClient(load_query_config())
+        report = {name: client.query(preset_hogql(name, 7))["result"] for name in ("swarm_health", "agent_throughput", "qa_summary", "lock_concurrency", "llm_cost_latency")}
+        click.echo(_posthog_output({"result": {"preset": preset, "period": "7d", "metrics": report}}, output_format))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("project-log")
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option(
