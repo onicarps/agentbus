@@ -1,4 +1,4 @@
-"""v0.16 async suspend / await hard gates (Factory QA gates + design §4)."""
+"""v0.16 async suspend / await hard gates (Pi QA gates + design §4)."""
 
 from __future__ import annotations
 
@@ -101,13 +101,13 @@ def test_clamp_timeout_hours():
 
 
 def test_match_predicate_primary_and_self_guard():
-    pred = WaitPredicate(from_any=["factory"], causation_id=100, summary_contains="QA_VERDICT")
+    pred = WaitPredicate(from_any=["pi"], causation_id=100, summary_contains="QA_VERDICT")
     good = {
         "event_id": 200,
         "topic": "okf/handoff",
-        "producer_id": "factory",
+        "producer_id": "pi",
         "causation_id": 100,
-        "payload": {"from": "factory", "to": "grok", "summary": "QA_VERDICT: GREEN"},
+        "payload": {"from": "pi", "to": "grok", "summary": "QA_VERDICT: GREEN"},
     }
     assert match_predicate(pred, good, waiter_producer_id="grok") is True
 
@@ -130,7 +130,7 @@ def test_match_predicate_primary_and_self_guard():
 
 def test_typed_wait_requires_verified_signed_action():
     pred = WaitPredicate(
-        from_any=["factory"],
+        from_any=["pi"],
         causation_id=100,
         action_type="qa_verdict",
         action_result="green",
@@ -138,9 +138,9 @@ def test_typed_wait_requires_verified_signed_action():
     base = {
         "event_id": 201,
         "topic": "okf/handoff",
-        "producer_id": "factory",
+        "producer_id": "pi",
         "causation_id": 100,
-        "payload": {"from": "factory", "to": "codex", "summary": "QA_VERDICT: GREEN"},
+        "payload": {"from": "pi", "to": "codex", "summary": "QA_VERDICT: GREEN"},
     }
     assert not match_predicate(pred, base, waiter_producer_id="codex")
     assert not match_predicate(
@@ -172,7 +172,7 @@ def test_build_resume_schema_and_idempotency_keys(tmp_path: Path):
         producer_id="hermes",
         chain_key="394",
         origin_event_id=412,
-        predicate=WaitPredicate(from_any=["factory"], causation_id=412),
+        predicate=WaitPredicate(from_any=["pi"], causation_id=412),
         reason="wait factory",
         timeout_hours=4,
         wait_id="w_test1",

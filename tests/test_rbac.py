@@ -209,37 +209,36 @@ def test_protected_mode_ignores_rbac_disable_and_token_roles(tmp_path, monkeypat
 
 
 def test_protected_qa_droid_requires_agentid_not_legacy_proof(tmp_path):
+    """Legacy evidence symbol retained; Pi is the protected QA gate today."""
     ensure_default_roles(tmp_path)
     bootstrap_workspace_identity(tmp_path)
     enroll_identity(
         tmp_path,
-        "factory_droid",
+        "pi",
         capabilities=("message", "qa_verdict"),
         topics=("okf/handoff",),
     )
     set_policy_mode(tmp_path, "protected")
-    proof = mint_droid_proof(tmp_path)["droid_proof"]
     store = EventStore(tmp_path)
     payload = validate_payload(
         "okf/handoff",
         {
-            "from": "factory_droid",
+            "from": "pi",
             "to": "codex",
             "summary": "GREEN",
-            "droid_proof": proof,
         },
     )
     with pytest.raises(IdentityError, match="identity_verification_required"):
         store.publish(
             topic="okf/handoff",
-            producer_id="factory_droid",
+            producer_id="pi",
             schema_version="1.0",
             payload=payload,
             auto_sign=False,
         )
     event, _ = store.publish(
         topic="okf/handoff",
-        producer_id="factory_droid",
+        producer_id="pi",
         schema_version="1.0",
         payload=payload,
         action={"type": "qa_verdict", "result": "green"},

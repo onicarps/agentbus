@@ -77,6 +77,21 @@ def test_monitor_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
     assert not (tmp_path / ".agentbus" / "events.db").exists()
 
 
+def test_monitor_standalone_entrypoint(tmp_path):
+    from agentbus.cli import monitor_standalone
+
+    explicit = tmp_path / "standalone-isolated"
+    explicit.mkdir()
+
+    result = CliRunner().invoke(
+        monitor_standalone,
+        ["--workspace", str(explicit), "--once", "--plain"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (explicit / ".agentbus" / "events.db").is_file()
+
+
 def test_quiet_suppresses_noncritical_logger_output(capsys):
     import logging as lg
 

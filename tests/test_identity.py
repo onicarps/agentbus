@@ -183,6 +183,12 @@ def test_typed_actions_enforce_separation_of_duties(tmp_path: Path) -> None:
     bootstrap_workspace_identity(tmp_path)
     enroll_identity(
         tmp_path,
+        "pi",
+        capabilities=("message", "qa_verdict"),
+        topics=("okf/handoff",),
+    )
+    enroll_identity(
+        tmp_path,
         "factory",
         capabilities=("message", "qa_verdict"),
         topics=("okf/handoff",),
@@ -199,16 +205,16 @@ def test_typed_actions_enforce_separation_of_duties(tmp_path: Path) -> None:
         capabilities=("message", "qa_verdict", "agy_go", "release"),
         topics=("okf/handoff",),
     )
-    factory_payload = {"from": "factory", "to": "codex", "summary": "GREEN"}
+    pi_payload = {"from": "pi", "to": "codex", "summary": "GREEN"}
     qa = sign_event_envelope(
         tmp_path,
         topic="okf/handoff",
-        producer_id="factory",
+        producer_id="pi",
         schema_version="1.0",
-        payload=factory_payload,
+        payload=pi_payload,
         action={"type": "qa_verdict", "result": "green", "mission_id": "qa-1"},
     )
-    assert verify_envelope(tmp_path, qa, stored_payload=factory_payload).verified
+    assert verify_envelope(tmp_path, qa, stored_payload=pi_payload).verified
 
     agy_payload = {"from": "agy", "to": "codex", "summary": "Phase 4 GO"}
     go = sign_event_envelope(
@@ -225,6 +231,7 @@ def test_typed_actions_enforce_separation_of_duties(tmp_path: Path) -> None:
         ("codex", {"type": "qa_verdict", "result": "green"}),
         ("codex", {"type": "agy_go", "phase": "4"}),
         ("agy", {"type": "qa_verdict", "result": "green"}),
+        ("factory", {"type": "qa_verdict", "result": "green"}),
     ):
         with pytest.raises(IdentityError, match="action_producer_not_allowed"):
             sign_event_envelope(
@@ -240,18 +247,18 @@ def test_typed_actions_enforce_separation_of_duties(tmp_path: Path) -> None:
         sign_event_envelope(
             tmp_path,
             topic="okf/handoff",
-            producer_id="factory",
+            producer_id="pi",
             schema_version="1.0",
-            payload=factory_payload,
+            payload=pi_payload,
             action={"type": "pretend_factory"},
         )
     with pytest.raises(IdentityError, match="invalid_qa_verdict_result"):
         sign_event_envelope(
             tmp_path,
             topic="okf/handoff",
-            producer_id="factory",
+            producer_id="pi",
             schema_version="1.0",
-            payload=factory_payload,
+            payload=pi_payload,
             action={"type": "qa_verdict", "result": "maybe"},
         )
 
@@ -260,7 +267,7 @@ def test_store_publishes_and_binds_typed_action(tmp_path: Path) -> None:
     bootstrap_workspace_identity(tmp_path)
     enroll_identity(
         tmp_path,
-        "factory",
+        "pi",
         capabilities=("message", "qa_verdict"),
         topics=("okf/handoff",),
     )
@@ -268,9 +275,9 @@ def test_store_publishes_and_binds_typed_action(tmp_path: Path) -> None:
     store = EventStore(tmp_path)
     event, _ = store.publish(
         topic="okf/handoff",
-        producer_id="factory",
+        producer_id="pi",
         schema_version="1.0",
-        payload={"from": "factory", "to": "codex", "summary": "GREEN"},
+        payload={"from": "pi", "to": "codex", "summary": "GREEN"},
         action={"type": "qa_verdict", "result": "green", "mission_id": "qa-2"},
         skip_rbac=True,
     )
@@ -279,10 +286,10 @@ def test_store_publishes_and_binds_typed_action(tmp_path: Path) -> None:
     with pytest.raises(IdentityError, match="payload_action_mismatch"):
         store.publish(
             topic="okf/handoff",
-            producer_id="factory",
+            producer_id="pi",
             schema_version="1.0",
             payload={
-                "from": "factory",
+                "from": "pi",
                 "to": "codex",
                 "summary": "mismatch",
                 "action": {"type": "message"},
@@ -728,7 +735,7 @@ def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path)
     bootstrap_workspace_identity(tmp_path)
     key_id = enroll_identity(
         tmp_path,
-        "factory",
+        "pi",
         capabilities=("message", "qa_verdict"),
         topics=("okf/handoff",),
     )
@@ -743,9 +750,9 @@ def test_protected_cli_requires_explicit_matching_signing_handle(tmp_path: Path)
         "--topic",
         "okf/handoff",
         "--producer-id",
-        "factory",
+        "pi",
         "--payload",
-        json.dumps({"from": "factory", "to": "codex", "summary": "GREEN"}),
+        json.dumps({"from": "pi", "to": "codex", "summary": "GREEN"}),
         "--action",
         json.dumps({"type": "qa_verdict", "result": "green"}),
     ]

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okf-agentbus"
-version = "0.23.0"
+version = "0.24.0"
 description = "SQLite-backed MCP event bus and control surface for heterogeneous agent orchestration."
 readme = "README.md"
 license = { text = "MIT" }
@@ -28,14 +28,16 @@ dependencies = [
     "click>=8.0",
     "PyYAML>=6.0",
     "rfc8785==0.1.4",
-    "cryptography==50.0.0",
+    "cryptography~=50.0",
+    "rich>=13.0",
+    "textual>=0.80",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ipython>=8.0"]
 devex = ["rich>=13.0", "textual>=0.80"]
 sdk = ["pydantic>=2.0"]
-obs = ["watchdog>=4.0", "psutil>=5.9", "rich>=13.0", "textual>=0.80"]
+obs = ["watchdog>=4.0", "psutil>=5.9"]
 jupyter = ["ipython>=8.0"]
 
 [project.urls]
@@ -46,6 +48,7 @@ Documentation = "https://github.com/onicarps/agentbus/blob/main/docs/MCP_SCHEMA.
 
 [project.scripts]
 agentbus = "agentbus.cli:main"
+agentbus-monitor = "agentbus.cli:monitor_standalone"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentbus"]
@@ -73,6 +76,7 @@ only-include = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
     "integration: MCP integration validation (slower, optional in CI)",
 ]

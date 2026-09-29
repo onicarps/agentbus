@@ -4,9 +4,9 @@
 Agy strategy (2026-07-22, decision agy-slack-bridge-strategy):
   - producer_id: slack  (role bridge — Aider adds to roles.yaml)
   - channel meta via links: ["slack://{channel}/{ts}"]  (no schema change)
-  - inbound default to: agy (never swarm); parse @agent / /ask agent
+  - inbound always to: agy; preserve @agent / /ask agent as triage context
   - idempotency_key: slack:{channel}:{ts}
-  - outbound only to: slack; strict ops-noise suppress
+  - outbound only from: agy to: slack; strict ops-noise suppress
   - cold start: seek bus head (status.latest_event_id); cursor file
   - optional: not enabled by default in product package
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
@@ -34,6 +35,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants (aligned with Hermes Telegram standing orders / prompt_common)
@@ -49,31 +53,12 @@ OPS_SUMMARY_PREFIXES: tuple[str, ...] = (
     "SUPPRESS ACK",
 )
 
-KNOWN_AGENTS: frozenset[str] = frozenset(
-    {
-        "agy",
-        "grok",
-        "factory",
-        "hermes",
-        "aider",
-        "human",
-        "swarm",  # recognized but never used as default ingress target
-    }
-)
-
 DEFAULT_TO = "agy"
 PRODUCER_ID = "slack"
 HANDOFF_TOPIC = "okf/handoff"
 SUMMARY_MAX = 2000
 CURSOR_FILENAME = "slack_bridge.cursor"
 SLACK_URI_RE = re.compile(r"^slack://([^/]+)/(.+)$")
-
-# Target routing: @agent | /ask agent | agent:  (leading)
-TARGET_RE = re.compile(
-    r"^\s*(?:@|/ask\s+|/)(?P<a1>[a-z][a-z0-9_-]*)\b"
-    r"|(?P<a2>[a-z][a-z0-9_-]*):\s+",
-    re.IGNORECASE,
-)
 
 # Slack app_mention text usually starts with <@UBOTID> before @agent routing.
 BOT_MENTION_RE = re.compile(r"^(?:\s*<@[A-Za-z0-9]+>)+")
@@ -165,29 +150,14 @@ def strip_leading_bot_mentions(text: str) -> str:
 
 
 def parse_target_agent(text: str, default_to: str = DEFAULT_TO) -> tuple[str, str]:
-    """Parse routing from Slack text.
+    """Return the exclusive Agy route while preserving the human request.
 
-    Returns (to_agent, cleaned_summary).
-    Never returns swarm as the *default* when no target is specified.
-    Explicit `@swarm` / `swarm:` is still allowed if the human asks.
-
-    Leading bot user tokens (``<@UBOT>``) from ``app_mention`` are stripped so
-    ``@grok fix it`` still routes after ``@Bot @grok fix it``.
+    Slack is the human interface and Agy is its sole handler. A user mention
+    such as ``@codex`` is context for Agy, never a bus destination.
+    ``default_to`` remains for API compatibility and is deliberately ignored.
     """
-    raw = strip_leading_bot_mentions(text or "")
-    m = TARGET_RE.match(raw)
-    if not m:
-        return default_to, raw.strip()
-
-    agent = (m.group("a1") or m.group("a2") or "").lower()
-    if agent not in KNOWN_AGENTS:
-        # Unknown @mention — keep text, default triage
-        return default_to, raw.strip()
-
-    cleaned = raw[m.end() :].strip()
-    if not cleaned:
-        cleaned = raw.strip()
-    return agent, cleaned
+    del default_to
+    return DEFAULT_TO, strip_leading_bot_mentions(text or "").strip()
 
 
 def build_inbound_payload(
@@ -204,20 +174,16 @@ def build_inbound_payload(
     Channel metadata lives only in links (additionalProperties: false).
     ``ts`` should be ``thread_ts or ts`` so outbound threads under the root.
     """
-    to_agent, cleaned = parse_target_agent(text, default_to=default_to)
-    # Safety: chat ingress must not stampede the swarm unless explicit
-    if to_agent == "swarm" and default_to != "swarm":
-        # Explicit @swarm is intentional; leave it. Implicit never happens
-        # because parse_target_agent only returns swarm when matched.
-        pass
+    del default_to
+    to_agent, cleaned = parse_target_agent(text)
 
-    # Context engineering: explicit A2A reply directive so agents do not
-    # guess routing (Slack is primary UI; do not default to Hermes).
+    # The Slack context stays on the causal chain for Agy's eventual
+    # synthesized reply; it must never authorize a direct worker response.
     # Reserve budget so the SYSTEM directive is never truncated away.
     uri = slack_uri(channel, ts)
     system = (
-        f"(SYSTEM: Reply directly to 'slack' on the bus. "
-        f'You MUST include "links": ["{uri}"] in your reply payload!)'
+        "(SYSTEM: Substance replies must route to 'agy' on the bus with links "
+        "preserved. Only Agy communicates directly to Slack.)"
     )
     user_part = f"[slack:{user}] {cleaned}".strip()
     reserved = len(system) + 1  # newline
@@ -312,8 +278,12 @@ def should_accept_slack_message(event: dict[str, Any]) -> bool:
 
 
 def should_post_outbound(payload: dict[str, Any]) -> bool:
-    """Outbound: only explicit to=slack, never ops noise."""
+    """Forward only Agy's human-facing Slack reply, never ops noise."""
     if (payload.get("to") or "").strip().lower() != "slack":
+        return False
+    producer = (payload.get("from") or "").strip().lower()
+    if producer != "agy":
+        logger.warning("suppressing unauthorized Slack egress from producer=%r", producer)
         return False
     summary = payload.get("summary") or ""
     if summary.startswith("RUNNER_ACK") and "out=" in summary:

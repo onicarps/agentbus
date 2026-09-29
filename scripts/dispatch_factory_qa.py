@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Dispatch a comprehensive pre-push QA mission to Factory via AgentBus.
+"""Dispatch a comprehensive pre-push QA mission to Pi via AgentBus.
 
-Codex (engineer) runs this whenever code may ship. Factory owns execution.
+Codex (engineer) runs this whenever code may ship. Pi owns execution.
 """
 
 from __future__ import annotations
@@ -59,12 +59,14 @@ def git_snapshot(repo: Path) -> dict[str, str]:
 def render_mission(
     template: Path,
     *,
+    workspace: Path,
     initiative: str,
     repo: Path,
     mission_id: str,
     snap: dict[str, str],
     title: str,
     extra: str,
+    executor: str = "pi",
 ) -> Path:
     text = template.read_text(encoding="utf-8")
     filled = (
@@ -75,17 +77,14 @@ def render_mission(
         .replace("{{mission_id}}", mission_id)
         .replace("{{dispatch_event_id}}", "PENDING_PUBLISH")
     )
-    out_dir = Path.home() / "okf_agent_workspace" / "initiatives" / initiative / "missions"
-    # Prefer workspace from AGENTBUS_WORKSPACE
-    ws = Path(os.environ.get("AGENTBUS_WORKSPACE", Path.home() / "okf_agent_workspace"))
-    out_dir = ws / "initiatives" / initiative / "missions"
+    out_dir = workspace / "initiatives" / initiative / "missions"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in title)[:40]
     out = out_dir / f"mission_qa_{safe}_{stamp}.md"
     header = (
-        f"---\ntype: Mission\ntitle: {title}\nmission_id: {mission_id}\n"
-        f"status: dispatched\nrequester: codex\nexecutor: factory\n"
+        f"---\ntype: Mission\ntitle: {json.dumps(title, ensure_ascii=False)}\nmission_id: {mission_id}\n"
+        f"status: draft\nmission_state: dispatched\nrequester: codex\nexecutor: {executor}\n"
         f"generated:\n  by: codex\n  at: "
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}\n---\n\n"
         f"# {title}\n\n"
@@ -105,7 +104,7 @@ def render_mission(
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Dispatch Factory QA mission on AgentBus")
+    p = argparse.ArgumentParser(description="Dispatch Pi QA mission on AgentBus")
     p.add_argument("--workspace", default=os.environ.get("AGENTBUS_WORKSPACE", str(Path.home() / "okf_agent_workspace")))
     p.add_argument("--initiative", default="agentbus")
     p.add_argument("--repo", default=None, help="Git repo path (default: projects/agentbus under workspace)")
@@ -115,12 +114,24 @@ def main() -> int:
         default=None,
         help="Template path (default: initiatives/<init>/missions/mission_qa_prepush_template.md)",
     )
+    p.add_argument(
+        "--executor",
+        default="auto",
+        choices=["auto", "pi", "qa"],
+        help="Compatibility selector; every supported value dispatches exclusively to Pi",
+    )
     p.add_argument("--extra", default="")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--producer-id", default="codex")
     args = p.parse_args()
     if args.producer_id != "codex":
-        p.error("Factory QA dispatches from this helper must use producer_id=codex")
+        p.error("QA dispatches from this helper must use producer_id=codex")
+    if (
+        not args.initiative
+        or Path(args.initiative).name != args.initiative
+        or args.initiative in {".", ".."}
+    ):
+        p.error("initiative must be a single initiative directory name")
 
     ws = Path(args.workspace).expanduser().resolve()
     repo = Path(args.repo).expanduser().resolve() if args.repo else (ws / "projects" / "agentbus")
@@ -133,16 +144,25 @@ def main() -> int:
         print(f"template not found: {template}", file=sys.stderr)
         return 2
 
+    # ``auto`` and the legacy generic ``qa`` selector are deliberately aliases
+    # for Pi.  Never emit ``to: qa``: the parked Factory worker still observes
+    # that generic address in older workspace configurations.
+    target_to = "pi"
+    summary_prefix = "PI_QA_MISSION:"
+    mission_executor = "pi"
+
     mission_id = f"qa-{uuid.uuid4().hex[:12]}"
     snap = git_snapshot(repo)
     mission_path = render_mission(
         template,
+        workspace=ws,
         initiative=args.initiative,
         repo=repo,
         mission_id=mission_id,
         snap=snap,
         title=args.title,
         extra=args.extra,
+        executor=mission_executor,
     )
     # relative link for OKF
     try:
@@ -151,31 +171,42 @@ def main() -> int:
         rel_mission = str(mission_path)
 
     summary = (
-        f"FACTORY_QA_MISSION: {args.title} | mission_id={mission_id} | "
+        f"{summary_prefix} {args.title} | mission_id={mission_id} | "
         f"repo={repo.name}@{snap['git_head']} dirty={snap['dirty']} | "
-        f"Run full pre-push QA per mission file; reply QA_VERDICT GREEN|RED with causation_id. "
-        f"Use genuine Factory execution and include droid_proof when applicable. "
+        f"Run full pre-push QA per mission file; reply PI_QA_VERDICT GREEN|RED with causation_id. "
         f"Codex will not self-QA."
     )
     if len(summary) > 1900:
         summary = summary[:1900]
 
+    links = [
+        rel_mission,
+        "/runbooks/dispatch-factory-qa.md",
+        "/runbooks/swarm-session.md",
+    ]
+    links.append("/agents/pi.md")
+
     payload = {
         "from": "codex",
-        "to": "factory",
+        "to": target_to,
         "summary": summary,
         "initiative": args.initiative,
-        "links": [
-            rel_mission,
-            "/runbooks/dispatch-factory-qa.md",
-            "/runbooks/swarm-session.md",
-            "/agents/factory.md",
-        ],
+        "links": links,
     }
 
-    print(json.dumps({"mission_id": mission_id, "mission_path": str(mission_path), "payload": payload}, indent=2))
-
     if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "published": False,
+                    "mission_id": mission_id,
+                    "mission_path": str(mission_path),
+                    "to": target_to,
+                    "payload": payload,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     store = EventStore(ws)
@@ -206,7 +237,8 @@ def main() -> int:
                 "duplicate": dup,
                 "mission_id": mission_id,
                 "mission_path": str(mission_path),
-                "to": "factory",
+                "to": target_to,
+                "payload": payload,
             },
             indent=2,
         )

@@ -48,7 +48,7 @@ def test_ops_noise_prefixes_match_hermes(sb):
 
 
 # ---------------------------------------------------------------------------
-# Target routing — never default to swarm
+# Slack ingress — always route to Agy
 # ---------------------------------------------------------------------------
 
 
@@ -56,13 +56,13 @@ def test_ops_noise_prefixes_match_hermes(sb):
     "text,expected_to,contains",
     [
         ("hello swarm", "agy", "hello swarm"),
-        ("@grok ship it", "grok", "ship it"),
-        ("/ask factory run QA", "factory", "run QA"),
-        ("/hermes status?", "hermes", "status?"),
-        ("aider: restart health check", "aider", "restart health check"),
-        ("@agy triage this", "agy", "triage this"),
+        ("@grok ship it", "agy", "@grok ship it"),
+        ("/ask factory run QA", "agy", "/ask factory run QA"),
+        ("/hermes status?", "agy", "/hermes status?"),
+        ("aider: restart health check", "agy", "aider: restart health check"),
+        ("@agy triage this", "agy", "@agy triage this"),
         ("@unknown do stuff", "agy", "@unknown do stuff"),
-        ("@swarm broadcast please", "swarm", "broadcast please"),
+        ("@swarm broadcast please", "agy", "@swarm broadcast please"),
     ],
 )
 def test_parse_target_agent(sb, text, expected_to, contains):
@@ -71,10 +71,9 @@ def test_parse_target_agent(sb, text, expected_to, contains):
     assert contains in cleaned
 
 
-def test_default_to_never_swarm_for_plain_chat(sb):
-    to, _ = sb.parse_target_agent("what is the status?")
+def test_slack_ingress_cannot_override_agy(sb):
+    to, _ = sb.parse_target_agent("what is the status?", default_to="factory")
     assert to == "agy"
-    assert to != "swarm"
 
 
 # ---------------------------------------------------------------------------
@@ -97,20 +96,20 @@ def test_build_inbound_payload_schema_shape(sb):
         "initiative",
     }
     assert payload["from"] == "slack"
-    assert payload["to"] == "grok"
+    assert payload["to"] == "agy"
     assert payload["links"] == ["slack://C123/1710000000.000100"]
     assert "slack_channel" not in payload
     assert "[slack:U99]" in payload["summary"]
-    assert "fix the bridge" in payload["summary"]
-    assert "Reply directly to 'slack' on the bus" in payload["summary"]
+    assert "@grok fix the bridge" in payload["summary"]
+    assert "Substance replies must route to 'agy'" in payload["summary"]
     assert (
         sb.inbound_idempotency_key("C123", "1710000000.000100")
         == "slack:C123:1710000000.000100"
     )
 
 
-def test_inbound_payload_injects_a2a_routing_directive(sb):
-    """Slack primary-comms: agents must see explicit to=slack reply context."""
+def test_inbound_payload_injects_agy_ownership_directive(sb):
+    """Slack primary-comms: Agy must own and synthesize the response."""
     payload = sb.build_inbound_payload(
         text="plain question for triage",
         channel="D456",
@@ -118,7 +117,7 @@ def test_inbound_payload_injects_a2a_routing_directive(sb):
         user="oni",
     )
     assert payload["summary"].startswith("[slack:oni]")
-    assert "Reply directly to 'slack' on the bus" in payload["summary"]
+    assert "Substance replies must route to 'agy'" in payload["summary"]
     assert payload["links"] == ["slack://D456/99.1"]
 
 
@@ -142,7 +141,7 @@ def test_summary_truncated_to_2000(sb):
     )
     assert len(payload["summary"]) <= 2000
     # User body may ellipsize; SYSTEM directive is reserved and must remain.
-    assert "Reply directly to 'slack' on the bus" in payload["summary"]
+    assert "Substance replies must route to 'agy'" in payload["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +160,14 @@ def test_channel_from_links(sb):
     assert sb.parse_slack_uri("not-a-uri") is None
 
 
-def test_should_post_outbound_only_to_slack(sb):
-    assert sb.should_post_outbound({"to": "slack", "summary": "hello human"}) is True
+def test_should_post_outbound_only_to_slack(sb, caplog):
+    assert sb.should_post_outbound(
+        {"from": "agy", "to": "slack", "summary": "hello human"}
+    ) is True
+    assert sb.should_post_outbound(
+        {"from": "codex", "to": "slack", "summary": "hello human"}
+    ) is False
+    assert "unauthorized Slack egress" in caplog.text
     assert sb.should_post_outbound({"to": "human", "summary": "hello"}) is False
     assert sb.should_post_outbound({"to": "hermes", "summary": "hello"}) is False
     assert (
@@ -189,7 +194,7 @@ def test_runner_ack_out_allow_and_extract(sb):
     """RUNNER_ACK with out= is the Slack safety-net exception to ops suppress."""
     ack = {
         "to": "slack",
-        "from": "grok",
+        "from": "agy",
         "summary": (
             "RUNNER_ACK: grok completed event_id=1877 out="
             "Fix pack closed.\nSecond line."
@@ -197,7 +202,7 @@ def test_runner_ack_out_allow_and_extract(sb):
     }
     assert sb.should_post_outbound(ack) is True
     msg = sb.format_outbound_message(ack)
-    assert msg.startswith("*grok*")
+    assert msg.startswith("*agy*")
     assert "Fix pack closed." in msg
     assert "Second line." in msg
     assert "RUNNER_ACK" not in msg
@@ -210,17 +215,17 @@ def test_runner_ack_out_allow_and_extract(sb):
 
 
 def test_strip_bot_mention_before_target_parse(sb):
-    """app_mention text is often '<@UBOT> @grok fix it' — must still route."""
+    """Bot prefixes are stripped, but agent mentions cannot bypass Agy."""
     to, cleaned = sb.parse_target_agent("<@U0BOTID> @grok fix the bridge")
-    assert to == "grok"
-    assert cleaned == "fix the bridge"
+    assert to == "agy"
+    assert cleaned == "@grok fix the bridge"
     to2, cleaned2 = sb.parse_target_agent("<@U0BOTID> <@U0BOTID> /ask factory run QA")
-    assert to2 == "factory"
-    assert "run QA" in cleaned2
+    assert to2 == "agy"
+    assert cleaned2 == "/ask factory run QA"
     # Plain text without bot token unchanged
     to3, cleaned3 = sb.parse_target_agent("@agy triage")
     assert to3 == "agy"
-    assert cleaned3 == "triage"
+    assert cleaned3 == "@agy triage"
 
 
 def test_correlation_ts_prefers_thread_root(sb):
@@ -246,8 +251,8 @@ def test_system_directive_survives_long_user_text(sb):
         text=long, channel="C1", ts="1.0", user="u"
     )
     assert len(payload["summary"]) <= 2000
-    assert "Reply directly to 'slack' on the bus" in payload["summary"]
-    assert 'slack://C1/1.0' in payload["summary"]
+    assert "Substance replies must route to 'agy'" in payload["summary"]
+    assert payload["links"] == ["slack://C1/1.0"]
 
 
 def test_resolve_slack_channel_ts_direct_links(sb):
@@ -264,7 +269,7 @@ def test_resolve_slack_channel_ts_causation_backfill(sb):
             "causation_id": None,
             "payload": {
                 "from": "slack",
-                "to": "grok",
+                "to": "agy",
                 "summary": "hi",
                 "links": ["slack://C99/1.234"],
             },
@@ -272,13 +277,13 @@ def test_resolve_slack_channel_ts_causation_backfill(sb):
         11: {
             "event_id": 11,
             "causation_id": 10,
-            "payload": {"from": "agy", "to": "grok", "summary": "forward"},
+            "payload": {"from": "agy", "to": "codex", "summary": "forward"},
         },
         12: {
             "event_id": 12,
             "causation_id": 11,
             "payload": {
-                "from": "grok",
+                "from": "agy",
                 "to": "slack",
                 "summary": "RUNNER_ACK: done out=ok",
             },
@@ -405,13 +410,13 @@ def test_inbound_outbound_loop_smoke(sb):
         ts="200.5",
         user="oni",
     )
-    assert inbound["to"] == "grok"
+    assert inbound["to"] == "agy"
     assert inbound["from"] == "slack"
     link = inbound["links"][0]
 
-    # Agent substance reply routes only to slack with same link for threading
+    # Only Agy's synthesized reply routes to Slack with the same thread link.
     reply = {
-        "from": "grok",
+        "from": "agy",
         "to": "slack",
         "summary": "Rewrite complete; stay 0.16.3. CHAIN_BREAK",
         "links": [link],
@@ -425,7 +430,7 @@ def test_inbound_outbound_loop_smoke(sb):
 
     # Companion ACK must not post
     ack = {
-        "from": "grok",
+        "from": "agy",
         "to": "slack",
         "summary": "RUNNER_ACK: grok completed event_id=1",
         "links": [link],

@@ -49,11 +49,14 @@ def _utc_now() -> datetime:
 
 
 def _fmt(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Serialize UTC timestamps without discarding sub-second lease lifetime."""
+    return dt.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _parse(ts: str) -> datetime:
-    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 class LeaseStore:
@@ -138,7 +141,13 @@ class LeaseStore:
 
     def _purge_expired(self) -> None:
         cutoff = _fmt(_utc_now())
-        self._conn.execute("DELETE FROM leases WHERE expires_at <= ?", (cutoff,))
+        # `julianday` handles both legacy second-precision rows and new
+        # microsecond-precision rows. Raw string comparison would order the
+        # two ISO variants incorrectly at the same second.
+        self._conn.execute(
+            "DELETE FROM leases WHERE julianday(expires_at) <= julianday(?)",
+            (cutoff,),
+        )
         self._conn.commit()
 
     def _active_row(self, resource: str) -> sqlite3.Row | None:

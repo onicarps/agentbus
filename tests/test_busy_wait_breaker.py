@@ -102,6 +102,30 @@ def test_is_ops_noise_summary_prefixes():
     assert is_ops_noise_summary(None) is False
 
 
+def test_cli_prompt_routes_slack_substance_to_agy() -> None:
+    wake = WakeEnvelope(
+        event_id=9,
+        topic="okf/handoff",
+        from_agent="slack",
+        to="codex",
+        summary="please investigate",
+        payload={
+            "from": "slack",
+            "to": "codex",
+            "summary": "please investigate",
+            "links": ["slack://C123/1.23"],
+        },
+        source="wake_file",
+    )
+    prompt = build_cli_role_prompt(
+        role_name="Codex", role_hint="engineer", wake=wake, budget_remaining=3
+    )
+    assert "handoff `to: agy`" in prompt
+    assert "preserve" in prompt
+    assert "exclusive Slack handler" in prompt
+    assert "do not route substance\n  replies directly to `slack`" in prompt
+
+
 def test_loop_skips_ops_noise_without_llm_or_ack(tmp_path: Path, monkeypatch):
     """Inbound RUNNER_ACK must not spawn adapter or publish a re-ACK (storm fix)."""
     cfg_path = _write_runner_yaml(tmp_path / "runner.yaml")
@@ -207,7 +231,7 @@ def test_out_preview_preserves_newlines_and_fills_budget():
     assert len(out) > 500
 
 
-def test_prompt_common_human_ingress_routing_guidance():
+def test_prompt_common_slack_primary_guidance():
     wake = WakeEnvelope(
         event_id=1,
         topic="okf/handoff",
@@ -224,11 +248,12 @@ def test_prompt_common_human_ingress_routing_guidance():
         budget_remaining=5,
     )
     assert "primary UI = Slack" in prompt
-    assert "to `slack`" in prompt or "substance handoff to `slack`" in prompt
+    assert "handoff `to: agy`" in prompt
+    assert "exclusive Slack handler" in prompt
+    assert "directly to `slack`" in prompt
     assert "legacy Telegram" in prompt
     assert "to `telegram`" in prompt
     assert "telegram://{chat}/{message_id}" in prompt
-    assert "originating human channel" in prompt
 
 
 def test_turn_result_error_with_chain_break_still_suppresses():

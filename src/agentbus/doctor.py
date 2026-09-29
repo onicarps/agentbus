@@ -508,8 +508,7 @@ def check_optional_extras(workspace: Path) -> DiagnosticCheck:
             "WARN",
             "configured services need missing optional extras: "
             + ", ".join(f"{name} ({missing[name]})" for name in sorted(missing))
-            + ". Install with: pip install 'okf-agentbus[obs]' (obs includes the "
-            "devex TUI dependencies rich and textual as of 0.22.2)",
+            + ". Install with: pip install 'okf-agentbus[obs]'",
             {"missing": missing, "swarm_configures_watch": True},
         )
     if missing:
@@ -518,11 +517,11 @@ def check_optional_extras(workspace: Path) -> DiagnosticCheck:
             "OK",
             "optional extras absent but nothing configured requires them "
             f"({', '.join(sorted(missing))}); install 'okf-agentbus[obs]' for the "
-            "monitor TUI and watch service (obs now includes rich/textual)",
+            "watch service (rich and textual monitor TUI are built-in)",
             {"missing": missing, "swarm_configures_watch": False},
         )
     return DiagnosticCheck(
-        "optional_extras", "OK", "optional extras (rich, textual, watchdog) importable"
+        "optional_extras", "OK", "extras (rich, textual, watchdog) importable"
     )
 
 

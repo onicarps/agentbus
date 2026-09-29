@@ -1299,6 +1299,47 @@ def monitor(
     )
 
 
+@click.command(name="agentbus-monitor")
+@click.option(
+    "--workspace", default=None, help="Workspace root (default: git root or cwd)"
+)
+@click.option("--topic", default=None, help="Filter by topic")
+@click.option("--interval", default=1.0, show_default=True, help="Refresh seconds")
+@click.option("--once", is_flag=True, help="Print snapshot and exit")
+@click.option("--plain", is_flag=True, help="Plain/rich poll loop (no Textual TUI)")
+@click.option("--retention-days", default=7, show_default=True)
+@click.option(
+    "--tz",
+    "--timezone",
+    default=None,
+    envvar="AGENTBUS_TZ",
+    help="Display timezone (e.g. UTC, local, Asia/Tokyo, America/New_York)",
+)
+def monitor_standalone(
+    workspace: str | None,
+    topic: str | None,
+    interval: float,
+    once: bool,
+    plain: bool,
+    retention_days: int,
+    tz: str | None,
+) -> None:
+    """Standalone entrypoint for AgentBus God View Monitor."""
+    try:
+        ws = _cli_workspace(workspace)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    run_monitor(
+        ws,
+        topic=topic,
+        interval=interval,
+        once=once,
+        plain=plain,
+        retention_days=retention_days,
+        tz=tz,
+    )
+
+
 @main.group()
 def config() -> None:
     """Workspace intercept rules (HITL)."""

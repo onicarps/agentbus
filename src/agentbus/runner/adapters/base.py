@@ -67,7 +67,13 @@ def get_adapter(
         if workspace is None:
             raise ValueError("pi adapter requires workspace")
         return PiAdapter(workspace=workspace, options=options)
+    if kind == "freebuff":
+        from agentbus.runner.adapters.freebuff import FreebuffAdapter
+
+        if workspace is None:
+            raise ValueError("freebuff adapter requires workspace")
+        return FreebuffAdapter(workspace=workspace, options=options)
     raise ValueError(
         f"unknown adapter type {adapter_type!r} "
-        f"(supported: echo, hermes, factory, grok, agy, aider, codex, pi)"
+        f"(supported: echo, hermes, factory, grok, agy, aider, codex, pi, freebuff)"
     )

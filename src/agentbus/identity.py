@@ -71,7 +71,7 @@ ACTION_CAPABILITIES = {
     "identity_admin": "identity_admin",
 }
 DEFAULT_ACTION_PRODUCERS = {
-    "qa_verdict": ["factory", "factory_droid"],
+    "qa_verdict": ["pi"],
     "agy_go": ["agy"],
     "merge": ["codex"],
     "push": ["codex"],

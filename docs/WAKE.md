@@ -193,7 +193,7 @@ Cooperative **continuation-passing** waits (no LLM session freeze).
 ```bash
 # Inside a headless turn (AGENTBUS_WAKE_EVENT_ID set by adapter):
 agentbus await \
-  --expect-from factory \
+  --expect-from pi \
   --causation-id 412 \
   --action-type qa_verdict \
   --action-result green \

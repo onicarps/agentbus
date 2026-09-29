@@ -9,7 +9,17 @@ from typing import Any
 import yaml
 
 SUPPORTED_ADAPTERS = frozenset(
-    {"echo", "hermes", "factory", "grok", "agy", "aider", "codex", "pi"}
+    {
+        "echo",
+        "hermes",
+        "factory",
+        "grok",
+        "agy",
+        "aider",
+        "codex",
+        "pi",
+        "freebuff",
+    }
 )
 
 

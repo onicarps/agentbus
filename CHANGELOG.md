@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.24.0] - 2026-09-29
+
+### Packaging & Developer Experience (DX) for Beginners & Intermediates
+
+- **Built-in God View Monitor**: Moved `rich>=13.0` and `textual>=0.80` into core dependencies so `agentbus monitor` is available out-of-the-box on every install without needing `[devex]` or `[obs]` extras.
+- **Standalone `agentbus-monitor` command**: Registered `agentbus-monitor` in `pyproject.toml` and CLI entrypoints so users can launch the TUI directly.
+- **Fresh Boot & PEP 668 Resilient Installer**: Revamped `install.sh` to gracefully detect `uv`, `pipx`, existing venvs, and create an isolated tool environment (`~/.local/share/agentbus/venv`) with symlinks to `~/.local/bin/` when running in externally managed system Python environments.
+- **Beginner-Friendly README & Examples Guide**: Rewrote `README.md` with clear value propositions, 30-second quickstarts, copy-paste IDE configs (Cursor, Claude Desktop), practical examples (CLI handoffs, Python client, HITL intercepts, file locks), and created `examples/README.md`.
 
 ### Added — PostHog outbound telemetry
 
