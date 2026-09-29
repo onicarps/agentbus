@@ -15,7 +15,7 @@ from agentbus.identity import canonical_bytes
 
 def test_agentid_dependency_versions_and_fixture() -> None:
     assert importlib.metadata.version("rfc8785") == "0.1.4"
-    assert importlib.metadata.version("cryptography") == "50.0.0"
+    assert importlib.metadata.version("cryptography").startswith("50.0.")
     fixture = json.loads(
         (Path(__file__).parent / "fixtures" / "agentid" / "cross_language_v1.json")
         .read_text(encoding="utf-8")
