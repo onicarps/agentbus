@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 
 	"github.com/onicarps/agentbus-go/internal/store"
 )
@@ -52,8 +51,6 @@ func main() {
 
 	// Content-Length framed JSON-RPC over stdio (MCP transport subset).
 	in := bufio.NewReader(os.Stdin)
-	var nextID atomic.Int64
-	_ = nextID
 
 	for {
 		req, err := readMessage(in)

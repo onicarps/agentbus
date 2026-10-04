@@ -32,6 +32,6 @@ func (c Client) Call(operation string, body any, result any) error {
 	var resp struct { ProtocolVersion string `json:"protocol_version"`; RequestID string `json:"request_id"`; OK bool `json:"ok"`; Result json.RawMessage `json:"result"`; Error struct { Code string `json:"code"` } `json:"error"` }
 	if err = json.Unmarshal(buf, &resp); err != nil { return fmt.Errorf("invalid_broker_response") }
 	if resp.ProtocolVersion != ProtocolVersion || resp.RequestID != id { return fmt.Errorf("invalid_broker_response") }
-	if !resp.OK { if resp.Error.Code == "" { return fmt.Errorf("broker_request_failed") }; return fmt.Errorf(resp.Error.Code) }
+	if !resp.OK { if resp.Error.Code == "" { return fmt.Errorf("broker_request_failed") }; return fmt.Errorf("%s", resp.Error.Code) }
 	if result == nil { return nil }; return json.Unmarshal(resp.Result, result)
 }

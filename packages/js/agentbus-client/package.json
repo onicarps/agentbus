@@ -1,6 +1,6 @@
 {
   "name": "@agentbus/agentbus-client",
-  "version": "0.24.0",
+  "version": "0.24.1",
   "description": "TypeScript/Node EventEmitter client for AgentBus (MCP + fs.watch poll)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

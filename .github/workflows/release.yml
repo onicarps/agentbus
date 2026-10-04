@@ -11,7 +11,7 @@ permissions:
 # Platform matrix for Go helpers (Ruff-style: binaries inside platform wheels;
 # esbuild-style: separate npm optionalDependency packages). NO runtime downloads.
 env:
-  GO_VERSION: "1.22.12"
+  GO_VERSION: "1.26.8"
 
 jobs:
   # ---------------------------------------------------------------------------
