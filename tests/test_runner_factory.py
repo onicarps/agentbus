@@ -15,6 +15,7 @@ from agentbus.runner.adapters.factory import (
     build_factory_command,
     build_factory_prompt,
 )
+from agentbus.runner.adapters.pi import PiAdapter
 from agentbus.runner.types import WakeEnvelope
 from agentbus.store import EventStore
 
@@ -41,6 +42,9 @@ def test_build_factory_prompt_includes_event():
     assert "FACTORY_QA_MISSION" in p
     assert "causation_id=88" in p
     assert "budget_remaining_turns_on_chain: 4" in p
+    assert "implementation engineer" in p
+    assert "not a QA authority" in p
+    assert "qa / review" not in p
 
 
 def test_build_factory_command_shape(tmp_path: Path):
@@ -120,7 +124,40 @@ def test_factory_dry_run(tmp_path: Path):
     assert r.ok is True
     assert "RUNNER_ACK" in r.summary
     assert "dry_run" in r.summary
-    assert (tmp_path / ".agentbus" / "runs" / "1" / "prompt.md").is_file()
+    assert (tmp_path / ".agentbus" / "runs" / "factory" / "1" / "prompt.md").is_file()
+
+
+def test_factory_and_pi_prompts_are_isolated_by_runner_namespace(tmp_path: Path):
+    """A shared event must not let a Pi prompt overwrite Factory's prompt."""
+    event_id = 91
+    pi = PiAdapter(
+        workspace=tmp_path,
+        options={"dry_run": True, "_runner_id": "pi-runner-1"},
+    )
+    factory = FactoryAdapter(
+        workspace=tmp_path,
+        options={"dry_run": True, "_runner_id": "factory-runner-1"},
+    )
+
+    assert pi.start_turn(_wake(event_id), budget_remaining=3).ok
+    assert factory.start_turn(_wake(event_id), budget_remaining=3).ok
+
+    pi_prompt = (
+        tmp_path / ".agentbus" / "runs" / "pi-runner-1" / str(event_id) / "prompt.md"
+    )
+    factory_prompt = (
+        tmp_path
+        / ".agentbus"
+        / "runs"
+        / "factory-runner-1"
+        / str(event_id)
+        / "prompt.md"
+    )
+    assert pi_prompt.is_file()
+    assert factory_prompt.is_file()
+    assert pi_prompt.read_text(encoding="utf-8") != factory_prompt.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_factory_success_mocked(tmp_path: Path):

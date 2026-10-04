@@ -327,7 +327,9 @@ def test_loop_suppresses_runner_ack_on_chain_break(tmp_path: Path, monkeypatch):
         store.close()
 
     # Run log still written
-    assert (tmp_path / ".agentbus" / "runs" / "583" / "result.json").is_file()
+    assert (
+        tmp_path / ".agentbus" / "runs" / "test-runner-1" / "583" / "result.json"
+    ).is_file()
 
 
 def test_loop_still_publishes_ack_without_suppress(tmp_path: Path, monkeypatch):

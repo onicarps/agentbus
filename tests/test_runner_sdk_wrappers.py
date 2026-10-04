@@ -91,7 +91,7 @@ def test_grok_dry_run(tmp_path: Path):
     )
     assert r.ok is True
     assert "dry_run" in r.summary
-    assert (tmp_path / ".agentbus" / "runs" / "1" / "prompt.md").is_file()
+    assert (tmp_path / ".agentbus" / "runs" / "grok" / "1" / "prompt.md").is_file()
 
 
 def test_agy_dry_run(tmp_path: Path):

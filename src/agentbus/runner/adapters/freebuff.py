@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.artifacts import runner_artifact_dir
 from agentbus.runner.adapters.prompt_common import build_cli_role_prompt, runner_subprocess_env
 from agentbus.runner.types import TurnResult, WakeEnvelope
 
@@ -140,7 +141,9 @@ class FreebuffAdapter:
         if not bool(opts.get("dry_run")) and not self._skip_bin_check:
             if shutil.which(binary) is None and not Path(binary).is_file():
                 return TurnResult(ok=False, summary=f"RUNNER_ERROR: freebuff binary not found event_id={wake.event_id}")
-        run_dir = self.workspace / str(opts.get("runs_dir") or ".agentbus/runs") / str(wake.event_id)
+        run_dir = runner_artifact_dir(
+            self.workspace, opts, wake.event_id, fallback_runner_id="freebuff"
+        )
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt = build_freebuff_prompt(wake, budget_remaining=budget_remaining)
         prompt_path = run_dir / "freebuff-prompt.md"

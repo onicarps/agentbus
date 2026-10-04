@@ -60,7 +60,7 @@ def test_aider_dry_run(tmp_path: Path):
     r = ad.start_turn(_wake(1), budget_remaining=1)
     assert r.ok is True
     assert "dry_run" in r.summary
-    assert (tmp_path / ".agentbus" / "runs" / "1" / "prompt.md").is_file()
+    assert (tmp_path / ".agentbus" / "runs" / "aider" / "1" / "prompt.md").is_file()
 
 
 def test_aider_success_mocked(tmp_path: Path):

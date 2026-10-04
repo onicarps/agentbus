@@ -890,7 +890,12 @@ def test_protected_runner_rehydrates_and_drops_synthetic_wakes(tmp_path: Path) -
     assert results[0]["event_id"] == source.event_id
     run_result = json.loads(
         (
-            tmp_path / ".agentbus" / "runs" / str(source.event_id) / "result.json"
+            tmp_path
+            / ".agentbus"
+            / "runs"
+            / "hermes-runner-test"
+            / str(source.event_id)
+            / "result.json"
         ).read_text(encoding="utf-8")
     )
     assert run_result["wake"]["summary"] == "authentic task"

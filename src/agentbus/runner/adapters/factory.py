@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.artifacts import runner_artifact_dir
 from agentbus.runner.adapters.prompt_common import (
     runner_subprocess_env,
     turn_result_from_cli_exit,
@@ -22,7 +23,7 @@ RunFn = Callable[..., subprocess.CompletedProcess[str]]
 def build_factory_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
     """Task-only prompt for an isolated Factory droid turn."""
     lines = [
-        "# AgentBus headless Factory turn (QA role)",
+        "# AgentBus headless Factory turn (implementation engineer)",
         "",
         "You are Factory running as an AgentBus headless runner turn.",
         "This is an isolated turn — do not wait for a human in a TUI.",
@@ -44,9 +45,10 @@ def build_factory_prompt(wake: WakeEnvelope, *, budget_remaining: int) -> str:
         "",
         "- The outer `agentbus run` process will publish `RUNNER_ACK` / `RUNNER_ERROR`",
         f"  with causation_id={wake.event_id}. Prefer finishing the task over fighting bus schema.",
-        "- Factory is a parked legacy adapter and has no QA-certification authority.",
-        "  Do not publish a QA verdict. Route any QA evidence to Pi so Pi can",
-        f"  independently certify it with causation_id={wake.event_id} if appropriate.",
+        "- Factory accepts only explicit, bounded implementation assignments. It may run",
+        "  development checks for its own work, but it is not a QA authority and must not",
+        "  publish a QA verdict. Report implementation results and check evidence to",
+        "  Codex or Agy; Codex dispatches independent Pi pre-push QA when required.",
         "",
         "## Task summary",
         "",
@@ -188,11 +190,9 @@ class FactoryAdapter:
                     detail={"droid_bin": droid_bin},
                 )
 
-        runs_rel = str(opts.get("runs_dir") or ".agentbus/runs")
-        runs_dir = Path(runs_rel)
-        if not runs_dir.is_absolute():
-            runs_dir = self.workspace / runs_dir
-        run_dir = runs_dir / str(wake.event_id)
+        run_dir = runner_artifact_dir(
+            self.workspace, opts, wake.event_id, fallback_runner_id="factory"
+        )
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = run_dir / "prompt.md"
         prompt = build_factory_prompt(wake, budget_remaining=budget_remaining)

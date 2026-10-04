@@ -93,7 +93,7 @@ def test_echo_queue_once(tmp_path: Path):
     finally:
         store.close()
 
-    run_log = tmp_path / ".agentbus" / "runs" / "42" / "result.json"
+    run_log = tmp_path / ".agentbus" / "runs" / "test-runner-1" / "42" / "result.json"
     assert run_log.is_file()
 
     # second drain: already done
@@ -341,7 +341,14 @@ def test_rbac_rejected_adapter_output_uses_safe_ack_and_runner_marks_done(
     done = tmp_path / ".agentbus" / "ingress" / "codex_wake_done.ids"
     assert "10049" in done.read_text(encoding="utf-8")
     run_record = json.loads(
-        (tmp_path / ".agentbus" / "runs" / "10049" / "result.json").read_text()
+        (
+            tmp_path
+            / ".agentbus"
+            / "runs"
+            / "test-runner-1"
+            / "10049"
+            / "result.json"
+        ).read_text()
     )
     assert "PASS" in run_record["result"]["summary"]
     store = EventStore(tmp_path)

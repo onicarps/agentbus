@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.artifacts import runner_artifact_dir
 from agentbus.runner.adapters.prompt_common import (
     build_cli_role_prompt,
     runner_subprocess_env,
@@ -62,7 +63,9 @@ class PiAdapter:
         if not bool(opts.get("dry_run")) and not self._skip_bin_check:
             if shutil.which(pi_bin) is None and not Path(pi_bin).is_file():
                 return TurnResult(ok=False, summary=f"RUNNER_ERROR: pi binary not found event_id={wake.event_id}")
-        run_dir = self.workspace / str(opts.get("runs_dir") or ".agentbus/runs") / str(wake.event_id)
+        run_dir = runner_artifact_dir(
+            self.workspace, opts, wake.event_id, fallback_runner_id="pi"
+        )
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = run_dir / "prompt.md"
         prompt_path.write_text(build_pi_prompt(wake, budget_remaining=budget_remaining), encoding="utf-8")

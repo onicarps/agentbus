@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.artifacts import runner_artifact_dir
 from agentbus.runner.adapters.prompt_common import (
     build_cli_role_prompt,
     runner_subprocess_env,
@@ -120,11 +121,9 @@ class AiderAdapter:
                     detail={"aider_bin": aider_bin},
                 )
 
-        runs_rel = str(opts.get("runs_dir") or ".agentbus/runs")
-        runs_dir = Path(runs_rel)
-        if not runs_dir.is_absolute():
-            runs_dir = self.workspace / runs_dir
-        run_dir = runs_dir / str(wake.event_id)
+        run_dir = runner_artifact_dir(
+            self.workspace, opts, wake.event_id, fallback_runner_id="aider"
+        )
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = run_dir / "prompt.md"
         prompt = build_aider_prompt(wake, budget_remaining=budget_remaining)

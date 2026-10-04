@@ -11,6 +11,7 @@ from typing import Any
 
 from agentbus.resilience import publish_or_spill
 from agentbus.rbac import ForbiddenError
+from agentbus.runner.artifacts import runner_artifact_dir
 from agentbus.runner.adapters import get_adapter
 from agentbus.runner.adapters.prompt_common import is_ops_noise_summary
 from agentbus.runner.budget import ChainBudget
@@ -90,8 +91,12 @@ def _intake_hint(cfg: RunnerConfig) -> dict[str, Any]:
 def _write_run_log(
     workspace: Path, cfg: RunnerConfig, wake: WakeEnvelope, result: TurnResult
 ) -> Path:
-    runs = cfg.resolve(workspace, cfg.runs_dir) or (workspace / ".agentbus" / "runs")
-    run_dir = runs / str(wake.event_id)
+    run_dir = runner_artifact_dir(
+        workspace,
+        {"runs_dir": cfg.runs_dir, "_runner_id": cfg.runner_id},
+        wake.event_id,
+        fallback_runner_id=cfg.runner_id,
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "result.json"
     path.write_text(
@@ -233,7 +238,7 @@ def publish_companion_ack(
 ) -> dict[str, Any]:
     """Publish an ACK without letting untrusted adapter output kill the runner.
 
-    Adapter output is persisted in ``runs/<event_id>/result.json`` before this
+    Adapter output is persisted in ``runs/<runner_id>/<event_id>/result.json`` before this
     function is called.  If that output violates the producer's RBAC payload
     rules, publish a minimal operational ACK pointing at the durable record.
     The fallback deliberately contains no adapter-controlled text.
@@ -268,7 +273,7 @@ def publish_companion_ack(
         safe_summary = (
             f"RUNNER_ACK: {cfg.producer_id} completed event_id={wake.event_id}; "
             f"adapter output withheld by RBAC; see "
-            f".agentbus/runs/{wake.event_id}/result.json"
+            f".agentbus/runs/{cfg.runner_id}/{wake.event_id}/result.json"
         )
         publish_kwargs["payload"] = companion_ack_payload(
             producer_id=cfg.producer_id,
@@ -356,10 +361,15 @@ def process_envelope(
         remaining = budget.remaining(chain)
         turn_started = time.perf_counter()
         try:
+            adapter_options = dict(cfg.adapter.options)
+            # Runner-owned fields cannot be overridden by adapter configuration.
+            # This keeps all adapter artifacts and loop result records together.
+            adapter_options["_runner_id"] = cfg.runner_id
+            adapter_options["runs_dir"] = cfg.runs_dir
             adapter = get_adapter(
                 cfg.adapter.type,
                 workspace=workspace,
-                options=cfg.adapter.options,
+                options=adapter_options,
             )
             result = adapter.start_turn(wake, budget_remaining=remaining)
         except Exception as exc:  # noqa: BLE001 — poison-pill path

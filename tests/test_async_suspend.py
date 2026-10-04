@@ -450,6 +450,7 @@ def test_fulfillment_resume_and_budget_continuity(tmp_path: Path):
             tmp_path
             / ".agentbus"
             / "runs"
+            / "test-runner-1"
             / str(resume_ev["event_id"])
             / "result.json"
         )

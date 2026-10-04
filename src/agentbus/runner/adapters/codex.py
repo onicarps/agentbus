@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+from agentbus.runner.artifacts import runner_artifact_dir
 from agentbus.runner.adapters.prompt_common import (
     build_cli_role_prompt,
     runner_subprocess_env,
@@ -66,7 +67,9 @@ class CodexAdapter:
                     detail={"codex_bin": codex_bin},
                 )
 
-        run_dir = self.workspace / str(opts.get("runs_dir") or ".agentbus/runs") / str(wake.event_id)
+        run_dir = runner_artifact_dir(
+            self.workspace, opts, wake.event_id, fallback_runner_id="codex"
+        )
         run_dir.mkdir(parents=True, exist_ok=True)
         prompt = build_codex_prompt(wake, budget_remaining=budget_remaining)
         prompt_path = run_dir / "prompt.md"
