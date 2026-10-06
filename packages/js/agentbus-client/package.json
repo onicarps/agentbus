@@ -46,7 +46,7 @@
     "provenance": true
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "canonicalize": "4.0.0"
   },
   "devDependencies": {
@@ -58,6 +58,7 @@
     "hono": "^4.13.9",
     "qs": "^6.16.0",
     "fast-uri": "^3.1.8",
-    "ip-address": "^10.7.2"
+    "ip-address": "^10.7.2",
+    "proxy-addr": "^2.0.8"
   }
 }
