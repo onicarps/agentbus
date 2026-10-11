@@ -16,7 +16,7 @@ except ImportError:
     zoneinfo = None  # type: ignore
 
 from agentbus.auth import ensure_ephemeral_token, token_path
-from agentbus.rbac import ensure_default_roles
+from agentbus.rbac import bootstrap_default_producer, ensure_default_roles
 from agentbus.store import EventStore
 
 
@@ -38,6 +38,7 @@ class InitResult:
     updated: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     backups: list[str] = field(default_factory=list)
+    bootstrap_role: str | None = None
     dry_run: bool = True
 
 
@@ -148,7 +149,9 @@ def apply_init(
     clients: list[str] | None = None,
 ) -> InitResult:
     ensure_ephemeral_token(workspace, rotate=False)
+    bootstrap_role = None
     if not dry_run:
+        bootstrap_role = bootstrap_default_producer(workspace, producer_id)
         ensure_default_roles(workspace)
     marker = workspace / ".agentbus" / "workspace"
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +160,7 @@ def apply_init(
     result = InitResult(
         workspace=workspace,
         token_path=token_path(workspace),
+        bootstrap_role=bootstrap_role,
         dry_run=dry_run,
     )
 
@@ -211,6 +215,11 @@ def format_init_summary(result: InitResult) -> str:
     if result.updated:
         lines.append("Updates:")
         lines.extend(f"  - {u}" for u in result.updated)
+    if result.bootstrap_role:
+        lines.append(
+            f"RBAC: mapped new producer to least-privileged role "
+            f"'{result.bootstrap_role}'"
+        )
     if result.backups:
         lines.append("Backups:")
         lines.extend(f"  - {b}" for b in result.backups)

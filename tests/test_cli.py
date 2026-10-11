@@ -62,6 +62,41 @@ def test_init_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
     assert not (tmp_path / ".agentbus" / "token").exists()
 
 
+def test_fresh_init_producer_can_publish_the_documented_first_handoff(tmp_path):
+    runner = CliRunner()
+    workspace = str(tmp_path)
+
+    init = runner.invoke(
+        main,
+        ["init", "--workspace", workspace, "--producer-id", "my-agent", "--apply"],
+    )
+    assert init.exit_code == 0, init.output
+    assert "least-privileged role 'engineer'" in init.output
+
+    published = runner.invoke(
+        main,
+        [
+            "publish",
+            "--workspace",
+            workspace,
+            "--topic",
+            "okf/handoff",
+            "--producer-id",
+            "my-agent",
+            "--payload",
+            json.dumps(
+                {
+                    "from": "my-agent",
+                    "to": "reviewer",
+                    "summary": "Fresh-workspace handoff",
+                }
+            ),
+        ],
+    )
+    assert published.exit_code == 0, published.output
+    assert json.loads(published.output)["event_id"] == 1
+
+
 def test_monitor_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
     (tmp_path / ".agentbus").mkdir()
     explicit = tmp_path / "monitor-isolated"

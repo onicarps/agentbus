@@ -180,6 +180,32 @@ def ensure_default_roles(workspace: Path) -> RbacConfig:
     return config
 
 
+def bootstrap_default_producer(workspace: Path, producer_id: str) -> str | None:
+    """Map a first-run producer to the least-privileged default role.
+
+    ``agentbus init --producer-id NAME --apply`` is the documented fresh
+    workspace path.  A newly written default RBAC policy must therefore allow
+    that same producer to publish a first handoff.  We only add the mapping
+    while creating the default policy; an existing policy is administrator
+    owned and must never be widened implicitly.
+    """
+    normalized = producer_id.strip()
+    if not normalized:
+        return None
+
+    path = roles_path(workspace)
+    if path.is_file():
+        return None
+
+    config = ensure_default_roles(workspace)
+    if normalized in config.producers:
+        return None
+
+    config.producers[normalized] = "engineer"
+    save_rbac_config(workspace, config)
+    return "engineer"
+
+
 def resolve_role(
     workspace: Path,
     *,

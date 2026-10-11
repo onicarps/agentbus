@@ -20,16 +20,29 @@ You don't need complex configurations or Docker daemons to see AgentBus in actio
 ### 1. Install
 
 ```bash
-# Fastest: Installs AgentBus and configures your path automatically
-curl -sSL https://raw.githubusercontent.com/onicarps/agentbus/main/install.sh | bash
+# Installs AgentBus, its isolated Python runtime, and verifies the CLI.
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/onicarps/agentbus/main/install.sh | bash
 ```
 
-*(Or via package manager: `pip install okf-agentbus` or `pipx install okf-agentbus` — the interactive TUI monitor is bundled out-of-the-box!)*
+The installer does not create a bus in whichever directory you happened to run
+it from. It prints the direct command path for immediate use and adds its
+command directory to new interactive shells (bash, zsh, and fish).
+
+Create a project workspace and initialize your first agent:
+
+```bash
+mkdir -p ~/my-agent-workspace && cd ~/my-agent-workspace
+~/.local/bin/agentbus init --apply --producer-id my-agent
+```
+
+*(Or via package manager in an existing environment: `pipx install okf-agentbus`
+or `uv tool install okf-agentbus` — the interactive TUI monitor is bundled
+out-of-the-box.)*
 
 ### 2. Launch the Visual Monitor (Terminal A)
 
 ```bash
-agentbus monitor
+~/.local/bin/agentbus monitor
 ```
 *(Or use the standalone command: `agentbus-monitor`)*
 
@@ -43,9 +56,10 @@ You are now in the **God View TUI** dashboard:
 Open another terminal in the same folder and publish a handoff event:
 
 ```bash
-agentbus publish \
+~/.local/bin/agentbus publish \
   --topic okf/handoff \
-  --payload '{"from":"cursor","to":"claude","summary":"Added auth endpoints; please review and write tests."}'
+  --producer-id my-agent \
+  --payload '{"from":"my-agent","to":"reviewer","summary":"Added auth endpoints; please review and write tests."}'
 ```
 
 👉 **Look back at Terminal A:** the event immediately pops up on your monitor!
@@ -65,14 +79,16 @@ agentbus publish \
 
 ## 📦 Fresh Boot & Installation Guide
 
-AgentBus requires **Python 3.11+**. The God View interactive monitor (`rich` + `textual`) is **installed automatically** with the base package.
+AgentBus requires **Python 3.11+**. The one-command installer bootstraps an
+isolated runtime automatically, including on a machine without Python. The God
+View interactive monitor (`rich` + `textual`) is bundled with the base package.
 
 ### Option A: 1-Line Universal Installer (Recommended for fresh systems)
 
 Handles fresh boots, non-root environments, and Linux PEP 668 (`externally-managed-environment`) automatically:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/onicarps/agentbus/main/install.sh | bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/onicarps/agentbus/main/install.sh | bash
 ```
 
 ### Option B: Standalone CLI Tool (pipx or uv)
@@ -95,8 +111,10 @@ If you have an active project virtual environment (`.venv`):
 pip install -U okf-agentbus
 ```
 
-> **💡 Troubleshooting "Python / Virtual Environment" Issues:**
-> On modern Linux (Ubuntu 24.04+, Debian 12+) and macOS Homebrew, system Python restricts bare `pip install` to protect OS packages (PEP 668). If you see `error: externally-managed-environment`, either run the 1-line `curl` installer above (which creates an isolated tool runtime in `~/.local/share/agentbus/venv` and symlinks to `~/.local/bin/agentbus`) or use `pipx install okf-agentbus`.
+> **💡 System Python:** On modern Linux (Ubuntu 24.04+, Debian 12+) and macOS
+> Homebrew, system Python correctly rejects bare `pip install`. Use the
+> one-command installer above, `uv tool install okf-agentbus`, or `pipx install
+> okf-agentbus`; do not bypass the OS protection.
 
 ---
 
@@ -112,7 +130,10 @@ Navigate to your project workspace and run:
 agentbus init --apply --producer-id my-agent
 ```
 
-AgentBus scans for installed tools (Cursor, Claude Desktop, Antigravity) and automatically generates the necessary MCP configuration!
+For a fresh default workspace, `init` maps `my-agent` to the least-privileged
+`engineer` role so its first `okf/handoff` publish works. It scans for installed
+tools (Cursor, Claude Desktop, Antigravity) and automatically generates the
+necessary MCP configuration without changing existing custom RBAC policies.
 
 ### Manual IDE Configurations
 

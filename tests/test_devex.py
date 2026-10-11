@@ -35,6 +35,29 @@ def test_init_writes_workspace_marker(tmp_path):
     assert marker.read_text(encoding="utf-8").strip() == str(tmp_path.resolve())
 
 
+def test_init_bootstraps_a_new_producer_in_a_fresh_default_policy(tmp_path):
+    from agentbus.rbac import load_rbac_config
+
+    result = apply_init(tmp_path, producer_id="my-agent", dry_run=False)
+
+    config = load_rbac_config(tmp_path)
+    assert config is not None
+    assert config.producers["my-agent"] == "engineer"
+    assert result.bootstrap_role == "engineer"
+
+
+def test_init_does_not_widen_an_existing_policy_for_a_new_producer(tmp_path):
+    from agentbus.rbac import ensure_default_roles, load_rbac_config
+
+    ensure_default_roles(tmp_path)
+    result = apply_init(tmp_path, producer_id="my-agent", dry_run=False)
+
+    config = load_rbac_config(tmp_path)
+    assert config is not None
+    assert "my-agent" not in config.producers
+    assert result.bootstrap_role is None
+
+
 def test_init_apply_empty_json_config(tmp_path):
     mcp_dir = tmp_path / ".cursor"
     mcp_dir.mkdir()

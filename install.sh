@@ -1,126 +1,80 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+# AgentBus's zero-configuration installer. It installs only the CLI and its
+# runtime; workspace creation and MCP wiring belong in the user's project.
+set -euo pipefail
 
-echo "🚀 Installing AgentBus & God View Monitor..."
+readonly APP_NAME="AgentBus"
+# Override only for release-candidate smoke tests; public installs use PyPI.
+readonly PACKAGE_NAME="${AGENTBUS_PACKAGE_NAME:-okf-agentbus}"
+readonly PYTHON_VERSION="3.11"
+readonly BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+UV_BIN=""
 
-# 1. Verify Python 3
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "❌ Error: Python 3 (3.11+) is required to install AgentBus."
-    echo "Please install Python 3 and retry:"
-    echo "  Debian/Ubuntu: sudo apt update && sudo apt install -y python3 python3-venv python3-pip"
-    echo "  macOS:         brew install python"
-    echo "  Fedora:        sudo dnf install -y python3 python3-pip"
-    exit 1
-fi
-
-PYTHON_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 11) else 0)' 2>/dev/null || echo 0)
-if [ "$PYTHON_OK" != "1" ]; then
-    echo "❌ Error: Python 3.11 or higher is required. Found: $(python3 --version 2>&1)"
-    exit 1
-fi
-
-# 2. Install okf-agentbus (with monitor dependencies automatically included)
-BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
-INSTALLED_VIA=""
-
-if command -v uv >/dev/null 2>&1; then
-    echo "📦 Installing via uv tool..."
-    uv tool install --upgrade okf-agentbus
-    INSTALLED_VIA="uv"
-elif command -v pipx >/dev/null 2>&1; then
-    echo "📦 Installing via pipx..."
-    pipx install --force okf-agentbus
-    INSTALLED_VIA="pipx"
-elif [ -n "$VIRTUAL_ENV" ]; then
-    echo "📦 Active virtual environment detected ($VIRTUAL_ENV). Installing via pip..."
-    python3 -m pip install -U okf-agentbus
-    INSTALLED_VIA="venv"
-else
-    # Fresh boot / system python without venv: avoid PEP 668 "externally-managed-environment" error
-    AGENTBUS_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/agentbus"
-    VENV_DIR="$AGENTBUS_HOME/venv"
-    mkdir -p "$AGENTBUS_HOME" "$BIN_DIR"
-
-    echo "📦 Fresh environment detected. Setting up dedicated isolated runtime in:"
-    echo "   $VENV_DIR"
-
-    if [ ! -d "$VENV_DIR" ]; then
-        if ! python3 -m venv "$VENV_DIR" 2>/dev/null; then
-            echo "⚠️  Python venv module not found. Attempting pip user install..."
-            python3 -m pip install --user -U okf-agentbus || {
-                echo "❌ Could not create virtualenv or install via pip."
-                echo "Please install python3-venv: sudo apt install python3-venv"
-                exit 1
-            }
-        fi
+ensure_shell_path() {
+    local shell_name rc marker
+    shell_name="${SHELL##*/}"
+    marker="# Added by ${APP_NAME} installer"
+    case "${shell_name:-bash}" in
+        zsh) rc="$HOME/.zshrc" ;;
+        fish)
+            rc="$HOME/.config/fish/conf.d/agentbus.fish"
+            mkdir -p "$(dirname "$rc")"
+            touch "$rc"
+            if ! grep -Fqx "$marker" "$rc"; then
+                printf '\n%s\nfish_add_path %s\n' "$marker" "$BIN_DIR" >> "$rc"
+            fi
+            return
+            ;;
+        *) rc="$HOME/.bashrc" ;;
+    esac
+    mkdir -p "$(dirname "$rc")"
+    touch "$rc"
+    if ! grep -Fqx "$marker" "$rc"; then
+        printf '\n%s\nexport PATH="%s:$PATH"\n' "$marker" "$BIN_DIR" >> "$rc"
     fi
+}
 
-    if [ -d "$VENV_DIR" ]; then
-        "$VENV_DIR/bin/pip" install --upgrade pip -q
-        "$VENV_DIR/bin/pip" install -U okf-agentbus -q
-        ln -sf "$VENV_DIR/bin/agentbus" "$BIN_DIR/agentbus"
-        ln -sf "$VENV_DIR/bin/agentbus-monitor" "$BIN_DIR/agentbus-monitor"
-        export PATH="$BIN_DIR:$PATH"
-        INSTALLED_VIA="isolated-venv"
+bootstrap_uv() {
+    if command -v uv >/dev/null 2>&1; then
+        UV_BIN="$(command -v uv)"
+        return
     fi
-fi
-
-# Ensure agentbus is available in PATH
-if ! command -v agentbus >/dev/null 2>&1; then
-    if [ -x "$BIN_DIR/agentbus" ]; then
-        export PATH="$BIN_DIR:$PATH"
+    if [ -x "$BIN_DIR/uv" ]; then
+        UV_BIN="$BIN_DIR/uv"
+        return
     fi
-fi
-
-AGENTBUS_CMD="agentbus"
-if ! command -v agentbus >/dev/null 2>&1; then
-    if [ -x "$BIN_DIR/agentbus" ]; then
-        AGENTBUS_CMD="$BIN_DIR/agentbus"
-    else
-        echo "❌ agentbus executable not found in PATH or $BIN_DIR."
+    if ! command -v curl >/dev/null 2>&1; then
+        printf '%s\n' "${APP_NAME} needs curl for this one-command bootstrap." >&2
+        printf '%s\n' "Install curl, then rerun the same command." >&2
         exit 1
     fi
-fi
 
-echo "🔌 Auto-discovering and wiring MCP configurations..."
-PRODUCER_ID="local-$(hostname -s 2>/dev/null || echo $RANDOM)"
-if "$AGENTBUS_CMD" init --apply --producer-id "$PRODUCER_ID"; then
-    echo "✅ MCP configuration discovery completed."
-else
-    echo "⚠️  AgentBus is installed, but automatic MCP configuration did not complete."
-    echo "   Review the diagnostic above, then rerun: $AGENTBUS_CMD init --apply --producer-id $PRODUCER_ID"
-fi
+    mkdir -p "$BIN_DIR"
+    printf '%s\n' "Bootstrapping uv and an isolated Python runtime..."
+    UV_INSTALL_DIR="$BIN_DIR" curl --proto '=https' --tlsv1.2 -LsSf \
+        https://astral.sh/uv/install.sh | sh
+    if [ ! -x "$BIN_DIR/uv" ]; then
+        printf '%s\n' "uv bootstrap did not create $BIN_DIR/uv" >&2
+        exit 1
+    fi
+    UV_BIN="$BIN_DIR/uv"
+}
 
-if [ ! -f "AGENTS.md" ]; then
-    echo "📜 Generating default AGENTS.md rule file..."
-    cat << 'EOF' > AGENTS.md
-# Swarm Protocol (AgentBus)
-You are part of a multi-agent swarm. All cross-agent communication MUST happen via the AgentBus.
-- Use `agentbus_publish` to report task completion, ask for help, or hand off tasks to other agents.
-- Check `agentbus_poll` frequently to see if tasks have been assigned to you.
-- If you encounter a critical action (like deleting a database), publish an event to `okf/handoff` and wait for Human-in-the-Loop (HITL) approval.
-EOF
-fi
+main() {
+    bootstrap_uv
+    mkdir -p "$BIN_DIR"
 
-echo ""
-echo "====================================================================="
-echo "🎉 AgentBus & God View Monitor successfully installed!"
-echo "====================================================================="
-echo ""
-echo "1. Launch the interactive God View TUI dashboard:"
-echo "   agentbus monitor    (or: agentbus-monitor)"
-echo ""
-echo "2. Publish your first agent event in another terminal:"
-echo "   agentbus publish \\"
-echo "     --topic okf/handoff \\"
-echo "     --payload '{\"from\":\"alice\",\"to\":\"bob\",\"summary\":\"Hello from AgentBus!\"}'"
-echo ""
+    # --managed-python allows a fresh machine with no Python installation to
+    # receive a compatible runtime automatically.
+    UV_TOOL_BIN_DIR="$BIN_DIR" "$UV_BIN" tool install --upgrade \
+        --python "$PYTHON_VERSION" --managed-python "$PACKAGE_NAME"
+    ensure_shell_path
 
-case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *)
-        echo "💡 Tip: Add $BIN_DIR to your PATH if not already present:"
-        echo "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
-        echo ""
-        ;;
-esac
+    printf '\n%s\n' "${APP_NAME} installed successfully."
+    "$BIN_DIR/agentbus" --version
+    printf '%s\n' "Next: mkdir -p ~/my-agent-workspace && cd ~/my-agent-workspace"
+    printf '%s\n' "Then: $BIN_DIR/agentbus init --apply --producer-id my-agent"
+    printf '%s\n' "Future terminals can use: agentbus"
+}
+
+main "$@"
