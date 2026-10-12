@@ -10,7 +10,7 @@
 
 ## 1. Context & Problem Statement
 
-AgentBus coordinates heterogeneous autonomous agents (`agy`, `codex`, `factory`, `slack`, `hermes`) communicating across shared storage (`events.db`), runner loops, and dispatch planes.
+AgentBus coordinates heterogeneous autonomous agents (`agy`, `codex`, `factory`, `hermes`) communicating across shared storage (`events.db`), runner loops, and dispatch planes.
 
 Prior to v0.20, AgentBus lacked cryptographic verification of actor boundaries:
 1. `producer_id` and `payload.from` were caller-supplied strings.

@@ -11,7 +11,7 @@ What agents/clients are you running? What coordination problem are you solving?
 
 ## Current workaround
 
-How do you handle this today (`log.md`, Redis, Slack, etc.)?
+How do you handle this today (`log.md`, Redis, direct terminal workflows, etc.)?
 
 ## Proposed behavior
 

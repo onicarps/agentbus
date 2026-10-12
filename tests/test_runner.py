@@ -252,8 +252,8 @@ def test_idempotent_ack(tmp_path: Path):
         store.close()
 
 
-def test_companion_ack_copies_slack_links(tmp_path: Path):
-    """P0: Slack-origin wakes must put slack:// links on companion RUNNER_ACK."""
+def test_companion_ack_does_not_copy_wake_links(tmp_path: Path):
+    """Operational companion ACKs do not copy source transport links."""
     cfg_path = _write_runner_yaml(
         tmp_path / "runner.yaml",
         producer_id="grok",
@@ -262,12 +262,12 @@ def test_companion_ack_copies_slack_links(tmp_path: Path):
     )
     qdir = tmp_path / ".agentbus" / "ingress"
     qdir.mkdir(parents=True, exist_ok=True)
-    link = "slack://C123/1710000000.000100"
+    link = "telegram://C123/1710000000.000100"
     rec = {
         "received_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "event_id": 1877,
         "runtime": "grok",
-        "from": "slack",
+        "from": "telegram",
         "to": "grok",
         "summary": "please fix",
         "topic": "okf/handoff",
@@ -275,14 +275,14 @@ def test_companion_ack_copies_slack_links(tmp_path: Path):
             "event_id": 1877,
             "topic": "okf/handoff",
             "payload": {
-                "from": "slack",
+                "from": "telegram",
                 "to": "grok",
                 "summary": "please fix",
                 "links": [link],
             },
         },
         "payload": {
-            "from": "slack",
+            "from": "telegram",
             "to": "grok",
             "summary": "please fix",
             "links": [link],
@@ -300,8 +300,8 @@ def test_companion_ack_copies_slack_links(tmp_path: Path):
         events = store.poll("okf/handoff", since_id=0)["events"]
         assert len(events) == 1
         ack = events[0]
-        assert ack["payload"]["to"] == "slack"
-        assert ack["payload"]["links"] == [link]
+        assert ack["payload"]["to"] == "telegram"
+        assert "links" not in ack["payload"]
         assert "RUNNER_ACK" in ack["payload"]["summary"]
     finally:
         store.close()

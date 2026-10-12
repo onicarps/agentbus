@@ -103,17 +103,17 @@ def runner_subprocess_env(
 
 
 def format_cli_out_preview(preview: str | None, max_len: int) -> str:
-    """Format CLI stdout for companion ACK ``out=`` (Slack-readable).
+    """Format CLI stdout for a human-readable companion ACK ``out=``.
 
-    Historically collapsed *all* whitespace to a single 500-char line, which
-    destroyed markdown/code and made the Slack ``out=`` safety-net unusable.
+    Historically this collapsed *all* whitespace to a single 500-char line,
+    which destroyed markdown/code and made the ``out=`` safety-net unusable.
     Preserve newlines (soft-collapse horizontal runs only) and fill up to
     ``max_len`` (caller should reserve room so full summary ≤ schema max).
     """
     text = (preview or "").strip()
     if not text:
         return ""
-    # Collapse horizontal whitespace; keep newlines for multi-line Slack posts.
+    # Collapse horizontal whitespace; keep newlines for multi-line summaries.
     text = re.sub(r"[^\S\n]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     if max_len <= 0:
@@ -225,14 +225,11 @@ def build_cli_role_prompt(
         f"  / RUNNER_SUSPEND with causation_id={wake.event_id}. Prefer finishing the task.",
         "- If you must publish yourself, use full okf/handoff fields",
         f"  (from, to, summary) and causation_id={wake.event_id}.",
-        "- **Human-visible answers (primary UI = Slack):** companion RUNNER_ACK is",
-        "  ops-only. For Slack-originated work, publish a separate substance",
-        "  handoff `to: agy` and **preserve** the incoming `slack://{channel}/{ts}`",
-        "  wake link. Agy is the exclusive Slack handler; do not route substance",
-        "  replies directly to `slack`. Telegram-origin work goes to `telegram`",
+        "- **Human-visible answers:** companion RUNNER_ACK is ops-only. Canonical",
+        "  human communication uses direct CLI/terminal interaction and AgentBus",
+        "  handoffs. Telegram-origin work goes to `telegram`",
         "  with its corresponding `telegram://{chat}/{message_id}` link.",
-        "  Hermes is **legacy Telegram only** — do not default Slack-origin work",
-        "  to `hermes`/`human`. Substance summaries must **not** start with",
+        "  Hermes is **legacy Telegram only**. Substance summaries must **not** start with",
         "  RUNNER_ACK/ERROR/SUSPEND/NO-OP/TERMINAL_IDLE/CHAIN_BREAK",
         "  (plain language answer or CLOSED/status).",
         "",

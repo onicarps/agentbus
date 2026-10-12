@@ -19,5 +19,8 @@ src/agentbus/bin/**
 packages/js/go-worker-*/bin/**
 !packages/js/go-worker-*/bin/.gitkeep
 .mypy_cache/
+# Local, untracked engineering probes; not part of the AgentBus package.
+__init__.py
+_c47_probe_reaper.py
 uv.lock
 log.md

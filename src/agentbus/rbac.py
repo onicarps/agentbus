@@ -162,7 +162,6 @@ def default_rbac_config() -> RbacConfig:
             "factory_droid": "qa_droid",
             "aider": "ops",
             "pi": "qa",
-            "slack": "bridge",
             "wiretap": "observer",
             "os-watcher": "observer",
             "swarm-tail": "observer",

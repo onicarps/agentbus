@@ -186,21 +186,6 @@ def should_skip(wake: WakeEnvelope, cfg: RunnerConfig) -> str | None:
     return None
 
 
-def slack_links_from_wake(wake: WakeEnvelope) -> list[str] | None:
-    """Return slack:// links from the wake payload for companion ACK threading.
-
-    Slack bridge outbound uses payload.links to set channel + thread_ts. Without
-    this copy, companion RUNNER_ACK (to=slack) posts unthreaded or to the default
-    channel only (P0 fix pack 2026-07-22).
-    """
-    payload = wake.payload if isinstance(wake.payload, dict) else {}
-    raw_links = payload.get("links")
-    if not isinstance(raw_links, list):
-        return None
-    slack = [str(link) for link in raw_links if str(link).startswith("slack://")]
-    return slack or None
-
-
 def companion_ack_payload(
     *,
     producer_id: str,
@@ -208,7 +193,7 @@ def companion_ack_payload(
     summary: str,
     wake: WakeEnvelope,
 ) -> dict[str, Any]:
-    """Build okf/handoff companion ACK/ERROR/SUSPEND payload (links preserved)."""
+    """Build an operational okf/handoff companion ACK/ERROR/SUSPEND payload."""
     payload: dict[str, Any] = {
         "from": producer_id,
         "to": reply_to if reply_to not in BROADCAST_TO else "agy",
@@ -219,9 +204,6 @@ def companion_ack_payload(
             "status": "ops_only",
         },
     }
-    links = slack_links_from_wake(wake)
-    if links:
-        payload["links"] = links
     return payload
 
 

@@ -470,12 +470,11 @@ def _bounded_scalar(value: Any, *, max_length: int = 160) -> Any | None:
     return None
 
 
-def _origin_flags(links: Any) -> tuple[bool, bool, int]:
+def _origin_flags(links: Any) -> tuple[bool, int]:
     if not isinstance(links, list):
-        return False, False, 0
+        return False, 0
     schemes = [str(link).split("?", 1)[0] for link in links]
     return (
-        any(link.startswith("slack://") for link in schemes),
         any(link.startswith("telegram://") for link in schemes),
         len(links),
     )
@@ -544,13 +543,12 @@ def map_event(event: dict[str, Any], ws_id: str) -> dict[str, Any] | None:
         properties = _qa_properties(event, payload)
     elif topic == "okf/handoff":
         name = "swarm_handoff_dispatched"
-        slack, telegram, link_count = _origin_flags(payload.get("links"))
+        telegram, link_count = _origin_flags(payload.get("links"))
         properties = {
             "from_agent": _bounded_scalar(payload.get("from") or event.get("producer_id")),
             "to_agent": _bounded_scalar(payload.get("to")),
             "topic": "okf/handoff",
             "initiative": _bounded_scalar(payload.get("initiative")),
-            "has_slack_origin": slack,
             "has_telegram_origin": telegram,
             "link_count": link_count,
             "summary_length": len(str(payload.get("summary") or "")),
