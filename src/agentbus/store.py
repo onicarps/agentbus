@@ -638,6 +638,12 @@ class EventStore:
                     "%Y-%m-%dT%H:%M:%SZ"
                 )
 
+        if event_status == STATUS_PENDING and event_pending_until is None:
+            ttl = timedelta(minutes=DEFAULT_TTL_MINUTES)
+            event_pending_until = (datetime.now(timezone.utc) + ttl).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+
         sla_deadline = None
         if sla_timeout_minutes is not None and event_status == STATUS_PUBLISHED:
             sla_deadline = self._sla_deadline_from_now(sla_timeout_minutes)

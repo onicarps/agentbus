@@ -24,3 +24,6 @@ __init__.py
 _c47_probe_reaper.py
 uv.lock
 log.md
+# The broad log.md rule above would otherwise drop the packaged OKF scaffold
+# template from wheels and sdists, breaking `agentbus init --okf`.
+!src/agentbus/templates/okf/okf/log.md

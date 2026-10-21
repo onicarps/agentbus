@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 from click.testing import CliRunner
@@ -88,6 +89,24 @@ def test_auto_reject_on_ttl_expiry(store, tmp_path):
     updated = store.get_event(event.event_id)
     assert updated is not None
     assert updated.status == STATUS_REJECTED
+
+
+def test_publish_pending_without_deadline_assigns_default_ttl(store):
+    event, _ = store.publish(
+        topic="okf/handoff",
+        producer_id="grok",
+        schema_version="1.0",
+        payload=_handoff("blocked action"),
+        status=STATUS_PENDING,
+        skip_intercept=True,
+    )
+    assert event.status == STATUS_PENDING
+    assert event.pending_until is not None
+
+    # Verify deadline is set in the future
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert event.pending_until > now_iso
+
 
 
 def test_cli_config_review_approve(tmp_path):

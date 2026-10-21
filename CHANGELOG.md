@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.25.0] - 2026-10-21
+
+### Added — Directory-Native OKF v0.2 Knowledge Plane & Handoff Distillation
+
+- **Scaffold Engine (`src/agentbus/scaffold.py`)**:
+  - Deterministic OKF v0.2 concept tree bootstrapping (`AGENTS.md`, `okf/index.md`, `okf/status.md`, `okf/intent.yaml`, `okf/log.md`, `okf/harness/runners.toml`, `okf/harness/droid.md`).
+  - Safe preflight conflict detection with manifest tracking (`.scaffold-manifest.json`). Preserves user edits across re-runs.
+  - User-owned root file preservation (`AGENTS.md` is preserved untouched when pre-existing without blocking workspace initialization).
+  - Runtime ignore management: automatically excludes untracked runtime artifacts (`.agentbus/`) in `.git/info/exclude` (or `.gitignore`).
+- **Deterministic Handoff Distillation (`src/agentbus/distill.py`)**:
+  - Materializes immutable `okf/handoff` events to `okf/handoffs/YYYY/MM/<event_id:020d>-<source_hash>.md` matching OKF v0.2 Mission concepts.
+  - Maintains a bounded, tamper-evident `okf/log.md` (capped at 50 recent entries) with embedded document digest and structured YAML metadata.
+  - Multi-machine collaborative integrity: validates recovered rows against on-disk concept files and merges pulled entries with local state.
+  - Concurrency safety: per-plane advisory file locking (`.distill.lock`) and two-phase journaled state updates (`.distill-state.json`).
+  - Terminal status progression: non-terminal barrier detection ensures consistent cursor progression past completed terminal events.
+- **CLI Commands (`src/agentbus/cli.py`)**:
+  - `agentbus init`: Knowledge plane enabled by default (`--okf`/`--no-okf`, `--bare`), with preflight validation before MCP client configuration.
+  - `agentbus distill`: Materializes handoffs to markdown concepts with `--dry-run`, `--limit`, `--reset`, and `--stdout` support.
+  - `agentbus project-log`: Auto-detects OKF workspace plane and delegates to distillation engine.
+
+
 ## [0.24.0] - 2026-09-29
 
 ### Packaging & Developer Experience (DX) for Beginners & Intermediates

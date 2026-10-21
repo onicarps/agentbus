@@ -6,6 +6,8 @@ import tomllib
 from importlib.metadata import version
 from pathlib import Path
 
+from packaging.version import Version
+
 from agentbus import __version__
 
 
@@ -18,7 +20,7 @@ def test_project_metadata_pins_supported_mcp_major() -> None:
     ]
 
     assert project["version"] == __version__
-    assert "mcp>=2,<3" in project["dependencies"]
+    assert "mcp>=2.2,<3" in project["dependencies"]
 
 
 def test_build_backend_emits_publisher_compatible_metadata() -> None:
@@ -31,7 +33,7 @@ def test_build_backend_emits_publisher_compatible_metadata() -> None:
     assert "hatchling>=1.26,<1.30" in pyproject["build-system"]["requires"]
 
 
-def test_test_environment_uses_supported_mcp_major() -> None:
-    major, *_ = (int(part) for part in version("mcp").split(".") if part.isdigit())
+def test_test_environment_uses_supported_mcp_release_line() -> None:
+    installed = Version(version("mcp"))
 
-    assert major == 2
+    assert Version("2.2") <= installed < Version("3")

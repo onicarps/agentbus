@@ -7,7 +7,6 @@ alerts are a separate security boundary and are outside the v1 exporter.
 from __future__ import annotations
 
 import email.utils
-import hashlib
 import json
 import logging
 import math

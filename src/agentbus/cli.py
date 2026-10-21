@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -52,7 +53,14 @@ from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
 from agentbus.mcpsafe import AccessDeniedError
 from agentbus.rbac import ForbiddenError, ensure_default_roles, mint_droid_proof
 from agentbus.leases import LeaseStore
+from agentbus.distill import distill_workspace
 from agentbus.project_log import project_handoffs
+from agentbus.scaffold import (
+    MANIFEST_PATH,
+    WorkspaceError,
+    ensure_runtime_ignored,
+    scaffold_workspace,
+)
 from agentbus.schema_registry import import_schema_file, list_schemas, register_schema
 from agentbus.schemas import set_validation_workspace, validate_payload
 from agentbus.server import run_stdio
@@ -1158,8 +1166,40 @@ def project_log(
     reset: bool,
     retention_days: int,
 ) -> None:
-    """Project okf/handoff events into OKF log.md format."""
+    """Project okf/handoff events into OKF log.md format.
+
+    When the workspace has a scaffolded OKF knowledge plane the handoffs are routed
+    through the bounded distillation subsystem (`okf/log.md` plus partitioned
+    `okf/handoffs/YYYY/MM/` concepts). Otherwise the legacy flat projection into
+    `--log-file` is retained.
+    """
     ws = _cli_workspace(workspace)
+    if log_file == "log.md" and (ws / MANIFEST_PATH).is_file():
+        try:
+            result = distill_workspace(
+                ws, limit=100, dry_run=dry_run, reset=reset
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except WorkspaceError as exc:
+            raise click.ClickException(f"{exc.code}: {exc.message}") from exc
+        except OSError as exc:
+            raise click.ClickException(
+                f"project_log_failed: could not update project log: {exc}"
+            ) from exc
+        summary = {
+            "projected": result["count"],
+            "last_event_id": result["high_water_event_id"],
+            "dry_run": dry_run,
+            "knowledge_plane": "okf",
+            "created": result.get("created", []),
+            "unchanged": result.get("unchanged", []),
+        }
+        click.echo(json.dumps(summary))
+        if dry_run and result.get("documents"):
+            click.echo("---")
+            click.echo("\n\n".join(result["documents"]))
+        return
     log_path = ws / log_file
     store = _open_store(workspace, retention_days)
     try:
@@ -1172,6 +1212,56 @@ def project_log(
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
+
+
+@main.command("distill")
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--out", default=None, help="Output directory (default: okf/)")
+@click.option("--stdout", is_flag=True, help="Print distilled markdown to stdout")
+@click.option("--limit", default=100, show_default=True, type=int)
+@click.option(
+    "--dry-run", is_flag=True, help="Report without writing files or advancing state"
+)
+@click.option(
+    "--reset", is_flag=True, help="Rewind the high-water mark and reconsider all handoffs"
+)
+def distill(
+    workspace: str | None,
+    out: str | None,
+    stdout: bool,
+    limit: int,
+    dry_run: bool,
+    reset: bool,
+) -> None:
+    """Materialize okf/handoff events into the bounded OKF knowledge plane."""
+    try:
+        ws = _cli_workspace(workspace)
+        result = distill_workspace(
+            ws,
+            output_root=out,
+            stdout=stdout,
+            limit=limit,
+            dry_run=dry_run,
+            reset=reset,
+        )
+    except ValueError as exc:
+        # ``_cli_workspace`` reports an unusable --workspace as a ValueError.
+        raise click.ClickException(str(exc)) from exc
+    except WorkspaceError as exc:
+        raise click.ClickException(f"{exc.code}: {exc.message}") from exc
+    except OSError as exc:
+        raise click.ClickException(
+            f"distill_write_failed: could not write the knowledge plane: {exc}"
+        ) from exc
+    if stdout:
+        if result["documents"]:
+            click.echo("\n\n".join(result["documents"]))
+        return
+    summary = {k: v for k, v in result.items() if k != "documents"}
+    click.echo(json.dumps(summary))
+    if dry_run and result.get("documents"):
+        click.echo("---")
+        click.echo("\n\n".join(result["documents"]))
 
 
 @main.group()
@@ -1226,6 +1316,18 @@ def token_rotate(workspace: str, quiet: bool) -> None:
         )
 
 
+def _apply_runtime_ignore(ws: Path, *, bare: bool, phase: str) -> dict[str, Any]:
+    try:
+        return ensure_runtime_ignored(ws, bare=bare)
+    except WorkspaceError as exc:
+        raise click.ClickException(f"{exc.code}: {exc.message}") from exc
+    except OSError as exc:
+        raise click.ClickException(
+            f"runtime_ignore_failed: {phase}, but the runtime ignore "
+            f"could not be updated: {exc}"
+        ) from exc
+
+
 @main.command()
 @click.option(
     "--workspace", default=None, help="Workspace root (default: git root or cwd)"
@@ -1237,18 +1339,54 @@ def token_rotate(workspace: str, quiet: bool) -> None:
 @click.option(
     "--client", "clients", multiple=True, help="Limit to client id (repeatable)"
 )
+@click.option(
+    "--okf/--no-okf",
+    "okf",
+    default=True,
+    help="Scaffold the okf/ knowledge plane (default: enabled)",
+)
+@click.option(
+    "--bare",
+    is_flag=True,
+    help="Initialize runtime state only; skip the tracked okf/ scaffold",
+)
+@click.option(
+    "--project-name",
+    default=None,
+    help="Project name recorded in the scaffold manifest (default: directory name)",
+)
 def init(
     workspace: str | None,
     producer_id: str | None,
     apply: bool,
     clients: tuple[str, ...],
+    okf: bool,
+    bare: bool,
+    project_name: str | None,
 ) -> None:
-    """Auto-discover MCP clients and wire agentbus (idempotent)."""
+    """Auto-discover MCP clients, wire agentbus, and scaffold okf/ (idempotent)."""
     try:
         ws = _cli_workspace(workspace, create=apply)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
     pid = _producer_id(producer_id)
+
+    scaffold_okf = okf and not bare
+    if scaffold_okf:
+        # Preflight the knowledge plane before ``apply_init`` can rewrite MCP client
+        # configuration: a scaffold conflict or unsafe path must abort with nothing
+        # mutated, rather than leaving clients wired to a half-bootstrapped workspace.
+        try:
+            scaffold_workspace(ws, project_name=project_name, check_only=True)
+        except WorkspaceError as exc:
+            hint = (
+                "\nRe-run with --no-okf (or --bare) to wire MCP clients without the "
+                "okf/ scaffold."
+                if exc.code == "scaffold_conflict"
+                else ""
+            )
+            raise click.ClickException(f"{exc.code}: {exc.message}{hint}") from exc
+
     result = apply_init(
         ws,
         producer_id=pid,
@@ -1256,6 +1394,63 @@ def init(
         clients=list(clients) if clients else None,
     )
     click.echo(format_init_summary(result))
+
+    ignore: dict[str, Any] | None = None
+    if not scaffold_okf:
+        label = "--bare" if bare else "--no-okf"
+        if not apply:
+            suffix = "; dry-run, no runtime ignore written" if bare else ""
+            click.echo(f"Knowledge plane: skipped ({label}){suffix}")
+            return
+        ignore = _apply_runtime_ignore(
+            ws, bare=True, phase="MCP configuration completed"
+        )
+        target = ignore["scope"] or "no git work tree; runtime ignore not written"
+        click.echo(f"Knowledge plane: skipped ({label}) -> {target}")
+        return
+
+    try:
+        scaffold = scaffold_workspace(
+            ws, project_name=project_name, check_only=not apply
+        )
+    except WorkspaceError as exc:
+        hint = (
+            "\nRe-run with --no-okf (or --bare) to wire MCP clients without the "
+            "okf/ scaffold."
+            if exc.code == "scaffold_conflict"
+            else ""
+        )
+        raise click.ClickException(f"{exc.code}: {exc.message}{hint}") from exc
+    except OSError as exc:
+        raise click.ClickException(
+            "scaffold_write_failed: MCP configuration phase completed, but the "
+            f"okf/ scaffold could not be written: {exc}"
+        ) from exc
+
+    if apply:
+        ignore = _apply_runtime_ignore(
+            ws,
+            bare=False,
+            phase="MCP configuration and okf/ scaffold completed",
+        )
+    verb = "would create" if not apply else "created"
+    click.echo(
+        f"Knowledge plane: {verb} {len(scaffold['created'])}, "
+        f"unchanged {len(scaffold['unchanged'])} (template v{scaffold['template_version']})"
+    )
+    if scaffold["managed"]:
+        click.echo(
+            "Knowledge plane: preserved distilled "
+            + ", ".join(scaffold["managed"])
+        )
+    if scaffold.get("preserved"):
+        click.echo(
+            "Knowledge plane: preserved pre-existing "
+            + ", ".join(scaffold["preserved"])
+        )
+    if ignore is not None and ignore["path"]:
+        state = "added" if ignore["applied"] else "already present"
+        click.echo(f"Runtime ignore: .agentbus/ {state} in {ignore['path']}")
 
 
 @main.command()

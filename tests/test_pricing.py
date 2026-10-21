@@ -9,16 +9,13 @@ from click.testing import CliRunner
 
 from agentbus.cli import main
 from agentbus.pricing import (
-    FALLBACK_MODEL_PRICING,
     FALLBACK_PRICING_SOURCE,
     OPENROUTER_PRICING_SOURCE,
-    PRICING_SOURCE,
     _generate_model_aliases,
     _parse_rate,
     _tokens,
     estimate_llm_cost,
     get_pricing_status,
-    load_pricing_cache,
     resolve_pricing_cache_path,
     sync_openrouter_pricing,
 )

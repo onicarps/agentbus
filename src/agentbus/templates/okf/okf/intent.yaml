@@ -1,0 +1,8 @@
+version: 1
+project: ${PROJECT_NAME_YAML}
+knowledge_root: okf
+runtime_root: .agentbus
+rules:
+  - runtime state remains untracked
+  - durable decisions and status are committed
+  - generated handoffs retain AgentBus event provenance
