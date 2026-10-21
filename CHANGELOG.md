@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.26.0] - 2026-10-21
+
+### Added — Zero-Ceremony Companion Launcher
+
+- Running bare `agentbus` now initializes fresh workspaces with the OKF v0.2
+  knowledge plane and detected MCP clients, using structured JSON and
+  project-scoped MCP writes in headless environments, plus guided choices for
+  all detected clients in interactive terminals.
+- Running bare `agentbus` in an initialized workspace opens mission control in
+  an interactive terminal or emits workspace health JSON in a pipeline.
+- `agentbus init --apply` now creates the runtime event database and supports
+  explicit `--mcp/--no-mcp` and `--hitl/--no-hitl` onboarding controls.
+- Interactive monitor startup degrades safely to workspace status when the TUI
+  cannot be mounted.
+
 ## [0.25.0] - 2026-10-21
 
 ### Added — Directory-Native OKF v0.2 Knowledge Plane & Handoff Distillation

@@ -23,6 +23,10 @@ from agentbus.store import EventStore
 AGENTBUS_SERVER_KEY = "agentbus"
 
 
+class InvalidMcpConfigError(ValueError):
+    """A discovered MCP client config is not a valid JSON object."""
+
+
 @dataclass
 class ConfigTarget:
     client: str
@@ -114,10 +118,23 @@ def discover_config_targets(workspace: Path) -> list[ConfigTarget]:
 
 
 def _load_json_config(path: Path) -> dict[str, Any]:
-    content = path.read_text(encoding="utf-8").strip()
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise InvalidMcpConfigError(f"{path}: expected UTF-8 JSON") from exc
     if not content:
         return {}
-    return json.loads(content)
+    try:
+        config = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise InvalidMcpConfigError(f"{path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise InvalidMcpConfigError(f"{path}: expected a JSON object")
+    if not isinstance(config.get("mcpServers", {}), dict):
+        raise InvalidMcpConfigError(
+            f"{path}: mcpServers must be a JSON object"
+        )
+    return config
 
 
 def _save_json_config(path: Path, data: dict[str, Any]) -> None:
@@ -147,7 +164,17 @@ def apply_init(
     producer_id: str,
     dry_run: bool = True,
     clients: list[str] | None = None,
+    discover_clients: bool = True,
 ) -> InitResult:
+    targets = discover_config_targets(workspace) if discover_clients else []
+    loaded_configs = {
+        target.path: _load_json_config(target.path)
+        for target in targets
+        if target.format == "json" and (not clients or target.client in clients)
+    }
+
+    # Parse every selected client config before creating runtime files or RBAC.
+    # A malformed config must not leave a partially initialized workspace.
     ensure_ephemeral_token(workspace, rotate=False)
     bootstrap_role = None
     if not dry_run:
@@ -164,7 +191,7 @@ def apply_init(
         dry_run=dry_run,
     )
 
-    for target in discover_config_targets(workspace):
+    for target in targets:
         if clients and target.client not in clients:
             result.skipped.append(f"{target.client}: filtered")
             continue
@@ -174,7 +201,7 @@ def apply_init(
             result.skipped.append(f"{target.client}: unsupported format")
             continue
 
-        config = _load_json_config(target.path)
+        config = loaded_configs[target.path]
         merged, changed = merge_json_config(config, entry)
         if not changed:
             result.skipped.append(f"{target.client}: already configured")

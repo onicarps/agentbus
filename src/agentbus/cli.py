@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import logging
 import os
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -20,13 +23,20 @@ from agentbus.auth import (
     token_path,
 )
 from agentbus.devex import (
+    InitResult,
+    InvalidMcpConfigError,
     apply_init,
     format_init_summary,
     publish_ping,
     resolve_workspace,
     run_monitor,
 )
-from agentbus.intercepts import InterceptRule, add_rule, load_config
+from agentbus.intercepts import (
+    InterceptRule,
+    add_rule,
+    config_path as intercept_config_path,
+    load_config,
+)
 from agentbus.identity import (
     IdentityError,
     bootstrap_workspace_identity,
@@ -78,6 +88,10 @@ from agentbus.swarm import (
     tail_service_logs,
     write_example_swarm,
 )
+
+
+COMPANION_PRODUCER_ID = "local-user"
+COMPANION_HITL_MARKER = '"requires_approval": true'
 
 
 def _cli_workspace(workspace: str | None, create: bool = False) -> Path:
@@ -208,7 +222,128 @@ def _configure_cli_logging(*, quiet: bool) -> None:
     root.setLevel(level)
 
 
-@click.group()
+def _is_interactive_terminal() -> bool:
+    """Return whether companion mode can safely prompt or mount a TUI."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _companion_producer_id() -> str:
+    """Choose a stable first-run identity without requiring another prompt."""
+    return os.environ.get("AGENTBUS_PRODUCER_ID", "").strip() or COMPANION_PRODUCER_ID
+
+
+def _run_companion(ctx: click.Context, *, quiet: bool) -> None:
+    """Route a bare invocation to onboarding, monitor, or headless status."""
+    try:
+        ws = _cli_workspace(None)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # Quiet mode is machine-oriented even on a TTY: no prompts or TUI, JSON only.
+    interactive = _is_interactive_terminal() and not quiet
+    # v0.26's locked launcher contract intentionally defines this database as
+    # the initialization boundary, including stores created by another command.
+    initialized = (ws / ".agentbus" / "events.db").is_file()
+
+    if initialized:
+        if not interactive:
+            ctx.invoke(
+                status,
+                workspace=str(ws),
+                producer_id=None,
+                retention_days=30,
+            )
+            return
+        try:
+            ctx.invoke(
+                monitor,
+                workspace=str(ws),
+                topic=None,
+                interval=0.5,
+                once=False,
+                plain=False,
+                retention_days=30,
+                tz=None,
+            )
+        except (click.exceptions.Exit, click.Abort, click.ClickException):
+            raise
+        except Exception as exc:
+            click.echo(
+                "Mission-control monitor unavailable; showing workspace status: "
+                f"{exc}",
+                err=True,
+            )
+            ctx.invoke(
+                status,
+                workspace=str(ws),
+                producer_id=None,
+                retention_days=30,
+            )
+        return
+
+    if interactive:
+        click.secho("AgentBus companion setup", bold=True)
+        click.echo(f"Workspace: {ws}")
+        scaffold_okf = click.confirm(
+            "Scaffold OKF v0.2 knowledge plane (AGENTS.md, okf/status.md)?",
+            default=True,
+        )
+        enable_hitl = click.confirm(
+            "Enable Human-In-The-Loop (HITL) approval intercepts?",
+            default=False,
+        )
+        discover_mcp = click.confirm(
+            "Auto-wire detected MCP configs (Cursor, Claude Desktop, Gemini, VS Code)?",
+            default=True,
+        )
+    else:
+        scaffold_okf = True
+        enable_hitl = False
+        discover_mcp = True
+
+    emit_json = quiet or not interactive
+    invocation = {
+        "workspace": str(ws),
+        "producer_id": _companion_producer_id(),
+        "apply": True,
+        # Headless discovery is intentionally project-scoped: a pipeline in
+        # project B must never retarget a user-global IDE config from project A.
+        "clients": () if interactive else ("cursor-project", "vscode"),
+        "okf": scaffold_okf,
+        "bare": False,
+        "project_name": None,
+        "mcp": discover_mcp,
+        "hitl": enable_hitl,
+    }
+    if emit_json:
+        with contextlib.redirect_stdout(io.StringIO()):
+            init_result = ctx.invoke(init, **invocation)
+    else:
+        init_result = ctx.invoke(init, **invocation)
+
+    summary = {
+        "action": "initialized",
+        "workspace": str(ws),
+        "producer_id": invocation["producer_id"],
+        "events_db": str(ws / ".agentbus" / "events.db"),
+        "okf_scaffolded": (ws / MANIFEST_PATH).is_file(),
+        "hitl_intercepts_enabled": enable_hitl,
+        "mcp_discovery_enabled": discover_mcp,
+        "mcp_scope": (
+            "all" if interactive else "workspace"
+        ) if discover_mcp else "disabled",
+        "mcp_updates": init_result.updated,
+        "mcp_backups": init_result.backups,
+        "next": ["agentbus up", "agentbus monitor"],
+    }
+    if emit_json:
+        click.echo(json.dumps(summary, sort_keys=True))
+    else:
+        click.secho("AgentBus is ready.", fg="green", bold=True)
+        click.echo("Next: agentbus up  (services) or agentbus monitor  (mission control)")
+
+
+@click.group(invoke_without_command=True)
 @click.option(
     "-q",
     "--quiet",
@@ -247,6 +382,9 @@ def main(ctx: click.Context, quiet: bool) -> None:
         root.setLevel(prev_level)
 
     ctx.call_on_close(_restore_logging)
+
+    if ctx.invoked_subcommand is None:
+        _run_companion(ctx, quiet=quiet)
 
 
 @main.command("mcp-serve")
@@ -1328,6 +1466,96 @@ def _apply_runtime_ignore(ws: Path, *, bare: bool, phase: str) -> dict[str, Any]
         ) from exc
 
 
+def _finalize_init_runtime(ws: Path, *, apply: bool, hitl: bool) -> None:
+    """Commit optional HITL configuration and the runtime database safely."""
+    if not apply:
+        return
+
+    def open_and_close_store(workspace: Path) -> None:
+        store: EventStore | None = None
+        try:
+            store = EventStore(workspace, auto_prune=False)
+        except (sqlite3.Error, OSError, RuntimeError, ValueError) as exc:
+            raise click.ClickException(
+                f"runtime_store_init_failed: {exc}"
+            ) from exc
+        finally:
+            if store is not None:
+                store.close()
+
+    def restore_hitl_rule(path: Path, previous: bytes | None) -> None:
+        if previous is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(previous)
+
+    def install_hitl_rule() -> tuple[Path, bytes | None]:
+        path = intercept_config_path(ws)
+        previous = path.read_bytes() if path.is_file() else None
+        try:
+            add_rule(
+                ws,
+                InterceptRule(
+                    topic="okf/handoff",
+                    contains=COMPANION_HITL_MARKER,
+                ),
+            )
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            OSError,
+        ) as exc:
+            try:
+                restore_hitl_rule(path, previous)
+            except OSError as rollback_exc:
+                raise click.ClickException(
+                    "invalid_intercept_config: "
+                    f"{exc}; rollback_failed: {rollback_exc}"
+                ) from exc
+            raise click.ClickException(
+                f"invalid_intercept_config: {exc}"
+            ) from exc
+        return path, previous
+
+    db_path = ws / ".agentbus" / "events.db"
+    if db_path.is_file():
+        open_and_close_store(ws)
+        if hitl:
+            install_hitl_rule()
+            click.echo(
+                "HITL: enabled for handoff actions marked requires_approval=true"
+            )
+        return
+
+    runtime_dir = db_path.parent
+    try:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".init-", dir=runtime_dir) as tmp:
+            staged_workspace = Path(tmp)
+            open_and_close_store(staged_workspace)
+            staged_db = staged_workspace / ".agentbus" / "events.db"
+            hitl_snapshot: tuple[Path, bytes | None] | None = None
+            if hitl:
+                hitl_snapshot = install_hitl_rule()
+            try:
+                os.replace(staged_db, db_path)
+            except OSError:
+                if hitl_snapshot is not None:
+                    restore_hitl_rule(*hitl_snapshot)
+                raise
+    except click.ClickException:
+        raise
+    except OSError as exc:
+        raise click.ClickException(f"runtime_store_init_failed: {exc}") from exc
+
+    if hitl:
+        click.echo(
+            "HITL: enabled for handoff actions marked requires_approval=true"
+        )
+
+
 @main.command()
 @click.option(
     "--workspace", default=None, help="Workspace root (default: git root or cwd)"
@@ -1355,6 +1583,16 @@ def _apply_runtime_ignore(ws: Path, *, bare: bool, phase: str) -> dict[str, Any]
     default=None,
     help="Project name recorded in the scaffold manifest (default: directory name)",
 )
+@click.option(
+    "--mcp/--no-mcp",
+    default=True,
+    help="Discover and wire supported MCP client configurations (default: enabled)",
+)
+@click.option(
+    "--hitl/--no-hitl",
+    default=False,
+    help="Install an opt-in HITL intercept for actions marked requires_approval=true",
+)
 def init(
     workspace: str | None,
     producer_id: str | None,
@@ -1363,7 +1601,9 @@ def init(
     okf: bool,
     bare: bool,
     project_name: str | None,
-) -> None:
+    mcp: bool,
+    hitl: bool,
+) -> InitResult:
     """Auto-discover MCP clients, wire agentbus, and scaffold okf/ (idempotent)."""
     try:
         ws = _cli_workspace(workspace, create=apply)
@@ -1387,13 +1627,27 @@ def init(
             )
             raise click.ClickException(f"{exc.code}: {exc.message}{hint}") from exc
 
-    result = apply_init(
-        ws,
-        producer_id=pid,
-        dry_run=not apply,
-        clients=list(clients) if clients else None,
-    )
+    if hitl:
+        try:
+            load_config(ws)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise click.ClickException(
+                f"invalid_intercept_config: {exc}"
+            ) from exc
+
+    try:
+        result = apply_init(
+            ws,
+            producer_id=pid,
+            dry_run=not apply,
+            clients=list(clients) if clients else None,
+            discover_clients=mcp,
+        )
+    except InvalidMcpConfigError as exc:
+        raise click.ClickException(f"invalid_mcp_config: {exc}") from exc
     click.echo(format_init_summary(result))
+    if not mcp:
+        click.echo("MCP discovery: skipped (--no-mcp)")
 
     ignore: dict[str, Any] | None = None
     if not scaffold_okf:
@@ -1401,13 +1655,14 @@ def init(
         if not apply:
             suffix = "; dry-run, no runtime ignore written" if bare else ""
             click.echo(f"Knowledge plane: skipped ({label}){suffix}")
-            return
+            return result
         ignore = _apply_runtime_ignore(
             ws, bare=True, phase="MCP configuration completed"
         )
         target = ignore["scope"] or "no git work tree; runtime ignore not written"
         click.echo(f"Knowledge plane: skipped ({label}) -> {target}")
-        return
+        _finalize_init_runtime(ws, apply=apply, hitl=hitl)
+        return result
 
     try:
         scaffold = scaffold_workspace(
@@ -1451,6 +1706,8 @@ def init(
     if ignore is not None and ignore["path"]:
         state = "added" if ignore["applied"] else "already present"
         click.echo(f"Runtime ignore: .agentbus/ {state} in {ignore['path']}")
+    _finalize_init_runtime(ws, apply=apply, hitl=hitl)
+    return result
 
 
 @main.command()
