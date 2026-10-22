@@ -11,7 +11,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import math
 import os
 import re
 import secrets
@@ -31,12 +30,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from agentbus.errors import IdentityError
+from agentbus.jsonutil import strict_json_loads, validate_jcs_value
+
 
 IDENTITY_DIR = ".agentbus/identity"
 ENVELOPE_VERSION = "1"
 MODE_ORDER = {"audit": 0, "protected": 1, "strict": 2}
 DEFAULT_RESTRICTED_TOPICS = ("okf/handoff", "okf/approval", "system/")
-MAX_SAFE_INTEGER = (1 << 53) - 1
 MAX_DELEGATION_TTL_SECONDS = 3600
 MAX_ACTIVE_CHILD_DELEGATIONS = 100
 ROOT_PRODUCER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -91,10 +92,6 @@ _TRUST_STATE_CACHE: dict[
 _TRUST_STATE_CACHE_LOCK = threading.RLock()
 
 
-class IdentityError(ValueError):
-    """Base error for invalid AgentID state or envelopes."""
-
-
 class IdentityNotConfigured(IdentityError):
     """The workspace has no AgentID trust root yet."""
 
@@ -134,70 +131,6 @@ def _unb64(value: str) -> bytes:
         return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
     except Exception as exc:
         raise VerificationError("invalid_base64url") from exc
-
-
-def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise IdentityError(f"duplicate_json_key: {key}")
-        result[key] = value
-    return result
-
-
-def strict_json_loads(raw: str | bytes) -> Any:
-    """Decode JSON without lossy or ambiguous inputs."""
-    if isinstance(raw, bytes):
-        try:
-            raw = raw.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise IdentityError("invalid_utf8") from exc
-    try:
-        value = json.loads(
-            raw,
-            object_pairs_hook=_reject_duplicate,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                IdentityError(f"non_finite_number: {token}")
-            ),
-        )
-    except json.JSONDecodeError as exc:
-        raise IdentityError(f"invalid_json: {exc.msg}") from exc
-    validate_jcs_value(value)
-    return value
-
-
-def validate_jcs_value(value: Any, *, path: str = "$") -> None:
-    """Enforce the common Python/Node/Go AgentID JSON input domain."""
-    if value is None or isinstance(value, bool):
-        return
-    if isinstance(value, str):
-        if unicodedata.normalize("NFC", value) != value:
-            raise IdentityError(f"non_nfc_string: {path}")
-        try:
-            value.encode("utf-8", errors="strict")
-        except UnicodeEncodeError as exc:
-            raise IdentityError(f"invalid_unicode_scalar: {path}") from exc
-        return
-    if isinstance(value, int):
-        if abs(value) > MAX_SAFE_INTEGER:
-            raise IdentityError(f"unsafe_integer: {path}")
-        return
-    if isinstance(value, float):
-        if not math.isfinite(value):
-            raise IdentityError(f"non_finite_number: {path}")
-        return
-    if isinstance(value, list):
-        for index, child in enumerate(value):
-            validate_jcs_value(child, path=f"{path}[{index}]")
-        return
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if not isinstance(key, str):
-                raise IdentityError(f"non_string_key: {path}")
-            validate_jcs_value(key, path=f"{path}.<key>")
-            validate_jcs_value(child, path=f"{path}.{key}")
-        return
-    raise IdentityError(f"unsupported_json_type: {path}={type(value).__name__}")
 
 
 def canonical_bytes(value: Any) -> bytes:

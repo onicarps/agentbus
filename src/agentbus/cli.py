@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import json
 import logging
@@ -12,82 +13,110 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
-from agentbus.auth import (
-    check_publish_token,
-    ensure_ephemeral_token,
-    read_workspace_token,
-    token_path,
-)
-from agentbus.devex import (
-    InitResult,
-    InvalidMcpConfigError,
-    apply_init,
-    format_init_summary,
-    publish_ping,
-    resolve_workspace,
-    run_monitor,
-)
-from agentbus.intercepts import (
-    InterceptRule,
-    add_rule,
-    config_path as intercept_config_path,
-    load_config,
-)
-from agentbus.identity import (
-    IdentityError,
-    bootstrap_workspace_identity,
-    configure_reference_monitor,
-    delegate_identity,
-    enroll_identity,
-    issue_wake_capability,
-    load_trust_state,
-    record_break_glass_recovery,
-    revoke_identity_key,
-    rotate_identity,
-    set_policy_mode,
-    strict_json_loads,
-)
-from agentbus.ceremony import (
-    export_policy_request,
-    generate_enrollment_request,
-    generate_offline_root,
-    import_signed_policy,
-    initialize_offline_identity,
-    sign_policy_request,
-)
-from agentbus.artifacts import PayloadTooLargeError, artifact_from_file
-from agentbus.mcpsafe import AccessDeniedError
-from agentbus.rbac import ForbiddenError, ensure_default_roles, mint_droid_proof
-from agentbus.leases import LeaseStore
-from agentbus.distill import distill_workspace
-from agentbus.project_log import project_handoffs
-from agentbus.scaffold import (
-    MANIFEST_PATH,
-    WorkspaceError,
-    ensure_runtime_ignored,
-    scaffold_workspace,
-)
-from agentbus.schema_registry import import_schema_file, list_schemas, register_schema
-from agentbus.schemas import set_validation_workspace, validate_payload
-from agentbus.server import run_stdio
-from agentbus.client import EventTransport, open_event_transport
-from agentbus.store import EventStore
-from agentbus.workspace_config import resolve_retention_days
-from agentbus.tail import run_tail
-from agentbus.watch import run_watch
-from agentbus.swarm import (
-    list_processes,
-    load_swarm_config,
-    stop_all,
-    swarm_up,
-    swarm_yaml_path,
-    tail_service_logs,
-    write_example_swarm,
-)
+if TYPE_CHECKING:
+    from agentbus.client import EventTransport
+    from agentbus.devex import InitResult
+
+
+def _lazy(module: str, name: str):
+    """Return a call-through that imports a command dependency on first use."""
+
+    def invoke(*args, **kwargs):
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+
+    invoke.__name__ = name
+    return invoke
+
+
+def _exception(module: str, name: str):
+    return getattr(importlib.import_module(module), name)
+
+
+def _identity_error():
+    return _exception("agentbus.errors", "IdentityError")
+
+
+def _payload_too_large_error():
+    return _exception("agentbus.artifacts", "PayloadTooLargeError")
+
+
+def _access_denied_error():
+    return _exception("agentbus.mcpsafe", "AccessDeniedError")
+
+
+def _forbidden_error():
+    return _exception("agentbus.rbac", "ForbiddenError")
+
+
+def _workspace_error():
+    return _exception("agentbus.scaffold", "WorkspaceError")
+
+
+def _invalid_mcp_config_error():
+    return _exception("agentbus.devex", "InvalidMcpConfigError")
+
+
+check_publish_token = _lazy("agentbus.auth", "check_publish_token")
+ensure_ephemeral_token = _lazy("agentbus.auth", "ensure_ephemeral_token")
+read_workspace_token = _lazy("agentbus.auth", "read_workspace_token")
+token_path = _lazy("agentbus.auth", "token_path")
+apply_init = _lazy("agentbus.devex", "apply_init")
+format_init_summary = _lazy("agentbus.devex", "format_init_summary")
+publish_ping = _lazy("agentbus.devex", "publish_ping")
+resolve_workspace = _lazy("agentbus.devex", "resolve_workspace")
+run_monitor = _lazy("agentbus.devex", "run_monitor")
+InterceptRule = _lazy("agentbus.intercepts", "InterceptRule")
+add_rule = _lazy("agentbus.intercepts", "add_rule")
+intercept_config_path = _lazy("agentbus.intercepts", "config_path")
+load_config = _lazy("agentbus.intercepts", "load_config")
+bootstrap_workspace_identity = _lazy("agentbus.identity", "bootstrap_workspace_identity")
+configure_reference_monitor = _lazy("agentbus.identity", "configure_reference_monitor")
+delegate_identity = _lazy("agentbus.identity", "delegate_identity")
+enroll_identity = _lazy("agentbus.identity", "enroll_identity")
+issue_wake_capability = _lazy("agentbus.identity", "issue_wake_capability")
+load_trust_state = _lazy("agentbus.identity", "load_trust_state")
+record_break_glass_recovery = _lazy("agentbus.identity", "record_break_glass_recovery")
+revoke_identity_key = _lazy("agentbus.identity", "revoke_identity_key")
+rotate_identity = _lazy("agentbus.identity", "rotate_identity")
+set_policy_mode = _lazy("agentbus.identity", "set_policy_mode")
+strict_json_loads = _lazy("agentbus.jsonutil", "strict_json_loads")
+export_policy_request = _lazy("agentbus.ceremony", "export_policy_request")
+generate_enrollment_request = _lazy("agentbus.ceremony", "generate_enrollment_request")
+generate_offline_root = _lazy("agentbus.ceremony", "generate_offline_root")
+import_signed_policy = _lazy("agentbus.ceremony", "import_signed_policy")
+initialize_offline_identity = _lazy("agentbus.ceremony", "initialize_offline_identity")
+sign_policy_request = _lazy("agentbus.ceremony", "sign_policy_request")
+artifact_from_file = _lazy("agentbus.artifacts", "artifact_from_file")
+ensure_default_roles = _lazy("agentbus.rbac", "ensure_default_roles")
+mint_droid_proof = _lazy("agentbus.rbac", "mint_droid_proof")
+LeaseStore = _lazy("agentbus.leases", "LeaseStore")
+distill_workspace = _lazy("agentbus.distill", "distill_workspace")
+project_handoffs = _lazy("agentbus.project_log", "project_handoffs")
+ensure_runtime_ignored = _lazy("agentbus.scaffold", "ensure_runtime_ignored")
+scaffold_workspace = _lazy("agentbus.scaffold", "scaffold_workspace")
+import_schema_file = _lazy("agentbus.schema_registry", "import_schema_file")
+list_schemas = _lazy("agentbus.schema_registry", "list_schemas")
+register_schema = _lazy("agentbus.schema_registry", "register_schema")
+set_validation_workspace = _lazy("agentbus.schemas", "set_validation_workspace")
+validate_payload = _lazy("agentbus.schemas", "validate_payload")
+open_event_transport = _lazy("agentbus.client", "open_event_transport")
+EventStore = _lazy("agentbus.store", "EventStore")
+resolve_retention_days = _lazy("agentbus.workspace_config", "resolve_retention_days")
+run_tail = _lazy("agentbus.tail", "run_tail")
+run_watch = _lazy("agentbus.watch", "run_watch")
+list_processes = _lazy("agentbus.swarm", "list_processes")
+load_swarm_config = _lazy("agentbus.swarm", "load_swarm_config")
+stop_all = _lazy("agentbus.swarm", "stop_all")
+swarm_up = _lazy("agentbus.swarm", "swarm_up")
+swarm_yaml_path = _lazy("agentbus.swarm", "swarm_yaml_path")
+tail_service_logs = _lazy("agentbus.swarm", "tail_service_logs")
+write_example_swarm = _lazy("agentbus.swarm", "write_example_swarm")
+
+MANIFEST_PATH = Path("okf/.scaffold-manifest.json")
 
 
 COMPANION_PRODUCER_ID = "local-user"
@@ -442,6 +471,8 @@ def mcp_serve(
     engine: str | None,
 ) -> None:
     """MCP entrypoint for IDE configs (ensures token, then serve)."""
+    from agentbus.server import run_stdio
+
     ws = _cli_workspace(workspace)
     ensure_ephemeral_token(ws, rotate=rotate_token)
     os.environ["AGENTBUS_TOKEN"] = read_workspace_token(ws) or ""
@@ -507,6 +538,8 @@ def serve(
     engine: str | None,
 ) -> None:
     """Run MCP server on stdio."""
+    from agentbus.server import run_stdio
+
     ws = _cli_workspace(workspace)
     if (engine or "python").lower() == "go":
         ensure_ephemeral_token(ws, rotate=rotate_token)
@@ -605,7 +638,7 @@ def publish(
                 "invalid_payload: payload must be a JSON object "
                 f"(got {type(payload).__name__})"
             )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(
             f"invalid input: {exc} — check JSON syntax and encoding"
         ) from exc
@@ -624,7 +657,7 @@ def publish(
         payload = validate_payload(
             topic, payload, workspace=ws, producer_id=_producer_id(producer_id)
         )
-    except PayloadTooLargeError as exc:
+    except _payload_too_large_error() as exc:
         raise click.ClickException(str(exc)) from exc
     except ValueError as exc:
         raise click.ClickException(
@@ -662,10 +695,10 @@ def publish(
                 ),
             )
         except (
-            ForbiddenError,
-            PayloadTooLargeError,
-            AccessDeniedError,
-            IdentityError,
+            _forbidden_error(),
+            _payload_too_large_error(),
+            _access_denied_error(),
+            _identity_error(),
         ) as exc:
             raise click.ClickException(str(exc)) from exc
         except sqlite3.Error as exc:
@@ -769,7 +802,11 @@ def publish_batch(
                         else None
                     ),
                 )
-            except (ForbiddenError, PayloadTooLargeError, IdentityError) as exc:
+            except (
+                _forbidden_error(),
+                _payload_too_large_error(),
+                _identity_error(),
+            ) as exc:
                 raise click.ClickException(str(exc)) from exc
             except sqlite3.Error as exc:
                 raise click.ClickException(
@@ -899,6 +936,30 @@ def status(workspace: str, producer_id: str | None, retention_days: int) -> None
         store.close()
 
 
+@main.command()
+@click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
+@click.option("--retention-days", default=7, show_default=True)
+@click.option(
+    "--since-checkpoint",
+    is_flag=True,
+    help="Verify only the post-cutover chain; trust the stored legacy anchor.",
+)
+def verify(workspace: str, retention_days: int, since_checkpoint: bool) -> None:
+    """Verify the forward SHA-256 event chain."""
+    ws = _cli_workspace(workspace)
+    db_path = ws / ".agentbus" / "events.db"
+    if not db_path.is_file():
+        raise click.ClickException(f"event store not found: {db_path}")
+    store = EventStore(ws, retention_days=retention_days, auto_prune=False)
+    try:
+        report = store.verify_chain(since_checkpoint=since_checkpoint)
+        click.echo(json.dumps(report, sort_keys=True))
+        if not report["ok"]:
+            raise click.exceptions.Exit(1)
+    finally:
+        store.close()
+
+
 @main.group(invoke_without_command=True)
 @click.option("--workspace", default=None, envvar="AGENTBUS_WORKSPACE")
 @click.option("--retention-days", default=7, show_default=True)
@@ -918,7 +979,7 @@ def sla_list(ctx: click.Context) -> None:
     store = _open_store(opts.get("workspace"), opts.get("retention_days", 7))
     try:
         click.echo(json.dumps(store.list_active_slas()))
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -934,7 +995,7 @@ def sla_clear(ctx: click.Context, event_id: int) -> None:
     try:
         store._clear_sla(event_id)
         click.echo(json.dumps({"event_id": event_id, "sla_cleared": True}))
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -1319,7 +1380,7 @@ def project_log(
             )
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
-        except WorkspaceError as exc:
+        except _workspace_error() as exc:
             raise click.ClickException(f"{exc.code}: {exc.message}") from exc
         except OSError as exc:
             raise click.ClickException(
@@ -1346,7 +1407,7 @@ def project_log(
         if dry_run and result["lines"]:
             click.echo("---")
             click.echo("\n\n".join(result["lines"]))
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -1385,7 +1446,7 @@ def distill(
     except ValueError as exc:
         # ``_cli_workspace`` reports an unusable --workspace as a ValueError.
         raise click.ClickException(str(exc)) from exc
-    except WorkspaceError as exc:
+    except _workspace_error() as exc:
         raise click.ClickException(f"{exc.code}: {exc.message}") from exc
     except OSError as exc:
         raise click.ClickException(
@@ -1457,7 +1518,7 @@ def token_rotate(workspace: str, quiet: bool) -> None:
 def _apply_runtime_ignore(ws: Path, *, bare: bool, phase: str) -> dict[str, Any]:
     try:
         return ensure_runtime_ignored(ws, bare=bare)
-    except WorkspaceError as exc:
+    except _workspace_error() as exc:
         raise click.ClickException(f"{exc.code}: {exc.message}") from exc
     except OSError as exc:
         raise click.ClickException(
@@ -1618,7 +1679,7 @@ def init(
         # mutated, rather than leaving clients wired to a half-bootstrapped workspace.
         try:
             scaffold_workspace(ws, project_name=project_name, check_only=True)
-        except WorkspaceError as exc:
+        except _workspace_error() as exc:
             hint = (
                 "\nRe-run with --no-okf (or --bare) to wire MCP clients without the "
                 "okf/ scaffold."
@@ -1643,7 +1704,7 @@ def init(
             clients=list(clients) if clients else None,
             discover_clients=mcp,
         )
-    except InvalidMcpConfigError as exc:
+    except _invalid_mcp_config_error() as exc:
         raise click.ClickException(f"invalid_mcp_config: {exc}") from exc
     click.echo(format_init_summary(result))
     if not mcp:
@@ -1668,7 +1729,7 @@ def init(
         scaffold = scaffold_workspace(
             ws, project_name=project_name, check_only=not apply
         )
-    except WorkspaceError as exc:
+    except _workspace_error() as exc:
         hint = (
             "\nRe-run with --no-okf (or --bare) to wire MCP clients without the "
             "okf/ scaffold."
@@ -1901,7 +1962,7 @@ def review(workspace: str, topic: str | None, limit: int, retention_days: int) -
     store = _open_store(workspace, retention_days)
     try:
         click.echo(json.dumps(store.review_pending(topic=topic, limit=limit)))
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -1922,7 +1983,7 @@ def approve(
         click.echo(
             json.dumps(store.approve_event(event_id, reviewer_id=rid, auth_token=None))
         )
-    except (ValueError, ForbiddenError) as exc:
+    except (ValueError, _forbidden_error()) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -1952,7 +2013,7 @@ def reject(
                 )
             )
         )
-    except (ValueError, ForbiddenError) as exc:
+    except (ValueError, _forbidden_error()) as exc:
         raise click.ClickException(str(exc)) from exc
     finally:
         store.close()
@@ -2043,7 +2104,7 @@ def trace(workspace: str, trace_id: str, retention_days: int) -> None:
             events = store.fetch_trace_events(trace_id)
             roots = build_trace_tree(events)
             click.echo(render_trace_tree(trace_id, roots))
-        except IdentityError as exc:
+        except _identity_error() as exc:
             raise click.ClickException(str(exc)) from exc
         except ImportError as exc:
             raise click.ClickException(
@@ -2706,7 +2767,7 @@ def identity_init(
             )
             return
         state = bootstrap_workspace_identity(ws, mode=mode.lower())
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -2741,7 +2802,7 @@ def identity_root_generate(private_key: Path, descriptor: Path) -> None:
     """Generate an offline root private key and public descriptor."""
     try:
         result = generate_offline_root(private_key, descriptor)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2))
 
@@ -2784,7 +2845,7 @@ def identity_key_generate(
             capabilities=capability,
             topics=topic,
         )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2))
 
@@ -2830,7 +2891,7 @@ def identity_export_policy_request(
             enrollment_paths=enrollment,
             revoke_key_ids=revoke_keys,
         )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2))
 
@@ -2863,7 +2924,7 @@ def identity_ceremony_sign(
     """Sign one canonical request with the offline root."""
     try:
         result = sign_policy_request(request_path, root_key, output)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2))
 
@@ -2877,7 +2938,7 @@ def identity_import_signed_policy(bundle: Path, workspace: str | None) -> None:
     """Verify and install a detached root-signed policy bundle."""
     try:
         result = import_signed_policy(_cli_workspace(workspace), bundle)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(result, indent=2))
 
@@ -2898,7 +2959,7 @@ def identity_enroll(
     try:
         key_id = enroll_identity(ws, producer_id, capabilities=capability, topics=topic)
         state = load_trust_state(ws)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -2917,7 +2978,7 @@ def identity_list(workspace: str | None) -> None:
     """List verified policy state and enrolled public identities."""
     try:
         state = load_trust_state(_cli_workspace(workspace))
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -2960,7 +3021,7 @@ def identity_delegate(
             topics=topic,
             ttl_seconds=ttl_seconds,
         )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -2982,7 +3043,7 @@ def identity_mode(mode: str, workspace: str | None) -> None:
     """Raise the root-signed workspace identity mode."""
     try:
         state = set_policy_mode(_cli_workspace(workspace), mode)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -3013,7 +3074,7 @@ def identity_reference_monitor(
             monitor,
             isolation_attested=isolation_attested,
         )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -3043,7 +3104,7 @@ def identity_record_recovery(workspace: str | None, reason: str) -> None:
             reason=reason,
             effective_after_event_id=effective_after,
         )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps(event))
 
@@ -3060,7 +3121,7 @@ def identity_rotate(
         key_id = rotate_identity(
             _cli_workspace(workspace), producer_id, grace_seconds=grace_seconds
         )
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({"producer_id": producer_id, "key_id": key_id}))
 
@@ -3072,7 +3133,7 @@ def identity_revoke(key_id: str, workspace: str | None) -> None:
     """Immediately revoke a producer key in the root-signed registry."""
     try:
         state = revoke_identity_key(_cli_workspace(workspace), key_id)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(
         json.dumps(
@@ -3092,7 +3153,7 @@ def identity_issue_wake_capability(runtime: str, workspace: str | None) -> None:
     """Issue a root-policy-bound capability for one wake runtime."""
     try:
         path = issue_wake_capability(_cli_workspace(workspace), runtime)
-    except IdentityError as exc:
+    except _identity_error() as exc:
         raise click.ClickException(str(exc)) from exc
     click.echo(json.dumps({"runtime": runtime, "capability_file": str(path)}))
 
@@ -3150,7 +3211,7 @@ def broker_run(workspace: str | None, socket_path: Path, force: bool) -> None:
 
     try:
         run_broker(_cli_workspace(workspace), socket_path, force=force)
-    except (IdentityError, OSError, ValueError) as exc:
+    except (_identity_error(), OSError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

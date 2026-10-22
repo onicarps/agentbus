@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "okf-agentbus"
-version = "0.26.0"
+version = "0.27.0"
 description = "SQLite-backed MCP event bus and control surface for heterogeneous agent orchestration."
 readme = "README.md"
 license = { text = "MIT" }
@@ -47,7 +47,7 @@ Issues = "https://github.com/onicarps/agentbus/issues"
 Documentation = "https://github.com/onicarps/agentbus/blob/main/docs/MCP_SCHEMA.md"
 
 [project.scripts]
-agentbus = "agentbus.cli:main"
+agentbus = "agentbus.fast_cli:main"
 agentbus-monitor = "agentbus.cli:monitor_standalone"
 
 [tool.hatch.build.targets.wheel]

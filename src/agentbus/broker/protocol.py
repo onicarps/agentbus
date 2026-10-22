@@ -7,7 +7,8 @@ import socket
 import struct
 from typing import Any
 
-from agentbus.identity import IdentityError, strict_json_loads, validate_jcs_value
+from agentbus.errors import IdentityError
+from agentbus.jsonutil import strict_json_loads, validate_jcs_value
 
 PROTOCOL_VERSION = "1"
 MAX_FRAME_BYTES = 4 * 1024 * 1024

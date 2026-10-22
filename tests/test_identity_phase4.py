@@ -133,7 +133,7 @@ def test_released_database_fixtures_migrate_additively(tmp_path: Path) -> None:
         ).fetchone()[0]
         assert tuple(after) == tuple(before)
         assert tuple(migrated) == ("legacy_unverified", None)
-        assert version == 20
+        assert version == 21
         assert store.verify_event(158).reason == "legacy_unverified"
         store.close()
 

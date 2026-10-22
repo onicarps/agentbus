@@ -7,21 +7,32 @@ import socket
 import stat
 import uuid
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from agentbus.artifacts import extract_artifacts
 from agentbus.broker.protocol import PROTOCOL_VERSION, recv_frame, send_frame
-from agentbus.identity import (
-    IdentityError,
-    VerificationResult,
-    configured as identity_configured,
-    load_trust_state,
-    sign_event_envelope,
-)
+from agentbus.errors import IdentityError
 from agentbus.store import Event, EventStore
+
+if TYPE_CHECKING:
+    from agentbus.identity import VerificationResult
 
 DEFAULT_BROKER_SOCKET = Path("/run/agentbus/agentbus.sock")
 DEFAULT_BROKER_TIMEOUT_SECONDS = 30.0
+
+
+def identity_configured(workspace: Path) -> bool:
+    root = workspace.resolve() / ".agentbus" / "identity"
+    return all(
+        (root / name).is_file()
+        for name in ("trust-root.json", "policy.json", "registry.json")
+    )
+
+
+def _identity(name: str):
+    from agentbus import identity
+
+    return getattr(identity, name)
 
 
 class BrokerTransportError(IdentityError):
@@ -166,7 +177,7 @@ class BrokerTransport:
         envelope = kwargs.get("identity_envelope")
         if envelope is None and kwargs.get("auto_sign", True):
             stored_payload, artifacts = extract_artifacts(payload)
-            envelope = sign_event_envelope(
+            envelope = _identity("sign_event_envelope")(
                 self.workspace,
                 topic=topic,
                 producer_id=producer_id,
@@ -222,7 +233,7 @@ class BrokerTransport:
             raise BrokerTransportError("invalid_broker_get_event_result")
         event_value = result.get("event")
         event = _event_from_dict(event_value) if event_value is not None else None
-        return event, VerificationResult(
+        return event, _identity("VerificationResult")(
             result["verified"],
             event.producer_id if event is not None else None,
             None,
@@ -234,7 +245,7 @@ class BrokerTransport:
         result = self.request("verify_event", {"event_id": event_id})
         if not isinstance(result, dict) or not isinstance(result.get("verified"), bool):
             raise BrokerTransportError("invalid_broker_verify_result")
-        return VerificationResult(
+        return _identity("VerificationResult")(
             result["verified"],
             result.get("producer_id"),
             result.get("key_id"),
@@ -291,7 +302,7 @@ def broker_socket_for_workspace(workspace: Path) -> Path | None:
     if configured_path:
         return Path(configured_path)
     if identity_configured(workspace):
-        state = load_trust_state(workspace, update_high_water=False)
+        state = _identity("load_trust_state")(workspace, update_high_water=False)
         if state.mode == "strict":
             raise BrokerTransportError("broker_socket_required_in_strict_mode")
     try:

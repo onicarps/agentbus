@@ -2,7 +2,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 
 const (
 	StatusPublished = "PUBLISHED"
+	genesisHash     = "0000000000000000000000000000000000000000000000000000000000000000"
 )
 
 // Event is one bus event row (parity subset with Python EventStore).
@@ -164,7 +167,9 @@ CREATE TABLE IF NOT EXISTS events (
   parent_span_id TEXT,
   identity_envelope TEXT,
   verification_status TEXT NOT NULL DEFAULT 'legacy_unverified',
-  verification_reason TEXT
+  verification_reason TEXT,
+  prev_hash TEXT,
+  hash TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_topic_id ON events(topic, event_id);
 CREATE INDEX IF NOT EXISTS idx_events_trace_id ON events(trace_id);
@@ -185,6 +190,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
   sha256 TEXT, size_bytes INTEGER,
   FOREIGN KEY (event_id) REFERENCES events(event_id)
 );
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY, value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS counters (
+  name TEXT PRIMARY KEY, value INTEGER NOT NULL
+);
 `)
 	if err != nil {
 		return err
@@ -194,6 +205,8 @@ CREATE TABLE IF NOT EXISTS artifacts (
 		"identity_envelope":      "ALTER TABLE events ADD COLUMN identity_envelope TEXT",
 		"verification_status":    "ALTER TABLE events ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'legacy_unverified'",
 		"verification_reason":    "ALTER TABLE events ADD COLUMN verification_reason TEXT",
+		"prev_hash":              "ALTER TABLE events ADD COLUMN prev_hash TEXT",
+		"hash":                   "ALTER TABLE events ADD COLUMN hash TEXT",
 	} {
 		if err := s.ensureEventColumn(name, ddl); err != nil {
 			return err
@@ -203,10 +216,236 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_producer_idempotency
   ON events(producer_id, scoped_idempotency_key)
   WHERE scoped_idempotency_key IS NOT NULL;
-INSERT INTO schema_version(component, version) VALUES('event_store', 20)
-  ON CONFLICT(component) DO UPDATE SET version=MAX(version, 20);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash
+  ON events(hash) WHERE hash IS NOT NULL;
+`)
+	if err != nil {
+		return err
+	}
+	if err := s.initFastLedger(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+INSERT INTO schema_version(component, version) VALUES('event_store', 21)
+  ON CONFLICT(component) DO UPDATE SET version=MAX(version, 21);
 `)
 	return err
+}
+
+func canonicalJSON(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	encoded := bytes.TrimSuffix(buffer.Bytes(), []byte("\n"))
+	return restoreUnicodeSeparators(encoded), nil
+}
+
+func restoreUnicodeSeparators(encoded []byte) []byte {
+	// encoding/json escapes U+2028/U+2029 even when HTML escaping is disabled;
+	// Python's ensure_ascii=False does not. Replace only a real JSON Unicode
+	// escape (an odd run of backslashes), not literal "\\u2028" payload text.
+	out := make([]byte, 0, len(encoded))
+	for index := 0; index < len(encoded); {
+		if encoded[index] != '\\' {
+			out = append(out, encoded[index])
+			index++
+			continue
+		}
+		end := index
+		for end < len(encoded) && encoded[end] == '\\' {
+			end++
+		}
+		count := end - index
+		if count%2 == 1 && end+5 <= len(encoded) &&
+			(string(encoded[end:end+5]) == "u2028" || string(encoded[end:end+5]) == "u2029") {
+			out = append(out, encoded[index:end-1]...)
+			if encoded[end+4] == '8' {
+				out = append(out, []byte("\u2028")...)
+			} else {
+				out = append(out, []byte("\u2029")...)
+			}
+			index = end + 5
+			continue
+		}
+		out = append(out, encoded[index:end]...)
+		index = end
+	}
+	return out
+}
+
+func chainDigest(prevHash string, body map[string]any) (string, error) {
+	if len(prevHash) != 64 {
+		return "", fmt.Errorf("invalid previous hash")
+	}
+	encoded, err := canonicalJSON(body)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(prevHash))
+	_, _ = hash.Write([]byte{0x1f})
+	_, _ = hash.Write(encoded)
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func hashBody(
+	eventID int64, prevHash, topic, producerID, timestamp, schemaVersion, payload string,
+	causationID any, idempotencyKey any, scopedIDKey any, slaTimeout any,
+	traceID any, spanID any, parentSpanID any, identityEnvelope any,
+	verificationStatus any, verificationReason any,
+) map[string]any {
+	return map[string]any{
+		"event_id":               eventID,
+		"prev_hash":              prevHash,
+		"topic":                  topic,
+		"producer_id":            producerID,
+		"timestamp":              timestamp,
+		"schema_version":         schemaVersion,
+		"payload":                payload,
+		"causation_id":           causationID,
+		"idempotency_key":        idempotencyKey,
+		"scoped_idempotency_key": scopedIDKey,
+		"sla_timeout_minutes":    slaTimeout,
+		"trace_id":               traceID,
+		"span_id":                spanID,
+		"parent_span_id":         parentSpanID,
+		"identity_envelope":      identityEnvelope,
+		"verification_status":    verificationStatus,
+		"verification_reason":    verificationReason,
+	}
+}
+
+func nullableString(value sql.NullString) any {
+	if value.Valid {
+		return value.String
+	}
+	return nil
+}
+
+func nullableInt(value sql.NullInt64) any {
+	if value.Valid {
+		return value.Int64
+	}
+	return nil
+}
+
+func checkpointBody(
+	ctx context.Context, conn *sql.Conn, eventID int64, prevHash string,
+) (map[string]any, error) {
+	var topic, producer, timestamp, schemaVersion, payload string
+	var causation, slaTimeout sql.NullInt64
+	var idempotency, scopedID, traceID, spanID, parentSpanID sql.NullString
+	var identityEnvelope, verificationStatus, verificationReason sql.NullString
+	err := conn.QueryRowContext(ctx, `
+SELECT topic, producer_id, timestamp, schema_version, payload,
+       causation_id, idempotency_key, scoped_idempotency_key,
+       sla_timeout_minutes, trace_id, span_id, parent_span_id,
+       identity_envelope, verification_status, verification_reason
+FROM events WHERE event_id = ?`, eventID).Scan(
+		&topic, &producer, &timestamp, &schemaVersion, &payload,
+		&causation, &idempotency, &scopedID, &slaTimeout, &traceID, &spanID,
+		&parentSpanID, &identityEnvelope, &verificationStatus, &verificationReason,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return hashBody(
+		eventID, prevHash, topic, producer, timestamp, schemaVersion, payload,
+		nullableInt(causation), nullableString(idempotency), nullableString(scopedID),
+		nullableInt(slaTimeout), nullableString(traceID), nullableString(spanID),
+		nullableString(parentSpanID), nullableString(identityEnvelope),
+		nullableString(verificationStatus), nullableString(verificationReason),
+	), nil
+}
+
+func (s *EventStore) initFastLedger() error {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+
+	var checkpoint string
+	err = conn.QueryRowContext(
+		ctx, `SELECT value FROM meta WHERE key = 'checkpoint_event_id'`,
+	).Scan(&checkpoint)
+	if err == sql.ErrNoRows {
+		var checkpointID int64
+		if err := conn.QueryRowContext(
+			ctx, `SELECT COALESCE(MAX(event_id), 0) FROM events`,
+		).Scan(&checkpointID); err != nil {
+			return err
+		}
+		checkpointHash := genesisHash
+		legacy := "0"
+		if checkpointID > 0 {
+			body, err := checkpointBody(ctx, conn, checkpointID, genesisHash)
+			if err != nil {
+				return err
+			}
+			checkpointHash, err = chainDigest(genesisHash, body)
+			if err != nil {
+				return err
+			}
+			legacy = "1"
+		}
+		for key, value := range map[string]string{
+			"checkpoint_event_id": fmt.Sprintf("%d", checkpointID),
+			"checkpoint_hash":     checkpointHash,
+			"checkpoint_legacy":   legacy,
+		} {
+			if _, err := conn.ExecContext(
+				ctx, `INSERT INTO meta(key, value) VALUES(?, ?)`, key, value,
+			); err != nil {
+				return err
+			}
+		}
+	} else if err != nil {
+		return err
+	}
+
+	var projectionVersion string
+	err = conn.QueryRowContext(
+		ctx, `SELECT value FROM meta WHERE key = 'counter_projection_version'`,
+	).Scan(&projectionVersion)
+	if err == sql.ErrNoRows {
+		if _, err := conn.ExecContext(ctx, `DELETE FROM counters`); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT INTO counters(name, value) VALUES
+ ('total_events', (SELECT COUNT(*) FROM events)),
+ ('latest_event_id', (SELECT COALESCE(MAX(event_id), 0) FROM events)),
+ ('pending_approval', (SELECT COUNT(*) FROM events WHERE status = 'PENDING_APPROVAL')),
+ ('sla_active', (SELECT COUNT(*) FROM events WHERE status = 'PUBLISHED'
+                  AND sla_cleared = 0 AND sla_deadline IS NOT NULL));
+INSERT INTO counters(name, value)
+ SELECT 'topic.' || topic, COUNT(*) FROM events GROUP BY topic;
+INSERT INTO meta(key, value) VALUES('counter_projection_version', '1');
+`); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (s *EventStore) ensureEventColumn(name, ddl string) error {
@@ -290,7 +529,6 @@ func (s *EventStore) handlePublish(req PublishRequest) {
 		res.Err = err
 		return
 	}
-	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	sv := req.SchemaVersion
 	if sv == "" {
 		sv = "1.0"
@@ -313,14 +551,61 @@ func (s *EventStore) handlePublish(req PublishRequest) {
 		parent = *req.ParentSpanID
 	}
 
-	r, err := s.db.Exec(`
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		res.Err = err
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		res.Err = err
+		return
+	}
+	ts := time.Now().UTC().Format("2006-01-02T15:04:05Z")
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+
+	var checkpointID int64
+	var checkpointHash string
+	if err := conn.QueryRowContext(ctx, `
+SELECT CAST(i.value AS INTEGER), h.value
+FROM meta i JOIN meta h
+  ON i.key = 'checkpoint_event_id' AND h.key = 'checkpoint_hash'
+`).Scan(&checkpointID, &checkpointHash); err != nil {
+		res.Err = err
+		return
+	}
+	prevHash := checkpointHash
+	var headID int64
+	var headHash sql.NullString
+	err = conn.QueryRowContext(ctx, `
+SELECT event_id, hash FROM events
+WHERE event_id > ? ORDER BY event_id DESC LIMIT 1`, checkpointID).Scan(&headID, &headHash)
+	if err != nil && err != sql.ErrNoRows {
+		res.Err = err
+		return
+	}
+	if err == nil {
+		if !headHash.Valid {
+			res.Err = fmt.Errorf("unhashed event at head: %d", headID)
+			return
+		}
+		prevHash = headHash.String
+	}
+
+	r, err := conn.ExecContext(ctx, `
 INSERT INTO events (
   topic, producer_id, timestamp, schema_version, payload,
   causation_id, idempotency_key, scoped_idempotency_key, status,
-  span_id, trace_id, parent_span_id
-) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+  span_id, trace_id, parent_span_id, prev_hash, hash
+) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, NULL)`,
 		req.Topic, req.ProducerID, ts, sv, string(payloadJSON),
-		causation, idem, StatusPublished, span, trace, parent,
+		causation, idem, StatusPublished, span, trace, parent, prevHash,
 	)
 	if err != nil {
 		res.Err = err
@@ -331,6 +616,53 @@ INSERT INTO events (
 		res.Err = err
 		return
 	}
+	body := hashBody(
+		id, prevHash, req.Topic, req.ProducerID, ts, sv, string(payloadJSON),
+		causation, nil, idem, nil, trace, span, parent, nil,
+		"legacy_unverified", nil,
+	)
+	digest, err := chainDigest(prevHash, body)
+	if err != nil {
+		res.Err = err
+		return
+	}
+	if _, err := conn.ExecContext(
+		ctx, `UPDATE events SET hash = ? WHERE event_id = ?`, digest, id,
+	); err != nil {
+		res.Err = err
+		return
+	}
+	updates := []struct {
+		query string
+		args  []any
+	}{
+		{
+			`INSERT INTO counters(name, value) VALUES('total_events', 1)
+  ON CONFLICT(name) DO UPDATE SET value = value + 1`,
+			nil,
+		},
+		{
+			`INSERT INTO counters(name, value) VALUES('latest_event_id', ?)
+  ON CONFLICT(name) DO UPDATE SET value = excluded.value`,
+			[]any{id},
+		},
+		{
+			`INSERT INTO counters(name, value) VALUES(?, 1)
+  ON CONFLICT(name) DO UPDATE SET value = value + 1`,
+			[]any{"topic." + req.Topic},
+		},
+	}
+	for _, update := range updates {
+		if _, err := conn.ExecContext(ctx, update.query, update.args...); err != nil {
+			res.Err = err
+			return
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		res.Err = err
+		return
+	}
+	committed = true
 	ev := Event{
 		EventID:        id,
 		Topic:          req.Topic,
@@ -427,7 +759,13 @@ LIMIT ?`, topic, sinceID, StatusPublished, limit+1)
 // Status returns a minimal health payload.
 func (s *EventStore) Status() (map[string]any, error) {
 	var count, maxID int64
-	_ = s.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(event_id), 0) FROM events`).Scan(&count, &maxID)
+	err := s.db.QueryRow(`
+SELECT COALESCE(MAX(CASE WHEN name = 'total_events' THEN value END), 0),
+       COALESCE(MAX(CASE WHEN name = 'latest_event_id' THEN value END), 0)
+FROM counters`).Scan(&count, &maxID)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"event_count":     count,
 		"latest_event_id": maxID,

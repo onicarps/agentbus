@@ -2,40 +2,59 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentbus.artifacts import extract_artifacts
+from agentbus.canonical import GENESIS_HASH, event_digest
 from agentbus.intercepts import DEFAULT_TTL_MINUTES, hitl_disabled, match_rule
-from agentbus.identity import (
-    IdentityError,
-    VerificationResult,
-    configured as identity_configured,
-    load_trust_state,
-    prune_expired_delegations,
-    sign_event_envelope,
-    topic_restricted,
-    validate_typed_action,
-    verify_envelope,
-)
-from agentbus.mcpsafe import PolicyEnforcer
-from agentbus.rbac import check_approve_rbac, check_publish_rbac
 from agentbus.retry import (
     RetryExhaustedError,
     call_with_retry,
     default_publish_policy,
     is_transient_sqlite_error,
 )
-from agentbus.schemas import DEAD_LETTER_TOPIC, validate_payload
 from agentbus.tracing import (
     generate_span_id,
     normalize_parent_span_id,
     normalize_trace_id,
 )
+
+if TYPE_CHECKING:
+    from agentbus.mcpsafe import PolicyEnforcer
+
+
+def _lazy(module: str, name: str):
+    def invoke(*args, **kwargs):
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+
+    invoke.__name__ = name
+    return invoke
+
+
+def _identity_error():
+    return getattr(importlib.import_module("agentbus.identity"), "IdentityError")
+
+
+VerificationResult = _lazy("agentbus.identity", "VerificationResult")
+identity_configured = _lazy("agentbus.identity", "configured")
+load_trust_state = _lazy("agentbus.identity", "load_trust_state")
+prune_expired_delegations = _lazy("agentbus.identity", "prune_expired_delegations")
+sign_event_envelope = _lazy("agentbus.identity", "sign_event_envelope")
+topic_restricted = _lazy("agentbus.identity", "topic_restricted")
+validate_typed_action = _lazy("agentbus.identity", "validate_typed_action")
+verify_envelope = _lazy("agentbus.identity", "verify_envelope")
+check_approve_rbac = _lazy("agentbus.rbac", "check_approve_rbac")
+check_publish_rbac = _lazy("agentbus.rbac", "check_publish_rbac")
+validate_payload = _lazy("agentbus.schemas", "validate_payload")
+
+DEAD_LETTER_TOPIC = "okf/dead-letter"
 
 STATUS_PUBLISHED = "PUBLISHED"
 STATUS_PENDING = "PENDING_APPROVAL"
@@ -208,11 +227,159 @@ class EventStore:
         self._migrate_artifacts_table()
         self._migrate_identity_columns()
         self._migrate_scoped_idempotency()
+        self._migrate_fast_ledger()
         self._conn.execute(
-            "INSERT INTO schema_version(component, version) VALUES('event_store', 20) "
-            "ON CONFLICT(component) DO UPDATE SET version=MAX(version, 20)"
+            "INSERT INTO schema_version(component, version) VALUES('event_store', 21) "
+            "ON CONFLICT(component) DO UPDATE SET version=MAX(version, 21)"
         )
         self._conn.commit()
+
+    def _migrate_fast_ledger(self) -> None:
+        """Add the forward hash chain and materialized status projections.
+
+        Existing rows are deliberately not rewritten. Their highest event id is
+        retained as a legacy checkpoint; the first new row chains from its
+        deterministic immutable-envelope digest.
+        """
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS counters (
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            );
+            """
+        )
+        self._conn.commit()
+        self._add_column_if_missing(
+            "prev_hash", "ALTER TABLE events ADD COLUMN prev_hash TEXT"
+        )
+        self._add_column_if_missing("hash", "ALTER TABLE events ADD COLUMN hash TEXT")
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hash "
+            "ON events(hash) WHERE hash IS NOT NULL"
+        )
+        self._conn.commit()
+
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            checkpoint = self._meta("checkpoint_event_id")
+            if checkpoint is None:
+                row = self._conn.execute(
+                    "SELECT * FROM events ORDER BY event_id DESC LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    checkpoint_id = 0
+                    checkpoint_hash = GENESIS_HASH
+                    legacy_checkpoint = "0"
+                else:
+                    checkpoint_id = int(row["event_id"])
+                    checkpoint_hash = event_digest(
+                        GENESIS_HASH,
+                        self._chain_body_from_row(row, prev_hash=GENESIS_HASH),
+                    )
+                    legacy_checkpoint = "1"
+                self._set_meta("checkpoint_event_id", str(checkpoint_id))
+                self._set_meta("checkpoint_hash", checkpoint_hash)
+                self._set_meta("checkpoint_legacy", legacy_checkpoint)
+
+            if self._meta("counter_projection_version") != "1":
+                self._rebuild_counters_locked()
+                self._set_meta("counter_projection_version", "1")
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def _meta(self, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+    def _counter(self, name: str, delta: int) -> None:
+        if delta == 0:
+            return
+        self._conn.execute(
+            "INSERT INTO counters(name, value) VALUES(?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value",
+            (name, delta),
+        )
+
+    def _set_counter(self, name: str, value: int) -> None:
+        self._conn.execute(
+            "INSERT INTO counters(name, value) VALUES(?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            (name, int(value)),
+        )
+
+    def _rebuild_counters_locked(self) -> None:
+        self._conn.execute("DELETE FROM counters")
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(MAX(event_id), 0) AS latest,
+                   COALESCE(SUM(status = ?), 0) AS pending,
+                   COALESCE(SUM(status = ? AND sla_cleared = 0
+                                AND sla_deadline IS NOT NULL), 0) AS sla_active
+            FROM events
+            """,
+            (STATUS_PENDING, STATUS_PUBLISHED),
+        ).fetchone()
+        self._set_counter("total_events", int(row["total"]))
+        self._set_counter("latest_event_id", int(row["latest"]))
+        self._set_counter("pending_approval", int(row["pending"]))
+        self._set_counter("sla_active", int(row["sla_active"]))
+        for topic_row in self._conn.execute(
+            "SELECT topic, COUNT(*) AS total FROM events GROUP BY topic"
+        ).fetchall():
+            self._set_counter(f"topic.{topic_row['topic']}", int(topic_row["total"]))
+
+    @staticmethod
+    def _chain_body_from_row(
+        row: sqlite3.Row, *, prev_hash: str | None = None
+    ) -> dict:
+        """Return the immutable stored envelope covered by the hash chain.
+
+        Mutable workflow columns (approval status, SLA clearance, and log
+        projection state) are intentionally excluded; changing those through
+        their supported transitions must not invalidate later events.
+        """
+        keys = set(row.keys())
+
+        def value(name: str):
+            return row[name] if name in keys else None
+
+        return {
+            "event_id": int(row["event_id"]),
+            "prev_hash": prev_hash if prev_hash is not None else value("prev_hash"),
+            "topic": row["topic"],
+            "producer_id": row["producer_id"],
+            "timestamp": row["timestamp"],
+            "schema_version": row["schema_version"],
+            # Bind the exact stored JSON text, not only its parsed meaning.
+            "payload": row["payload"],
+            "causation_id": value("causation_id"),
+            "idempotency_key": value("idempotency_key"),
+            "scoped_idempotency_key": value("scoped_idempotency_key"),
+            "sla_timeout_minutes": value("sla_timeout_minutes"),
+            "trace_id": value("trace_id"),
+            "span_id": value("span_id"),
+            "parent_span_id": value("parent_span_id"),
+            "identity_envelope": value("identity_envelope"),
+            "verification_status": value("verification_status"),
+            "verification_reason": value("verification_reason"),
+        }
 
     def _migrate_artifacts_table(self) -> None:
         self._conn.executescript(
@@ -341,23 +508,63 @@ class EventStore:
             return 0
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-        expired_ids = [
-            row[0]
-            for row in self._conn.execute(
-                "SELECT event_id FROM events WHERE timestamp < ?", (cutoff_str,)
-            ).fetchall()
-        ]
-        if expired_ids:
-            placeholders = ",".join("?" for _ in expired_ids)
-            self._conn.execute(
-                f"DELETE FROM artifacts WHERE event_id IN ({placeholders})", expired_ids
-            )
-        cur = self._conn.execute(
-            "DELETE FROM events WHERE timestamp < ?",
+        expired_rows = self._conn.execute(
+            "SELECT event_id, hash FROM events WHERE timestamp < ? "
+            "ORDER BY event_id ASC",
             (cutoff_str,),
-        )
-        self._conn.commit()
-        return cur.rowcount
+        ).fetchall()
+        if expired_rows:
+            checkpoint_id = int(self._meta("checkpoint_event_id") or 0)
+            next_id = checkpoint_id + 1
+            checkpoint_row = None
+            for row in expired_rows:
+                event_id = int(row["event_id"])
+                if event_id < next_id:
+                    continue
+                if event_id != next_id or row["hash"] is None:
+                    break
+                checkpoint_row = row
+                next_id += 1
+            if checkpoint_row is not None:
+                max_prunable_id = int(checkpoint_row["event_id"])
+            elif all(row["hash"] is None for row in expired_rows):
+                max_prunable_id = int(expired_rows[-1]["event_id"])
+            else:
+                max_prunable_id = checkpoint_id
+            prunable_rows = [
+                row
+                for row in expired_rows
+                if int(row["event_id"]) <= max_prunable_id
+            ]
+            expired_ids = [int(row["event_id"]) for row in prunable_rows]
+            if not expired_ids:
+                return 0
+            placeholders = ",".join("?" for _ in expired_ids)
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                self._conn.execute(
+                    f"DELETE FROM artifacts WHERE event_id IN ({placeholders})",
+                    expired_ids,
+                )
+                cur = self._conn.execute(
+                    f"DELETE FROM events WHERE event_id IN ({placeholders})",
+                    expired_ids,
+                )
+                if checkpoint_row is not None:
+                    self._set_meta(
+                        "checkpoint_event_id", str(checkpoint_row["event_id"])
+                    )
+                    self._set_meta("checkpoint_hash", str(checkpoint_row["hash"]))
+                    self._set_meta("checkpoint_legacy", "0")
+                elif all(row["hash"] is None for row in expired_rows) and max_prunable_id > checkpoint_id:
+                    self._set_meta("checkpoint_event_id", str(max_prunable_id))
+                self._rebuild_counters_locked()
+                self._conn.execute("COMMIT")
+                return cur.rowcount
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return 0
 
     def expire_pending(self) -> list[int]:
         """Auto-reject pending events past pending_until. Returns rejected event ids."""
@@ -371,11 +578,16 @@ class EventStore:
         ).fetchall()
         rejected: list[int] = []
         for row in rows:
-            result = self.reject_event(
-                row["event_id"],
-                reviewer_id="hitl",
-                reason="auto-rejected: approval TTL expired",
-            )
+            try:
+                result = self.reject_event(
+                    row["event_id"],
+                    reviewer_id="hitl",
+                    reason="auto-rejected: approval TTL expired",
+                )
+            except ValueError as exc:
+                if str(exc).startswith("event_not_pending:"):
+                    continue
+                raise
             rejected.append(result["event_id"])
         return rejected
 
@@ -396,10 +608,18 @@ class EventStore:
             event = self._authoritative_event_from_row(row)
             if event is None:
                 continue
-            self._conn.execute(
-                "UPDATE events SET status = ? WHERE event_id = ?",
-                (STATUS_TIMEOUT_FAILED, event.event_id),
+            cur = self._conn.execute(
+                """
+                UPDATE events SET status = ?
+                WHERE event_id = ? AND status = ? AND sla_cleared = 0
+                  AND sla_deadline IS NOT NULL AND sla_deadline < ?
+                """,
+                (STATUS_TIMEOUT_FAILED, event.event_id, STATUS_PUBLISHED, now),
             )
+            if cur.rowcount != 1:
+                self._conn.commit()
+                continue
+            self._counter("sla_active", -1)
             self._conn.commit()
             dead_letter_payload = validate_payload(
                 DEAD_LETTER_TOPIC,
@@ -426,6 +646,16 @@ class EventStore:
         return timed_out
 
     def _clear_sla(self, event_id: int) -> None:
+        cur = self._conn.execute(
+            """
+            UPDATE events SET sla_cleared = 1
+            WHERE event_id = ? AND sla_cleared = 0 AND sla_deadline IS NOT NULL
+              AND status = ?
+            """,
+            (event_id, STATUS_PUBLISHED),
+        )
+        if cur.rowcount:
+            self._counter("sla_active", -1)
         self._conn.execute(
             """
             UPDATE events SET sla_cleared = 1
@@ -491,7 +721,7 @@ class EventStore:
         if action is not None:
             action = validate_typed_action(action)
             if "action" in stored_payload and stored_payload["action"] != action:
-                raise IdentityError("payload_action_mismatch")
+                raise _identity_error()("payload_action_mismatch")
 
         if sla_timeout_minutes is not None:
             if sla_timeout_minutes < 1:
@@ -524,14 +754,14 @@ class EventStore:
                         action=action,
                         private_key_path=signing_key_path,
                     )
-                except IdentityError as exc:
+                except _identity_error() as exc:
                     verification_reason = str(exc)
             if identity_envelope is not None:
                 if action is not None and (
                     not isinstance(identity_envelope.get("signed"), dict)
                     or identity_envelope["signed"].get("action") != action
                 ):
-                    raise IdentityError("identity_action_mismatch")
+                    raise _identity_error()("identity_action_mismatch")
                 verification = verify_envelope(
                     self.workspace,
                     identity_envelope,
@@ -556,13 +786,13 @@ class EventStore:
                     (str(signed["key_id"]), str(signed["nonce"])),
                 ).fetchone()
                 if replay is not None:
-                    raise IdentityError("identity_nonce_replay")
+                    raise _identity_error()("identity_nonce_replay")
             if (
                 identity_state.mode in {"protected", "strict"}
                 and topic_restricted(topic, identity_state)
                 and verification_status != "verified"
             ):
-                raise IdentityError(
+                raise _identity_error()(
                     "403 Forbidden: identity_verification_required: "
                     f"{verification_reason or 'unsigned'}"
                 )
@@ -617,10 +847,10 @@ class EventStore:
                     (str(signed["key_id"]), str(signed["nonce"])),
                 ).fetchone()
                 if replay is not None:
-                    raise IdentityError("identity_nonce_replay")
+                    raise _identity_error()("identity_nonce_replay")
             duplicate = self._authoritative_event_from_row(existing)
             if duplicate is None:
-                raise IdentityError("403 Forbidden: unverified_duplicate_record")
+                raise _identity_error()("403 Forbidden: unverified_duplicate_record")
             return duplicate, True
 
         if causation_id is not None:
@@ -658,8 +888,22 @@ class EventStore:
             """Internal: a concurrent publisher committed this idempotency key first."""
 
         def _insert_commit() -> int:
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             try:
+                # Serialize writers before selecting the current hash head.
+                self._conn.execute("BEGIN IMMEDIATE")
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                checkpoint_id = int(self._meta("checkpoint_event_id") or 0)
+                checkpoint_hash = self._meta("checkpoint_hash") or GENESIS_HASH
+                head = self._conn.execute(
+                    "SELECT event_id, hash FROM events "
+                    "WHERE event_id > ? ORDER BY event_id DESC LIMIT 1",
+                    (checkpoint_id,),
+                ).fetchone()
+                prev_hash = (
+                    str(head["hash"])
+                    if head is not None and head["hash"] is not None
+                    else checkpoint_hash
+                )
                 identity_key_id = None
                 identity_nonce = None
                 identity_timestamp = None
@@ -674,7 +918,7 @@ class EventStore:
                         (identity_key_id,),
                     ).fetchone()
                     if high is not None and identity_timestamp < high["max_timestamp"]:
-                        raise IdentityError("event_timestamp_rollback")
+                        raise _identity_error()("event_timestamp_rollback")
                     try:
                         self._conn.execute(
                             "INSERT INTO identity_nonces(key_id, nonce, timestamp) "
@@ -682,7 +926,7 @@ class EventStore:
                             (identity_key_id, identity_nonce, identity_timestamp),
                         )
                     except sqlite3.IntegrityError as exc:
-                        raise IdentityError("identity_nonce_replay") from exc
+                        raise _identity_error()("identity_nonce_replay") from exc
                 cur = self._conn.execute(
                     """
                     INSERT INTO events
@@ -691,8 +935,8 @@ class EventStore:
                          status, pending_until,
                          sla_timeout_minutes, sla_deadline, sla_cleared,
                          trace_id, span_id, parent_span_id, identity_envelope,
-                         verification_status, verification_reason)
-                    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                         verification_status, verification_reason, prev_hash, hash)
+                    VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         topic,
@@ -712,9 +956,19 @@ class EventStore:
                         json.dumps(identity_envelope) if identity_envelope else None,
                         verification_status,
                         verification_reason,
+                        prev_hash,
                     ),
                 )
                 event_id = int(cur.lastrowid)
+                inserted = self._conn.execute(
+                    "SELECT * FROM events WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                assert inserted is not None
+                digest = event_digest(prev_hash, self._chain_body_from_row(inserted))
+                self._conn.execute(
+                    "UPDATE events SET hash = ? WHERE event_id = ?",
+                    (digest, event_id),
+                )
                 if identity_key_id is not None:
                     self._conn.execute(
                         "UPDATE identity_nonces SET event_id = ? "
@@ -727,6 +981,16 @@ class EventStore:
                         "max_timestamp=MAX(max_timestamp, excluded.max_timestamp)",
                         (identity_key_id, identity_timestamp),
                     )
+                self._counter("total_events", 1)
+                self._set_counter("latest_event_id", event_id)
+                self._counter(f"topic.{topic}", 1)
+                if event_status == STATUS_PENDING:
+                    self._counter("pending_approval", 1)
+                if (
+                    event_status == STATUS_PUBLISHED
+                    and sla_deadline is not None
+                ):
+                    self._counter("sla_active", 1)
                 self._save_artifacts(event_id, artifacts)
                 self._conn.commit()
                 return event_id
@@ -756,7 +1020,7 @@ class EventStore:
                 if winner is not None:
                     raise _ConcurrentDuplicate(int(winner["event_id"])) from exc
                 raise
-            except (sqlite3.OperationalError, IdentityError):
+            except Exception:
                 try:
                     self._conn.rollback()
                 except sqlite3.Error:
@@ -785,7 +1049,9 @@ class EventStore:
             ).fetchone()
             event = self._authoritative_event_from_row(row)
             if event is None:  # fail closed if storage changed after insertion
-                raise IdentityError("403 Forbidden: inserted_event_failed_verification")
+                raise _identity_error()(
+                    "403 Forbidden: inserted_event_failed_verification"
+                )
             return event, True
 
         # Prune is best-effort; lock on prune must not fail a successful insert.
@@ -798,7 +1064,9 @@ class EventStore:
         ).fetchone()
         event = self._authoritative_event_from_row(row)
         if event is None:  # fail closed if storage changed after insertion
-            raise IdentityError("403 Forbidden: inserted_event_failed_verification")
+            raise _identity_error()(
+                "403 Forbidden: inserted_event_failed_verification"
+            )
         return event, False
 
     def _save_artifacts(self, event_id: int, artifacts: list[dict]) -> None:
@@ -1065,7 +1333,7 @@ class EventStore:
             raise ValueError(f"event_not_found: {event_id}")
         event = self._authoritative_event_from_row(row)
         if event is None:
-            raise IdentityError("403 Forbidden: unverified_event")
+            raise _identity_error()("403 Forbidden: unverified_event")
         if event.status != STATUS_PENDING:
             raise ValueError(f"event_not_pending: {event_id} status={event.status}")
 
@@ -1078,19 +1346,26 @@ class EventStore:
             updates["sla_deadline"] = self._sla_deadline_from_now(
                 event.sla_timeout_minutes
             )
-        self._conn.execute(
+        cur = self._conn.execute(
             """
             UPDATE events
             SET status = ?, pending_until = NULL, rejection_reason = NULL,
                 sla_deadline = COALESCE(?, sla_deadline)
-            WHERE event_id = ?
+            WHERE event_id = ? AND status = ?
             """,
             (
                 STATUS_PUBLISHED,
                 updates.get("sla_deadline"),
                 event_id,
+                STATUS_PENDING,
             ),
         )
+        if cur.rowcount != 1:
+            self._conn.commit()
+            raise ValueError(f"event_not_pending: {event_id}")
+        self._counter("pending_approval", -1)
+        if updates.get("sla_deadline") is not None:
+            self._counter("sla_active", 1)
         self._conn.commit()
         updated = self.get_event(event_id)
         assert updated is not None
@@ -1121,18 +1396,22 @@ class EventStore:
             raise ValueError(f"event_not_found: {event_id}")
         event = self._authoritative_event_from_row(row)
         if event is None:
-            raise IdentityError("403 Forbidden: unverified_event")
+            raise _identity_error()("403 Forbidden: unverified_event")
         if event.status not in (STATUS_PENDING,):
             raise ValueError(f"event_not_pending: {event_id} status={event.status}")
 
-        self._conn.execute(
+        cur = self._conn.execute(
             """
             UPDATE events
             SET status = ?, pending_until = NULL, rejection_reason = ?
-            WHERE event_id = ?
+            WHERE event_id = ? AND status = ?
             """,
-            (STATUS_REJECTED, reason, event_id),
+            (STATUS_REJECTED, reason, event_id, STATUS_PENDING),
         )
+        if cur.rowcount != 1:
+            self._conn.commit()
+            raise ValueError(f"event_not_pending: {event_id}")
+        self._counter("pending_approval", -1)
         self._conn.commit()
 
         notice_payload = {
@@ -1208,24 +1487,111 @@ class EventStore:
         return {"active": active, "sla_active_count": len(active)}
 
     def latest_event_id(self) -> int:
-        row = self._conn.execute("SELECT MAX(event_id) AS m FROM events").fetchone()
-        return int(row["m"] or 0)
+        row = self._conn.execute(
+            "SELECT value FROM counters WHERE name = 'latest_event_id'"
+        ).fetchone()
+        return int(row["value"] if row is not None else 0)
+
+    def verify_chain(self, *, since_checkpoint: bool = False) -> dict:
+        """Verify the retained forward SHA-256 chain and legacy checkpoint.
+
+        AgentBus v0.26 and earlier rows remain untouched. The immutable envelope
+        of the last such row is the cutover anchor while it is retained; rows
+        after it must be consecutive and fully chained.
+        """
+        checkpoint_id = int(self._meta("checkpoint_event_id") or 0)
+        checkpoint_hash = self._meta("checkpoint_hash") or GENESIS_HASH
+        legacy_checkpoint = self._meta("checkpoint_legacy") == "1"
+        divergence: dict | None = None
+
+        if legacy_checkpoint and not since_checkpoint:
+            anchor = self._conn.execute(
+                "SELECT * FROM events WHERE event_id = ?", (checkpoint_id,)
+            ).fetchone()
+            if anchor is not None:
+                recomputed_anchor = event_digest(
+                    GENESIS_HASH,
+                    self._chain_body_from_row(anchor, prev_hash=GENESIS_HASH),
+                )
+                if recomputed_anchor != checkpoint_hash:
+                    divergence = {
+                        "event_id": checkpoint_id,
+                        "reason": "checkpoint_hash_mismatch",
+                        "expected": recomputed_anchor,
+                        "found": checkpoint_hash,
+                    }
+
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE event_id > ? ORDER BY event_id ASC",
+            (checkpoint_id,),
+        ).fetchall()
+        expected_prev = checkpoint_hash
+        expected_id = checkpoint_id + 1
+        gaps: list[dict[str, int]] = []
+        checked = 0
+        for row in rows:
+            event_id = int(row["event_id"])
+            if event_id != expected_id:
+                gaps.append({"expected_event_id": expected_id, "found_event_id": event_id})
+            stored_prev = row["prev_hash"]
+            stored_hash = row["hash"]
+            if stored_prev != expected_prev and divergence is None:
+                divergence = {
+                    "event_id": event_id,
+                    "reason": "prev_hash_mismatch",
+                    "expected": expected_prev,
+                    "found": stored_prev,
+                }
+            try:
+                recomputed = event_digest(
+                    str(stored_prev), self._chain_body_from_row(row)
+                )
+            except ValueError as exc:
+                recomputed = None
+                if divergence is None:
+                    divergence = {
+                        "event_id": event_id,
+                        "reason": "malformed_prev_hash",
+                        "detail": str(exc),
+                    }
+            if recomputed is not None and recomputed != stored_hash and divergence is None:
+                divergence = {
+                    "event_id": event_id,
+                    "reason": "hash_mismatch",
+                    "expected": recomputed,
+                    "found": stored_hash,
+                }
+            expected_prev = str(stored_hash)
+            expected_id = event_id + 1
+            checked += 1
+
+        return {
+            "ok": divergence is None and not gaps,
+            "events_checked": checked,
+            "first_event_id": int(rows[0]["event_id"]) if rows else None,
+            "last_event_id": int(rows[-1]["event_id"]) if rows else None,
+            "checkpoint": {
+                "event_id": checkpoint_id,
+                "hash": checkpoint_hash,
+                "legacy": legacy_checkpoint,
+            },
+            "head_hash": expected_prev,
+            "gaps": gaps,
+            "divergence": divergence,
+        }
 
     def status(self, producer_id: str | None = None) -> dict:
-        self.expire_pending()
-        self.expire_sla_breaches()
-        rows = self._conn.execute("SELECT * FROM events ORDER BY event_id").fetchall()
-        events = self._authoritative_events_from_rows(rows)
-        count = len(events)
-        latest = max((event.event_id for event in events), default=0)
-        pending = sum(event.status == STATUS_PENDING for event in events)
-        sla_active = sum(
-            event.status == STATUS_PUBLISHED
-            and not event.sla_cleared
-            and event.sla_deadline is not None
-            for event in events
+        rows = self._conn.execute("SELECT name, value FROM counters").fetchall()
+        counters = {str(row["name"]): int(row["value"]) for row in rows}
+        count = counters.get("total_events", 0)
+        latest = counters.get("latest_event_id", 0)
+        pending = counters.get("pending_approval", 0)
+        sla_active = counters.get("sla_active", 0)
+        topics = sorted(
+            name[len("topic.") :]
+            for name, value in counters.items()
+            if name.startswith("topic.") and value > 0
         )
-        topics = sorted({event.topic for event in events})
         # Live PRAGMA read when available (more accurate than remembered override).
         try:
             live_journal = self._conn.execute("PRAGMA journal_mode").fetchone()[0]

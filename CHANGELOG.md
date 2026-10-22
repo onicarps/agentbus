@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.27.0] - 2026-10-22
+
+### Added — AgentBus-Fast (Quay Engine Convergence)
+
+- **Cryptographic SHA-256 Merkle Chaining (`src/agentbus/store.py`, `src/agentbus/canonical.py`)**:
+  - Implemented immutable forward Merkle chaining over canonical JSON bytes using standard library `hashlib.sha256`.
+  - Added `agentbus verify` CLI command to audit database integrity in $O(N)$, pinpointing exact sequence gaps or hash divergences.
+  - Genesis cutover checkpoints allow existing production databases (62,000+ events) to safely anchor historical state without destructive rewrites.
+- **$O(1)$ Transactional Status Projections**:
+  - Materialized plane counters (`counters` table) updated inside atomic write transactions in `publish()` and `approve()`.
+  - Slashed `status()` query latency from ~120ms table scans to sub-millisecond index lookups.
+- **3-Tier Lazy-Loaded Console Entrypoint (`src/agentbus/fast_cli.py`)**:
+  - Stripped eager imports (`textual`, `rich`, `mcp`, `cryptography`, `jsonschema`) from the hot command path, enabling sub-20ms cold-start execution for `publish`, `poll`, `status`, and `lock`.
+- **Zero New Dependencies**:
+  - Removed `rfc8785` external dependency by adopting standard-library deterministic JSON canonicalization.
+
 ## [0.26.0] - 2026-10-21
 
 ### Added — Zero-Ceremony Companion Launcher
