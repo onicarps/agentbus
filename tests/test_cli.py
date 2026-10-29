@@ -58,6 +58,16 @@ def test_init_explicit_workspace_does_not_walk_to_parent_agentbus(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert f"Workspace: {explicit.resolve()}" in result.output
+    # Dry-run is strictly read-only: no token, marker, or runtime state.
+    assert not (explicit / ".agentbus").exists()
+    assert not (tmp_path / ".agentbus" / "token").exists()
+
+    applied = CliRunner().invoke(
+        main,
+        ["init", "--workspace", str(explicit), "--producer-id", "agy", "--apply"],
+    )
+
+    assert applied.exit_code == 0, applied.output
     assert (explicit / ".agentbus" / "token").is_file()
     assert not (tmp_path / ".agentbus" / "token").exists()
 

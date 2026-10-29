@@ -48,12 +48,11 @@ def test_bare_headless_initializes_fresh_workspace_with_safe_defaults(
 
     assert result.exit_code == 0, result.output
     summary = json.loads(result.output)
-    assert summary == {
+    legacy = {
         "action": "initialized",
         "events_db": str(ws / ".agentbus" / "events.db"),
         "hitl_intercepts_enabled": False,
         "mcp_discovery_enabled": True,
-        "mcp_backups": [str(cursor_config.with_suffix(".json.agentbus.bak"))],
         "mcp_scope": "workspace",
         "mcp_updates": [f"cursor-project: updated {cursor_config}"],
         "next": ["agentbus up", "agentbus monitor"],
@@ -61,6 +60,28 @@ def test_bare_headless_initializes_fresh_workspace_with_safe_defaults(
         "producer_id": "local-user",
         "workspace": str(ws),
     }
+    for key, value in legacy.items():
+        assert summary.pop(key) == value
+    # Backups are collision-resistant: name carries a UTC timestamp and PID.
+    backups = summary.pop("mcp_backups")
+    assert len(backups) == 1
+    backup = Path(backups[0])
+    assert backup.is_file()
+    assert backup.name.startswith("mcp.json.agentbus.bak.")
+    discovery = summary.pop("discovery")
+    connection = summary.pop("connection")
+    assert summary == {}
+
+    # Discovery is real evidence, not a guess: cursor-project exists in the
+    # workspace, vscode does not. Connection state must not claim verification.
+    clients = {item["installation"]: item for item in discovery["clients"]}
+    assert set(clients) == {"cursor-project", "vscode"}
+    assert clients["cursor-project"]["status"] == "present"
+    assert clients["cursor-project"]["configured"] is True
+    assert clients["cursor-project"]["state"] == "awaiting_approval"
+    assert clients["vscode"]["status"] == "absent"
+    assert connection["state"] == "awaiting_approval"
+    assert connection["verification"]["performed"] is False
     assert (ws / ".agentbus" / "events.db").is_file()
     assert not (ws / ".agentbus" / "intercepts.json").exists()
     assert (ws / MANIFEST_PATH).is_file()
@@ -515,3 +536,28 @@ def test_bare_companion_preserves_eager_click_options(
     else:
         assert result.output.lower().startswith("agentbus ")
     assert list(ws.iterdir()) == []
+
+
+def test_bare_headless_survives_discovery_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken manifest set must degrade first run, never abort it."""
+    ws = tmp_path / "project"
+    ws.mkdir()
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("AGENTBUS_WORKSPACE", str(ws))
+    monkeypatch.setattr("agentbus.cli._is_interactive_terminal", lambda: False)
+
+    def explode(**_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("agentbus.discovery.discover", explode)
+
+    result = CliRunner().invoke(main, [])
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output)
+    assert summary["action"] == "initialized"
+    assert summary["discovery"] == {"error": "RuntimeError: boom"}
+    assert "connection" not in summary
+    assert (ws / ".agentbus" / "events.db").is_file()

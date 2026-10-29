@@ -1,0 +1,51 @@
+manifest_version: 1
+manifest_id: cursor
+client: cursor
+title: Cursor
+version: "2026-10-29"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-29T08:20:00Z"
+sources:
+  - id: cursor-mcp-docs
+    resource: https://cursor.com/docs/mcp
+    title: Cursor - Model Context Protocol (mcp.json locations and stdio shape)
+notes: >-
+  Cursor reads project-scope ".cursor/mcp.json" and user-scope
+  "~/.cursor/mcp.json" with a top-level "mcpServers" object and stdio entries
+  of command/args/env. Cursor documents "type": "stdio" as optional-in-practice:
+  its own published example omits it, and AgentBus omits it to stay compatible
+  with configs written by v0.27.
+approval:
+  mode: reload
+  guidance: >-
+    Reload the Cursor window (Command Palette: "Developer: Reload Window") and
+    approve the agentbus server when Cursor prompts for tool access.
+installations:
+  - id: cursor-project
+    title: Cursor (project scope)
+    scope: project
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      all: "{workspace}/.cursor/mcp.json"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.cursor"]
+  - id: cursor-user
+    title: Cursor (user scope)
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      all: "~/.cursor/mcp.json"
+    detection:
+      binaries: [cursor]
+      app_dirs:
+        linux: ["~/.config/Cursor"]
+        darwin: ["/Applications/Cursor.app", "~/Library/Application Support/Cursor"]
+        win32: ["%LOCALAPPDATA%/Programs/cursor"]

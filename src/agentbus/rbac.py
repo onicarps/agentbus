@@ -120,8 +120,9 @@ def save_rbac_config(workspace: Path, config: RbacConfig) -> Path:
         "producers": config.producers,
         "token_roles": config.token_roles,
     }
-    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-    os.chmod(path, 0o600)
+    from agentbus.safe_file import write_private_file
+
+    write_private_file(path, yaml.safe_dump(payload, sort_keys=False).encode("utf-8"))
     return path
 
 

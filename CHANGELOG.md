@@ -1,5 +1,73 @@
 # Changelog
 
+## [Unreleased] - 2026-10-29
+
+### Added — Declarative discovery and safe client connection
+
+- **Packaged client manifests (`src/agentbus/adapters/manifests/*.yaml`)** for
+  Claude (Desktop and Code), Codex CLI, Cursor, VS Code, and the legacy Gemini
+  path, with versioned schema, per-platform paths, positive evidence rules, and
+  documented sources. Manifests ship inside the wheel and are read through
+  `importlib.resources`.
+- **`agentbus discover`** — read-only, machine-readable (`--json`) report of MCP
+  client installations. It returns `present`, `absent`, or `unknown` with the
+  reason and evidence, and never creates a token, marker, database, lock,
+  backup, or client file.
+- **`agentbus connect`** — preview by default, `--apply` to write, with explicit
+  scope control (`--scope`, `--allow-user-scope`), `--verify` for a real MCP
+  stdio `initialize` + `tools/list` handshake, and deterministic exit codes
+  (0 ok, 1 refused/failed, 3 lock timeout, 4 verification failed).
+- **Durable MCP command resolution** (`agentbus.adapters.command`): prefers an
+  absolute console script next to the running interpreter, falls back to
+  `<python> -m agentbus.cli`, validates without starting a server, and reports an
+  actionable error instead of writing a broken client entry. `AGENTBUS_MCP_COMMAND`
+  overrides resolution.
+
+### Changed — Safe, serialized setup
+
+- `agentbus init` previews are now **strictly read-only**: they no longer create
+  `.agentbus/token` or the `.agentbus/workspace` marker.
+- All mutating setup paths take an advisory `.agentbus/init.lock` and install
+  client configs through a staged writer with same-directory temp files,
+  `fsync`, atomic replace, collision-resistant `.agentbus.bak.<timestamp>.<pid>`
+  backups created with `O_EXCL`, concurrent edit detection, and rollback on
+  failure.
+- The setup lock is thread-aware (reentrancy only for the owning thread) and
+  `agentbus init --apply` holds it across the whole lifecycle: MCP writes,
+  `okf/` scaffolding, `.gitignore` edits, and final runtime state.
+- VS Code is written with its real top-level `servers` schema plus
+  `"type": "stdio"`; Codex CLI is written as `[mcp_servers.agentbus]` in
+  `config.toml` with full parse-back validation.
+
+### Fixed
+
+- Bare headless initialization no longer merges `mcpServers` into
+  `.vscode/mcp.json`.
+- Claude Desktop discovery now covers macOS and Windows paths, not only the
+  Linux path.
+- Existing client `env`/header/argument credentials are redacted in discovery,
+  preview, apply, and error output; only key names and `[REDACTED]` values are
+  exposed.
+- Codex TOML entries under `mcp_servers.agentbus` are detected correctly;
+  divergent entries report `differs` instead of `configured`.
+- A successful stdio handshake now reports `command_verified` /
+  `command_handshake_verified`; client state stays `awaiting_approval` and no
+  host connection is inferred.
+- First-handoff prompts use `since_id = N - 1` to observe event `N` and
+  `since_id = N` to observe the recipient's acknowledgement.
+- `agentbus init --apply` enforces user-scope authorization
+  (`--allow-user-scope` or an interactive confirmation), skips global configs
+  cleanly in headless runs, and user-scope writes take a global
+  `~/.agentbus/user-config.lock` shared across workspaces.
+- Console scripts are validated by an active `--version` probe (10s bound);
+  unrelated or broken executables are rejected, and override commands are
+  written with absolute paths.
+- `auto_connect: false` manifests (for example Codex project scope) are skipped
+  in bulk runs unless explicitly named.
+- Probe permission/parse errors return `unknown` with the underlying diagnostic
+  instead of degrading to `absent`; an app directory alone is weak evidence and
+  no longer authorizes a write.
+
 ## [0.27.0] - 2026-10-22
 
 ### Added — AgentBus-Fast (Quay Engine Convergence)

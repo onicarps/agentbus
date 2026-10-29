@@ -72,7 +72,7 @@ agentbus
 agentbus monitor
 ```
 
-*(Note: In a non-interactive shell or CI pipeline, running bare `agentbus` on a fresh workspace initializes it non-interactively with automatic MCP discovery applied, or emits workspace status JSON if already initialized. **VS Code Side Effect:** Because non-interactive setup runs client discovery automatically, it will merge an incompatible `mcpServers` block into an existing `.vscode/mcp.json` file. In workspaces using VS Code, avoid bare non-interactive initialization; configure `.vscode/mcp.json` manually using the top-level `servers` format below or preview with `agentbus init --producer-id local-user` first.)*
+*(Note: In a non-interactive shell or CI pipeline, running bare `agentbus` on a fresh workspace initializes it non-interactively with project-scoped MCP discovery applied, or emits workspace status JSON if already initialized. Headless setup only touches workspace-scoped configs such as `.cursor/mcp.json` and `.vscode/mcp.json`; user-global configs require an explicit `agentbus connect --apply --allow-user-scope`.)*
 
 You are now in the terminal TUI dashboard:
 * **Live Event Stream:** Watch multi-agent activity as it happens.
@@ -171,30 +171,92 @@ agentbus verify
 
 AgentBus speaks standard **Model Context Protocol (MCP)** over stdio, allowing AI coding tools to communicate through the bus natively.
 
-### Automatic 1-Click Setup
+### Automatic Setup: Discover, Preview, Connect
 
-Inside your project workspace, you can preview changes for existing MCP client configurations:
-
-```bash
-agentbus init --producer-id local-user
-```
-
-*(Note: Preview mode inspects existing client configuration files without modifying them, while creating or retaining `.agentbus/token` and writing the `.agentbus/workspace` marker.)*
-
-When you are ready to write them, run:
+AgentBus discovers MCP client installations from packaged, versioned manifests
+(`src/agentbus/adapters/manifests/*.yaml`). Discovery is read-only and always
+distinguishes three states instead of guessing:
 
 ```bash
-agentbus init --apply --producer-id local-user
+# Read-only: what exists, what is already wired, what could not be determined
+agentbus discover
+agentbus discover --json
+
+# Preview (default): plan config changes without writing anything
+agentbus connect
+
+# Apply to detected clients (project scope needs no extra flag)
+agentbus connect --apply
+
+# Optional: prove the configured command completes an MCP handshake
+agentbus connect --apply --verify
+
+# User/global configs need explicit, non-interactive authorization
+agentbus connect --scope user --apply --allow-user-scope
 ```
 
-When `agentbus init --apply` runs, it inspects your environment for *existing* client configuration files (it does not create missing files from scratch; use the manual setup below if your config file does not exist yet).
+`agentbus init` keeps the original behaviour: a preview by default, writes only
+with `--apply`. It shares the same discovery pipeline, the same
+`.agentbus/init.lock` serialization, and the same rollback-capable writer.
+`init --apply` likewise requires `--allow-user-scope` (or an interactive
+confirmation) before touching global client configs, and otherwise skips them
+with a typed diagnostic. The lock is held across the whole init lifecycle,
+including `okf/` scaffolding, `.gitignore` edits, and runtime state.
 
-**Discovery scope & known client caveats:**
+State language is deliberate:
 
-* **Cursor & Claude Desktop:** Automatically merges the `agentbus` definition under `mcpServers` for existing `.cursor/mcp.json`, `~/.cursor/mcp.json`, or Claude Desktop (`~/.config/claude/claude_desktop_config.json`) configuration files. Baseline Claude discovery checks only `~/.config/claude/claude_desktop_config.json`; if your Claude Desktop configuration is located at another platform path (such as macOS `~/Library/Application Support/Claude/claude_desktop_config.json` or Windows `%APPDATA%\Claude\claude_desktop_config.json`), configure it using the manual IDE setup below.
-* **VS Code & Gemini (Manual Setup Required):** Do not use `init --apply` to configure VS Code or Gemini. For VS Code (`.vscode/mcp.json`), configure it directly using the manual `servers` snippet below before modifying the file; `init --apply` inserts `mcpServers`, which uses an unsupported schema that VS Code ignores. For Gemini CLI, configure `~/.gemini/settings.json` manually below (v0.27 `init` inspects `~/.gemini/config/mcp_config.json` rather than Gemini CLI settings). Native automated configuration for both is tracked as a product enhancement for an upcoming release.
+* **Configured** — the file on disk matches what AgentBus requires.
+* **Differs** — an existing AgentBus entry has different parameters. It is
+  never reported as configured.
+* **Awaiting Approval** — the file was written, but the client has not
+  restarted, reloaded, or approved the server yet.
+* **Command Verified** (`--verify`) — the exact configured argv completed an
+  MCP `initialize` + `tools/list` exchange. This proves the command works; it
+  does **not** prove your client approved or connected the server, so client
+  exchange remains unobserved and the state stays `awaiting_approval`.
 
-*(Alternatively, running bare `agentbus` in an interactive terminal launches the companion wizard, prompting for confirmation before scaffolding.)*
+Nothing is written by `agentbus discover`, by `agentbus init` without `--apply`,
+or by `agentbus connect` without `--apply`: no token, marker, database, lock,
+backup, or client file.
+
+**Supported clients:** Cursor (project `.cursor/mcp.json` and user
+`~/.cursor/mcp.json`), Claude Desktop (Linux, macOS and Windows paths),
+Claude Code (project `.mcp.json` and user `~/.claude.json`), Codex CLI
+(`~/.codex/config.toml` → `[mcp_servers.agentbus]`), VS Code
+(`.vscode/mcp.json`, correctly using the top-level `servers` schema rather than
+`mcpServers`), and the legacy Gemini path (`~/.gemini/config/mcp_config.json`).
+
+**Limitations, stated honestly:**
+
+* A client is reported `present` only on positive evidence: its config file
+  exists or its binary is on PATH. An app directory alone is weak evidence and
+  is reported as `unknown`, not `present`. Unreadable files, malformed
+  JSON/TOML, and unsupported platforms are reported as `unknown` with the
+  underlying diagnostic; AgentBus will not write into an ambiguous config.
+* Existing entries are redacted before they reach stdout, logs, or JSON:
+  every `env`/header value becomes `[REDACTED]`, secret-looking keys and
+  argument values are masked, and only environment key names are exposed.
+* Client config changes are installed one file at a time with a same-directory
+  temp file, `fsync`, atomic replace, a collision-resistant
+  `.agentbus.bak.<timestamp>.<pid>` backup (created with `O_EXCL`, never
+  overwritten), and rollback on failure. This is not a cross-file transaction:
+  independent filesystems, crashes, and non-cooperating writers can still
+  leave partial state. Concurrent setup runs are serialized by an advisory
+  `.agentbus/init.lock` that is released automatically when the process exits;
+  user-scope writes also take a global `~/.agentbus/user-config.lock`.
+* User/global client configs are never written by a non-interactive run without
+  `--allow-user-scope`.
+* Gemini CLI's newer `~/.gemini/settings.json` location is not auto-wired; the
+  legacy path is preserved to avoid wiring one agent into two files.
+* Codex project-scope `.codex/config.toml` and Claude Code project `.mcp.json`
+  and user `~/.claude.json` declare `auto_connect: false`; bulk runs skip them
+  unless explicitly selected with `--client codex-project`,
+  `--client claude-code-project`, or `--client claude-code-user`.
+* The MCP command written into client configs is resolved to a durable absolute
+  executable. Console scripts are checked with `--version`; the Python module
+  fallback is checked by importing `agentbus.cli`. Both probes have a ten-second
+  bound and reject broken executables or missing dependencies. Override the
+  command with `AGENTBUS_MCP_COMMAND`.
 
 ### Manual IDE Setup
 

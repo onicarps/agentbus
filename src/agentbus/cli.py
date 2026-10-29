@@ -256,6 +256,23 @@ def _is_interactive_terminal() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+def _validate_clients(clients: tuple[str, ...]) -> None:
+    """Reject an unknown ``--client`` selector before touching anything.
+
+    An unrecognized id selects no installation, so the command would print an
+    empty, successful report and hide the typo. This is a usage error (exit 2),
+    not a discovery result.
+    """
+    from agentbus.discovery import UnknownClientError, validate_client_selection
+
+    try:
+        validate_client_selection(clients)
+    except UnknownClientError as exc:
+        raise click.UsageError(str(exc)) from exc
+    except _exception("agentbus.adapters.manifest", "ManifestError") as exc:
+        raise click.ClickException(f"manifest_error: {exc}") from exc
+
+
 def _companion_producer_id() -> str:
     """Choose a stable first-run identity without requiring another prompt."""
     return os.environ.get("AGENTBUS_PRODUCER_ID", "").strip() or COMPANION_PRODUCER_ID
@@ -365,10 +382,96 @@ def _run_companion(ctx: click.Context, *, quiet: bool) -> None:
         "mcp_backups": init_result.backups,
         "next": ["agentbus up", "agentbus monitor"],
     }
+
+    # Post-init discovery is read-only and must never break first run.
+    discovery: dict[str, Any] | None = None
+    connection: dict[str, Any] | None = None
+    if discover_mcp:
+        from agentbus.discovery import discover as _discover
+
+        try:
+            discovered = _discover(
+                workspace=ws,
+                clients=list(invocation["clients"]) or None,
+                producer_id=invocation["producer_id"],
+                command=init_result.mcp_command,
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade, never fail first run
+            discovery = {"error": f"{type(exc).__name__}: {exc}"}
+        else:
+            written = {
+                entry.split(":", 1)[0] for entry in init_result.updated
+            }
+            clients_payload = [
+                {
+                    "client": probe.client,
+                    "installation": probe.installation_id,
+                    "scope": probe.scope,
+                    "status": probe.status,
+                    "config_path": probe.config_path,
+                    "reason": probe.reason,
+                    "configured": probe.entry_state == "matches",
+                    "state": (
+                        "awaiting_approval"
+                        if probe.installation_id in written
+                        else (
+                            "configured"
+                            if probe.entry_state == "matches"
+                            else (
+                                "differs"
+                                if probe.entry_state == "differs"
+                                else "not_configured"
+                            )
+                        )
+                    ),
+                }
+                for probe in discovered.probes
+            ]
+            discovery = {
+                "platform": discovered.platform,
+                "manifests": list(discovered.manifests),
+                "command": discovered.command,
+                "command_error": discovered.command_error,
+                "clients": clients_payload,
+            }
+            connection = {
+                "state": (
+                    "awaiting_approval"
+                    if written
+                    else (
+                        "configured"
+                        if any(item["configured"] for item in clients_payload)
+                        else "none"
+                    )
+                ),
+                "verification": {
+                    "performed": False,
+                    "detail": "unavailable",
+                    "hint": (
+                        "restart or reload the client, approve the server if "
+                        "prompted, then run 'agentbus connect --apply --verify'"
+                    ),
+                },
+            }
+    if discovery is not None:
+        summary["discovery"] = discovery
+    if connection is not None:
+        summary["connection"] = connection
+
     if emit_json:
         click.echo(json.dumps(summary, sort_keys=True))
     else:
         click.secho("AgentBus is ready.", fg="green", bold=True)
+        if connection is not None and connection["state"] == "awaiting_approval":
+            click.echo(
+                "MCP clients: configuration written; restart or reload the client "
+                "and approve the agentbus server if prompted."
+            )
+        for client in (discovery or {}).get("clients") or []:
+            click.echo(
+                f"  {client['state']:<16} {client['installation']:<20} "
+                f"{client['config_path']}"
+            )
         click.echo("Next: agentbus up  (services) or agentbus monitor  (mission control)")
 
 
@@ -1617,6 +1720,146 @@ def _finalize_init_runtime(ws: Path, *, apply: bool, hitl: bool) -> None:
         )
 
 
+@main.command("discover")
+@click.option(
+    "--workspace", default=None, envvar="AGENTBUS_WORKSPACE", help="Workspace root"
+)
+@click.option(
+    "--client",
+    "clients",
+    multiple=True,
+    help="Limit to a client or installation id (repeatable)",
+)
+@click.option("--producer-id", default=None)
+@click.option(
+    "--platform",
+    default=None,
+    help="Override platform detection (linux, darwin, win32)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report")
+def discover_cmd(
+    workspace: str | None,
+    clients: tuple[str, ...],
+    producer_id: str | None,
+    platform: str | None,
+    as_json: bool,
+) -> None:
+    """Read-only discovery of MCP clients (never writes anything)."""
+    from agentbus.discovery import discover, format_discovery
+
+    _validate_clients(clients)
+    try:
+        ws = _cli_workspace(workspace)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    try:
+        report = discover(
+            workspace=ws,
+            clients=list(clients) or None,
+            producer_id=producer_id,
+            platform=platform,
+        )
+    except _exception("agentbus.adapters.manifest", "ManifestError") as exc:
+        raise click.ClickException(f"manifest_error: {exc}") from exc
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        click.echo(format_discovery(report))
+
+
+@main.command("connect")
+@click.option(
+    "--workspace", default=None, envvar="AGENTBUS_WORKSPACE", help="Workspace root"
+)
+@click.option(
+    "--client",
+    "clients",
+    multiple=True,
+    help="Limit to a client or installation id (repeatable)",
+)
+@click.option(
+    "--scope",
+    type=click.Choice(["all", "project", "user"]),
+    default="all",
+    show_default=True,
+    help="Only consider project- or user-scope installations",
+)
+@click.option(
+    "--apply",
+    is_flag=True,
+    help="Write configs (default: preview only, no writes)",
+)
+@click.option(
+    "--allow-user-scope",
+    is_flag=True,
+    help="Authorize user/global config writes in non-interactive runs",
+)
+@click.option(
+    "--verify",
+    is_flag=True,
+    help="After --apply, launch the configured command and complete an MCP handshake",
+)
+@click.option("--lock-timeout", type=float, default=10.0, show_default=True)
+@click.option("--producer-id", default=None)
+@click.option(
+    "--platform",
+    default=None,
+    help="Override platform detection (linux, darwin, win32)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report")
+def connect_cmd(
+    workspace: str | None,
+    clients: tuple[str, ...],
+    scope: str,
+    apply: bool,
+    allow_user_scope: bool,
+    verify: bool,
+    lock_timeout: float,
+    producer_id: str | None,
+    platform: str | None,
+    as_json: bool,
+) -> None:
+    """Preview or apply safe MCP client configuration.
+
+    Exit codes: 0 ok, 1 refused/failed, 3 setup lock timeout, 4 verification
+    failed.  A preview never writes; user-scope writes always need
+    --allow-user-scope (or an interactive confirmation).
+    """
+    from agentbus.discovery import connect, format_connect
+
+    _validate_clients(clients)
+    try:
+        ws = _cli_workspace(workspace)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    # Machine-readable output must never block on a prompt: no consent
+    # callback is even offered when --json is set.
+    interactive = _is_interactive_terminal() and not as_json
+    try:
+        report = connect(
+            workspace=ws,
+            clients=list(clients) or None,
+            scope=scope,
+            apply=apply,
+            allow_user_scope=allow_user_scope,
+            producer_id=producer_id,
+            platform=platform,
+            lock_timeout=lock_timeout,
+            verify=verify,
+            interactive=interactive,
+            json_output=as_json,
+            confirm=click.confirm if interactive else None,
+        )
+    except _exception("agentbus.adapters.manifest", "ManifestError") as exc:
+        raise click.ClickException(f"manifest_error: {exc}") from exc
+    if as_json:
+        click.echo(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        click.echo(format_connect(report))
+    if report.exit_code:
+        raise click.exceptions.Exit(report.exit_code)
+
+
 @main.command()
 @click.option(
     "--workspace", default=None, help="Workspace root (default: git root or cwd)"
@@ -1654,6 +1897,11 @@ def _finalize_init_runtime(ws: Path, *, apply: bool, hitl: bool) -> None:
     default=False,
     help="Install an opt-in HITL intercept for actions marked requires_approval=true",
 )
+@click.option(
+    "--allow-user-scope",
+    is_flag=True,
+    help="Authorize writes to global/user-scope MCP configs during --apply",
+)
 def init(
     workspace: str | None,
     producer_id: str | None,
@@ -1664,8 +1912,10 @@ def init(
     project_name: str | None,
     mcp: bool,
     hitl: bool,
+    allow_user_scope: bool,
 ) -> InitResult:
     """Auto-discover MCP clients, wire agentbus, and scaffold okf/ (idempotent)."""
+    _validate_clients(clients)
     try:
         ws = _cli_workspace(workspace, create=apply)
     except ValueError as exc:
@@ -1696,79 +1946,114 @@ def init(
                 f"invalid_intercept_config: {exc}"
             ) from exc
 
-    try:
-        result = apply_init(
-            ws,
-            producer_id=pid,
-            dry_run=not apply,
-            clients=list(clients) if clients else None,
-            discover_clients=mcp,
-        )
-    except _invalid_mcp_config_error() as exc:
-        raise click.ClickException(f"invalid_mcp_config: {exc}") from exc
-    click.echo(format_init_summary(result))
-    if not mcp:
-        click.echo("MCP discovery: skipped (--no-mcp)")
+    from agentbus.discovery import setup_lock
 
-    ignore: dict[str, Any] | None = None
-    if not scaffold_okf:
-        label = "--bare" if bare else "--no-okf"
-        if not apply:
-            suffix = "; dry-run, no runtime ignore written" if bare else ""
-            click.echo(f"Knowledge plane: skipped ({label}){suffix}")
+    # The setup lock spans the entire apply lifecycle: MCP config writes,
+    # okf/ scaffolding, .gitignore edits, and final runtime state.
+    init_lock = None
+    if apply:
+        init_lock = setup_lock(ws)
+        try:
+            init_lock.acquire()
+        except _exception("agentbus.discovery", "SetupLockSecurityError") as exc:
+            raise click.ClickException(f"setup_lock_security: {exc}") from exc
+        except _exception("agentbus.discovery", "SetupLockTimeout") as exc:
+            raise click.ClickException(f"setup_lock_timeout: {exc}") from exc
+    try:
+        try:
+            result = apply_init(
+                ws,
+                producer_id=pid,
+                dry_run=not apply,
+                clients=list(clients) if clients else None,
+                discover_clients=mcp,
+                allow_user_scope=allow_user_scope,
+                interactive=(
+                    _is_interactive_terminal()
+                    and not os.environ.get("AGENTBUS_QUIET")
+                ),
+                confirm=click.confirm,
+            )
+        except _invalid_mcp_config_error() as exc:
+            raise click.ClickException(f"invalid_mcp_config: {exc}") from exc
+        except _exception("agentbus.adapters.manifest", "ManifestError") as exc:
+            raise click.ClickException(f"manifest_error: {exc}") from exc
+        except _exception("agentbus.discovery", "SetupLockSecurityError") as exc:
+            raise click.ClickException(f"setup_lock_security: {exc}") from exc
+        except _exception("agentbus.discovery", "SetupLockTimeout") as exc:
+            raise click.ClickException(f"setup_lock_timeout: {exc}") from exc
+        except _exception("agentbus.discovery", "SetupWriteError") as exc:
+            raise click.ClickException(f"mcp_write_failed: {exc}") from exc
+        except _exception("agentbus.adapters.command", "McpCommandError") as exc:
+            raise click.ClickException(f"mcp_command_unavailable: {exc}") from exc
+        except OSError as exc:
+            raise click.ClickException(f"runtime_bootstrap_failed: {exc}") from exc
+        click.echo(format_init_summary(result))
+        if not mcp:
+            click.echo("MCP discovery: skipped (--no-mcp)")
+
+        ignore: dict[str, Any] | None = None
+        if not scaffold_okf:
+            label = "--bare" if bare else "--no-okf"
+            if not apply:
+                suffix = "; dry-run, no runtime ignore written" if bare else ""
+                click.echo(f"Knowledge plane: skipped ({label}){suffix}")
+                return result
+            ignore = _apply_runtime_ignore(
+                ws, bare=True, phase="MCP configuration completed"
+            )
+            target = ignore["scope"] or "no git work tree; runtime ignore not written"
+            click.echo(f"Knowledge plane: skipped ({label}) -> {target}")
+            _finalize_init_runtime(ws, apply=apply, hitl=hitl)
             return result
-        ignore = _apply_runtime_ignore(
-            ws, bare=True, phase="MCP configuration completed"
+
+        try:
+            scaffold = scaffold_workspace(
+                ws, project_name=project_name, check_only=not apply
+            )
+        except _workspace_error() as exc:
+            hint = (
+                "\nRe-run with --no-okf (or --bare) to wire MCP clients without the "
+                "okf/ scaffold."
+                if exc.code == "scaffold_conflict"
+                else ""
+            )
+            raise click.ClickException(f"{exc.code}: {exc.message}{hint}") from exc
+        except OSError as exc:
+            raise click.ClickException(
+                "scaffold_write_failed: MCP configuration phase completed, but the "
+                f"okf/ scaffold could not be written: {exc}"
+            ) from exc
+
+        if apply:
+            ignore = _apply_runtime_ignore(
+                ws,
+                bare=False,
+                phase="MCP configuration and okf/ scaffold completed",
+            )
+        verb = "would create" if not apply else "created"
+        click.echo(
+            f"Knowledge plane: {verb} {len(scaffold['created'])}, "
+            f"unchanged {len(scaffold['unchanged'])} (template v{scaffold['template_version']})"
         )
-        target = ignore["scope"] or "no git work tree; runtime ignore not written"
-        click.echo(f"Knowledge plane: skipped ({label}) -> {target}")
+        if scaffold["managed"]:
+            click.echo(
+                "Knowledge plane: preserved distilled "
+                + ", ".join(scaffold["managed"])
+            )
+        if scaffold.get("preserved"):
+            click.echo(
+                "Knowledge plane: preserved pre-existing "
+                + ", ".join(scaffold["preserved"])
+            )
+        if ignore is not None and ignore["path"]:
+            state = "added" if ignore["applied"] else "already present"
+            click.echo(f"Runtime ignore: .agentbus/ {state} in {ignore['path']}")
         _finalize_init_runtime(ws, apply=apply, hitl=hitl)
         return result
-
-    try:
-        scaffold = scaffold_workspace(
-            ws, project_name=project_name, check_only=not apply
-        )
-    except _workspace_error() as exc:
-        hint = (
-            "\nRe-run with --no-okf (or --bare) to wire MCP clients without the "
-            "okf/ scaffold."
-            if exc.code == "scaffold_conflict"
-            else ""
-        )
-        raise click.ClickException(f"{exc.code}: {exc.message}{hint}") from exc
-    except OSError as exc:
-        raise click.ClickException(
-            "scaffold_write_failed: MCP configuration phase completed, but the "
-            f"okf/ scaffold could not be written: {exc}"
-        ) from exc
-
-    if apply:
-        ignore = _apply_runtime_ignore(
-            ws,
-            bare=False,
-            phase="MCP configuration and okf/ scaffold completed",
-        )
-    verb = "would create" if not apply else "created"
-    click.echo(
-        f"Knowledge plane: {verb} {len(scaffold['created'])}, "
-        f"unchanged {len(scaffold['unchanged'])} (template v{scaffold['template_version']})"
-    )
-    if scaffold["managed"]:
-        click.echo(
-            "Knowledge plane: preserved distilled "
-            + ", ".join(scaffold["managed"])
-        )
-    if scaffold.get("preserved"):
-        click.echo(
-            "Knowledge plane: preserved pre-existing "
-            + ", ".join(scaffold["preserved"])
-        )
-    if ignore is not None and ignore["path"]:
-        state = "added" if ignore["applied"] else "already present"
-        click.echo(f"Runtime ignore: .agentbus/ {state} in {ignore['path']}")
-    _finalize_init_runtime(ws, apply=apply, hitl=hitl)
-    return result
+    finally:
+        if init_lock is not None:
+            init_lock.release()
 
 
 @main.command()

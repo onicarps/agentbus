@@ -94,3 +94,22 @@ def test_protected_mode_ignores_auth_off(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTBUS_AUTH", "off")
     with pytest.raises(ValueError, match="unauthorized"):
         check_publish_token(tmp_path, auth_token="wrong")
+
+
+def test_private_write_replaces_only_after_new_content_is_ready(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    from agentbus.safe_file import write_private_file
+
+    path = tmp_path / "token"
+    path.write_bytes(b"old")
+    replace = os.replace
+
+    def check_replace(source, destination):
+        assert path.read_bytes() == b"old"
+        assert Path(source).read_bytes() == b"new"
+        replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", check_replace)
+    write_private_file(path, b"new")
+    assert path.read_bytes() == b"new"

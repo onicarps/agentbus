@@ -6,6 +6,8 @@ import os
 import secrets
 from pathlib import Path
 
+from agentbus.safe_file import write_private_file
+
 TOKEN_FILENAME = "token"
 
 
@@ -26,9 +28,7 @@ def read_workspace_token(workspace: Path) -> str | None:
 
 def write_workspace_token(workspace: Path, token: str) -> Path:
     path = token_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(token + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
+    write_private_file(path, (token + "\n").encode("utf-8"))
     return path
 
 

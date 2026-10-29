@@ -1,0 +1,36 @@
+manifest_version: 1
+manifest_id: vscode
+client: vscode
+title: VS Code (Copilot agent mode)
+version: "2026-10-29"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-29T08:20:00Z"
+sources:
+  - id: vscode-mcp-reference
+    resource: https://code.visualstudio.com/docs/agents/reference/mcp-configuration
+    title: VS Code MCP configuration reference ("servers" vs "mcpServers")
+notes: >-
+  VS Code's own ".vscode/mcp.json" format uses a top-level "servers" object and
+  requires "type": "stdio" per entry. The portable Copilot format
+  (workspace-root ".mcp.json") uses "mcpServers" instead. Writing "mcpServers"
+  into .vscode/mcp.json silently corrupts the file for VS Code, so the adapter
+  has a dedicated entry shape and never mixes the two schemas.
+approval:
+  mode: reload
+  guidance: >-
+    Reload the VS Code window and trust the workspace MCP servers when VS Code
+    prompts; then start a chat and confirm the agentbus tool list appears.
+installations:
+  - id: vscode
+    title: VS Code (workspace scope)
+    scope: project
+    format: json
+    root: servers
+    entry_shape: vscode_stdio
+    auto_connect: true
+    paths:
+      all: "{workspace}/.vscode/mcp.json"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.vscode"]

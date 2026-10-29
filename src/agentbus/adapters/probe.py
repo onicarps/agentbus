@@ -1,0 +1,560 @@
+"""Read-only client discovery probes driven by packaged manifests.
+
+Guarantees:
+
+* never creates, modifies, or deletes anything;
+* never launches a process or opens a socket;
+* never reads a value it reports as a secret (only structure is inspected);
+* reports ``unknown`` whenever evidence is ambiguous or unreadable instead of
+  guessing ``present`` or ``absent``.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import platform as platform_module
+import shutil
+import stat
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Iterable, Mapping
+
+from agentbus.adapters.manifest import (
+    SERVER_NAME,
+    Installation,
+    Manifest,
+    expand_template,
+    load_manifests,
+)
+
+STATUS_PRESENT = "present"
+STATUS_ABSENT = "absent"
+STATUS_UNKNOWN = "unknown"
+
+CONFIG_MISSING = "missing"
+CONFIG_VALID = "valid"
+CONFIG_MALFORMED = "malformed"
+CONFIG_UNREADABLE = "unreadable"
+
+ENTRY_ABSENT = "absent"
+ENTRY_MATCHES = "matches"
+ENTRY_DIFFERS = "differs"
+ENTRY_CONFLICT = "conflict"
+
+
+@dataclass(frozen=True)
+class ClientProbe:
+    manifest_id: str
+    client: str
+    installation_id: str
+    title: str
+    scope: str
+    format: str
+    root: str
+    status: str
+    reason: str
+    config_path: str | None
+    config_state: str
+    entry_state: str
+    managed: bool
+    writable: bool
+    evidence: tuple[str, ...] = field(default_factory=tuple)
+    approval_mode: str = "restart"
+    approval_guidance: str = ""
+    auto_connect: bool = True
+
+    @property
+    def present(self) -> bool:
+        return self.status == STATUS_PRESENT
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "client": self.client,
+            "installation": self.installation_id,
+            "title": self.title,
+            "scope": self.scope,
+            "format": self.format,
+            "status": self.status,
+            "reason": self.reason,
+            "config_path": self.config_path,
+            "config_state": self.config_state,
+            "entry_state": self.entry_state,
+            "managed": self.managed,
+            "writable": self.writable,
+            "auto_connect": self.auto_connect,
+            "evidence": list(self.evidence),
+            "approval": {
+                "mode": self.approval_mode,
+                "guidance": self.approval_guidance,
+            },
+        }
+
+
+def current_platform() -> str:
+    if os.name == "nt":
+        return "win32"
+    return platform_module.system().lower() or "linux"
+
+
+def _stat_state(path: Path) -> str:
+    """``missing`` | ``denied`` | ``error`` | ``file`` | ``other``."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return "missing"
+    except PermissionError:
+        return "denied"
+    except OSError:
+        return "error"
+    if stat.S_ISREG(st.st_mode):
+        return "file"
+    return "other"
+
+
+def _load_document(path: Path, fmt: str) -> tuple[str, Any, str]:
+    """Return ``(state, document, detail)`` without ever writing.
+
+    ``detail`` carries the offending exception so unreadable or malformed
+    configuration never degrades silently to ``absent``.
+    """
+    try:
+        from agentbus.safe_file import read_regular_file
+
+        raw = read_regular_file(path)
+    except PermissionError as exc:
+        return CONFIG_UNREADABLE, None, f"permission denied: {exc}"
+    except OSError as exc:
+        return CONFIG_UNREADABLE, None, f"unreadable: {exc}"
+    if not raw.strip():
+        return CONFIG_VALID, {}, ""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return CONFIG_MALFORMED, None, f"invalid utf-8: {exc}"
+    if fmt == "json":
+        try:
+            from agentbus.jsonc import loads
+
+            document = loads(text)
+        except json.JSONDecodeError as exc:
+            return CONFIG_MALFORMED, None, f"invalid json: {exc}"
+    elif fmt == "toml":
+        try:
+            document = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            return CONFIG_MALFORMED, None, f"invalid toml: {exc}"
+    else:  # pragma: no cover - guarded by manifest validation
+        return CONFIG_MALFORMED, None, f"unsupported format {fmt!r}"
+    if not isinstance(document, dict):
+        return CONFIG_MALFORMED, None, "expected a mapping at document root"
+    return CONFIG_VALID, document, ""
+
+
+def _root_table(document: Mapping[str, Any], root: str) -> tuple[str, Any]:
+    """Resolve a dotted root path (``mcpServers`` or ``mcp_servers.agentbus``)."""
+    node: Any = document
+    for part in root.split("."):
+        if not isinstance(node, dict):
+            return ENTRY_CONFLICT, None
+        node = node.get(part)
+        if node is None:
+            return ENTRY_ABSENT, None
+    if not isinstance(node, dict):
+        return ENTRY_CONFLICT, None
+    return ENTRY_MATCHES, node
+
+
+def _server_entry(
+    document: Mapping[str, Any], installation: Installation
+) -> tuple[str, Any]:
+    """Return ``(entry_state, entry)`` for the agentbus server.
+
+    ``installation.root`` is the full path to the managed table. JSON clients
+    use a server container (``mcpServers``) and need one more ``agentbus``
+    lookup; TOML clients already address ``mcp_servers.agentbus`` directly.
+    The final path segment decides, so no client-specific branching is needed.
+    """
+    parts = installation.root.split(".")
+    node: Any = document
+    for part in parts:
+        if not isinstance(node, dict):
+            return ENTRY_CONFLICT, None
+        if part not in node:
+            return ENTRY_ABSENT, None
+        node = node[part]
+    if not isinstance(node, dict):
+        return ENTRY_CONFLICT, None
+    if parts and parts[-1] == SERVER_NAME:
+        return ENTRY_MATCHES, node
+    entry = node.get(SERVER_NAME)
+    if entry is None:
+        return ENTRY_ABSENT, None
+    if not isinstance(entry, dict):
+        return ENTRY_CONFLICT, None
+    return ENTRY_MATCHES, entry
+
+
+def _entry_equal(actual: Any, expected: Mapping[str, Any] | None) -> bool:
+    if expected is None:
+        return False
+    from agentbus.adapters.writer import entry_matches
+
+    return entry_matches(actual, expected)
+
+
+def _nearest_writable(path: Path) -> bool:
+    """Whether the closest existing ancestor directory is writable by us.
+
+    A prospective config file (``~/.cursor/mcp.json`` on a fresh machine) does
+    not exist yet, so writability has to be judged from the deepest existing
+    parent. Directories are writable-or-not like anything else: classifying
+    them as an opaque ``other`` made every missing config look unwritable,
+    which misreported discovery for exactly the first-run case this code
+    exists to serve.
+    """
+    try:
+        if path.exists():
+            return os.access(path, os.W_OK)
+        current = path.parent
+        while not current.exists() and current != current.parent:
+            current = current.parent
+        if not current.exists():
+            return False
+        return os.access(current, os.W_OK)
+    except OSError:
+        return False
+
+
+def _evidence_app_dirs(
+    installation: Installation,
+    *,
+    platform: str,
+    workspace: Path,
+    home: Path,
+    environ: Mapping[str, str],
+) -> list[str]:
+    found: list[str] = []
+    for template in installation.app_dir_templates(platform):
+        try:
+            candidate = expand_template(
+                template,
+                platform=platform,
+                workspace=workspace,
+                home=home,
+                environ=environ,
+            )
+        except Exception:  # ambiguous evidence must not abort discovery
+            continue
+        state = _stat_state(candidate)
+        if state in ("file", "other"):
+            found.append(f"app_dir:{candidate}")
+    return found
+
+
+def _evidence_binaries(
+    installation: Installation,
+    *,
+    which: Callable[[str], str | None],
+) -> list[str]:
+    found: list[str] = []
+    for name in installation.binaries:
+        resolved = which(name)
+        if resolved:
+            found.append(f"binary:{name}={resolved}")
+    return found
+
+
+def probe_installation(
+    installation: Installation,
+    *,
+    workspace: Path,
+    home: Path,
+    platform: str,
+    environ: Mapping[str, str],
+    expected_entry: Mapping[str, Any] | None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> ClientProbe:
+    guidance = installation.approval.guidance
+    if not installation.supports(platform):
+        return ClientProbe(
+            manifest_id=installation.manifest_id,
+            client=installation.client,
+            installation_id=installation.installation_id,
+            title=installation.title,
+            scope=installation.scope,
+            format=installation.format,
+            root=installation.root,
+            status=STATUS_UNKNOWN,
+            reason=f"unsupported_platform:{platform}",
+            config_path=None,
+            config_state=CONFIG_MISSING,
+            entry_state=ENTRY_ABSENT,
+            managed=False,
+            writable=False,
+            evidence=(),
+            approval_mode=installation.approval.mode,
+            approval_guidance=guidance,
+            auto_connect=installation.auto_connect,
+        )
+
+    try:
+        config_path = installation.path_for(
+            platform=platform, workspace=workspace, home=home, environ=environ
+        )
+    except Exception as exc:
+        return ClientProbe(
+            manifest_id=installation.manifest_id,
+            client=installation.client,
+            installation_id=installation.installation_id,
+            title=installation.title,
+            scope=installation.scope,
+            format=installation.format,
+            root=installation.root,
+            status=STATUS_UNKNOWN,
+            reason=f"path_unresolved:{exc}",
+            config_path=None,
+            config_state=CONFIG_MISSING,
+            entry_state=ENTRY_ABSENT,
+            managed=False,
+            writable=False,
+            evidence=(),
+            approval_mode=installation.approval.mode,
+            approval_guidance=guidance,
+            auto_connect=installation.auto_connect,
+        )
+
+    evidence = _evidence_binaries(installation, which=which)
+    evidence.extend(
+        _evidence_app_dirs(
+            installation,
+            platform=platform,
+            workspace=workspace,
+            home=home,
+            environ=environ,
+        )
+    )
+
+    state = _stat_state(config_path)
+    if state in ("denied", "error"):
+        detail = (
+            "permission_denied" if state == "denied" else "stat_failed"
+        )
+        return ClientProbe(
+            manifest_id=installation.manifest_id,
+            client=installation.client,
+            installation_id=installation.installation_id,
+            title=installation.title,
+            scope=installation.scope,
+            format=installation.format,
+            root=installation.root,
+            status=STATUS_UNKNOWN,
+            reason=detail,
+            config_path=str(config_path),
+            config_state=CONFIG_UNREADABLE,
+            entry_state=ENTRY_ABSENT,
+            managed=False,
+            writable=False,
+            evidence=(*evidence, f"config:{config_path}"),
+            approval_mode=installation.approval.mode,
+            approval_guidance=guidance,
+            auto_connect=installation.auto_connect,
+        )
+
+    if state in ("file", "other"):
+        document_state, document, detail = _load_document(
+            config_path, installation.format
+        )
+        if document_state != CONFIG_VALID or document is None:
+            reason = f"config_{document_state}"
+            if detail:
+                reason += f": {detail}"
+            return ClientProbe(
+                manifest_id=installation.manifest_id,
+                client=installation.client,
+                installation_id=installation.installation_id,
+                title=installation.title,
+                scope=installation.scope,
+                format=installation.format,
+                root=installation.root,
+                status=STATUS_UNKNOWN,
+                reason=reason,
+                config_path=str(config_path),
+                config_state=document_state,
+                entry_state=ENTRY_ABSENT,
+                managed=False,
+                writable=False,
+                evidence=(*evidence, f"config:{config_path}"),
+                approval_mode=installation.approval.mode,
+                approval_guidance=guidance,
+                auto_connect=installation.auto_connect,
+            )
+        entry_state, entry = _server_entry(document, installation)
+        managed = entry is not None
+        if entry_state == ENTRY_CONFLICT:
+            # The agentbus key exists but is not an object we understand.
+            return ClientProbe(
+                manifest_id=installation.manifest_id,
+                client=installation.client,
+                installation_id=installation.installation_id,
+                title=installation.title,
+                scope=installation.scope,
+                format=installation.format,
+                root=installation.root,
+                status=STATUS_UNKNOWN,
+                reason="conflicting_agentbus_entry",
+                config_path=str(config_path),
+                config_state=CONFIG_VALID,
+                entry_state=ENTRY_CONFLICT,
+                managed=True,
+                writable=False,
+                evidence=(*evidence, f"config:{config_path}"),
+                approval_mode=installation.approval.mode,
+                approval_guidance=guidance,
+                auto_connect=installation.auto_connect,
+            )
+        if entry_state == ENTRY_MATCHES:
+            entry_state = (
+                ENTRY_MATCHES
+                if _entry_equal(entry, expected_entry)
+                else ENTRY_DIFFERS
+            )
+        return ClientProbe(
+            manifest_id=installation.manifest_id,
+            client=installation.client,
+            installation_id=installation.installation_id,
+            title=installation.title,
+            scope=installation.scope,
+            format=installation.format,
+            root=installation.root,
+            status=STATUS_PRESENT,
+            reason="config_found",
+            config_path=str(config_path),
+            config_state=CONFIG_VALID,
+            entry_state=entry_state,
+            managed=managed,
+            writable=os.access(config_path, os.W_OK),
+            evidence=(*evidence, f"config:{config_path}"),
+            approval_mode=installation.approval.mode,
+            approval_guidance=guidance,
+            auto_connect=installation.auto_connect,
+        )
+
+    strong_evidence = tuple(
+        item for item in evidence if item.startswith("binary:")
+    )
+    if strong_evidence:
+        return ClientProbe(
+            manifest_id=installation.manifest_id,
+            client=installation.client,
+            installation_id=installation.installation_id,
+            title=installation.title,
+            scope=installation.scope,
+            format=installation.format,
+            root=installation.root,
+            status=STATUS_PRESENT,
+            reason="installed_not_configured",
+            config_path=str(config_path),
+            config_state=CONFIG_MISSING,
+            entry_state=ENTRY_ABSENT,
+            managed=False,
+            writable=_nearest_writable(config_path),
+            evidence=tuple(evidence),
+            approval_mode=installation.approval.mode,
+            approval_guidance=guidance,
+            auto_connect=installation.auto_connect,
+        )
+
+    if evidence:
+        # A directory alone is not proof the client is installed and usable:
+        # stale or unrelated directories must not authorize a config write.
+        return ClientProbe(
+            manifest_id=installation.manifest_id,
+            client=installation.client,
+            installation_id=installation.installation_id,
+            title=installation.title,
+            scope=installation.scope,
+            format=installation.format,
+            root=installation.root,
+            status=STATUS_UNKNOWN,
+            reason="weak_evidence:app_dir_only",
+            config_path=str(config_path),
+            config_state=CONFIG_MISSING,
+            entry_state=ENTRY_ABSENT,
+            managed=False,
+            writable=False,
+            evidence=tuple(evidence),
+            approval_mode=installation.approval.mode,
+            approval_guidance=guidance,
+            auto_connect=installation.auto_connect,
+        )
+
+    return ClientProbe(
+        manifest_id=installation.manifest_id,
+        client=installation.client,
+        installation_id=installation.installation_id,
+        title=installation.title,
+        scope=installation.scope,
+        format=installation.format,
+        root=installation.root,
+        status=STATUS_ABSENT,
+        reason="no_evidence",
+        config_path=str(config_path),
+        config_state=CONFIG_MISSING,
+        entry_state=ENTRY_ABSENT,
+        managed=False,
+        writable=False,
+        evidence=(),
+        approval_mode=installation.approval.mode,
+        approval_guidance=guidance,
+        auto_connect=installation.auto_connect,
+    )
+
+
+def _selected(
+    installation: Installation, clients: Iterable[str] | None
+) -> bool:
+    if clients is None:
+        return True
+    wanted = set(clients)
+    return installation.installation_id in wanted or installation.client in wanted
+
+
+def probe_installations(
+    *,
+    workspace: Path,
+    home: Path | None = None,
+    platform: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    clients: Iterable[str] | None = None,
+    expected_entries: Mapping[str, Mapping[str, Any]] | None = None,
+    manifests: Iterable[Manifest] | None = None,
+    which: Callable[[str], str | None] = shutil.which,
+) -> tuple[ClientProbe, ...]:
+    """Probe every manifest installation (or only ``clients``)."""
+    resolved_home = Path.home() if home is None else home
+    resolved_platform = current_platform() if platform is None else platform
+    resolved_env = dict(os.environ if environ is None else environ)
+    catalogue = tuple(load_manifests() if manifests is None else manifests)
+
+    probes: list[ClientProbe] = []
+    for manifest in catalogue:
+        for installation in manifest.installations:
+            if not _selected(installation, clients):
+                continue
+            expected = None
+            if expected_entries is not None:
+                expected = expected_entries.get(installation.installation_id)
+            probes.append(
+                probe_installation(
+                    installation,
+                    workspace=workspace,
+                    home=resolved_home,
+                    platform=resolved_platform,
+                    environ=resolved_env,
+                    expected_entry=expected,
+                    which=which,
+                )
+            )
+    return tuple(probes)

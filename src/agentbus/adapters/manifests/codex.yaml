@@ -1,0 +1,53 @@
+manifest_version: 1
+manifest_id: codex
+client: codex
+title: Codex CLI
+version: "2026-10-29"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-29T08:20:00Z"
+sources:
+  - id: codex-config-reference
+    resource: https://developers.openai.com/codex/config-reference
+    title: Codex configuration reference (config.toml, user and project layers)
+  - id: codex-config-docs
+    resource: https://developers.openai.com/codex/config-basic
+    title: Codex config basics
+notes: >-
+  Codex CLI stores MCP servers as TOML tables under "mcp_servers.<name>" in
+  "$CODEX_HOME/config.toml" (default "~/.codex/config.toml"). Project-scope
+  ".codex/config.toml" is only loaded when the project is trusted, so it is
+  discoverable but never auto-wired. AgentBus rewrites only the
+  "mcp_servers.agentbus" table, validates the whole document with tomllib after
+  the patch, and refuses to touch a table another tool already owns.
+approval:
+  mode: restart
+  guidance: >-
+    Start a new Codex session (config.toml is read at process start) and run
+    "codex mcp list" or "/mcp" to confirm the agentbus server is connected.
+installations:
+  - id: codex-user
+    title: Codex CLI (user scope)
+    scope: user
+    format: toml
+    root: mcp_servers.agentbus
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      all: "${CODEX_HOME:-~/.codex}/config.toml"
+    detection:
+      binaries: [codex]
+      app_dirs:
+        all: ["${CODEX_HOME:-~/.codex}"]
+  - id: codex-project
+    title: Codex CLI (project scope, trusted projects only)
+    scope: project
+    format: toml
+    root: mcp_servers.agentbus
+    entry_shape: command_args_env
+    auto_connect: false
+    paths:
+      all: "{workspace}/.codex/config.toml"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.codex"]

@@ -1,0 +1,38 @@
+manifest_version: 1
+manifest_id: gemini
+client: gemini
+title: Gemini CLI
+version: "2026-10-29"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-29T08:20:00Z"
+sources:
+  - id: agentbus-legacy-gemini-path
+    resource: https://github.com/onicarps/agentbus/blob/v0.27.0/src/agentbus/devex.py
+    title: AgentBus v0.27 discovery path preserved for compatibility
+notes: >-
+  AgentBus v0.27 wrote Gemini settings to
+  "~/.gemini/config/mcp_config.json" with a top-level "mcpServers" object. This
+  manifest preserves exactly that path and shape so existing installs keep
+  working. Newer Gemini CLI releases are documented to read
+  "~/.gemini/settings.json"; that location is intentionally NOT auto-wired here
+  because AgentBus has not verified the merge semantics, and double-wiring one
+  agent into two files is worse than reporting the limitation.
+approval:
+  mode: restart
+  guidance: >-
+    This legacy path is for clients that consume ~/.gemini/config/mcp_config.json.
+    Gemini CLI uses ~/.gemini/settings.json; configure that file manually.
+installations:
+  - id: gemini
+    title: Gemini CLI (legacy AgentBus path)
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      all: "~/.gemini/config/mcp_config.json"
+    detection:
+      app_dirs:
+        all: ["~/.gemini"]

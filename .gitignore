@@ -21,6 +21,8 @@ packages/js/go-worker-*/bin/**
 .mypy_cache/
 # Local, untracked engineering probes; not part of the AgentBus package.
 __init__.py
+# ...but package initializers are real source and must stay tracked.
+!src/**/__init__.py
 _c47_probe_reaper.py
 uv.lock
 log.md

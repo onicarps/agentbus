@@ -1,0 +1,69 @@
+manifest_version: 1
+manifest_id: claude
+client: claude
+title: Claude (Desktop and Code)
+version: "2026-10-29"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-29T08:20:00Z"
+sources:
+  - id: mcp-quickstart-user
+    resource: https://modelcontextprotocol.io/quickstart/user
+    title: MCP docs - Connect to local MCP servers (Claude Desktop paths)
+  - id: claude-code-mcp
+    resource: https://docs.claude.com/en/docs/claude-code/mcp
+    title: Claude Code - Connect to tools via MCP (scopes and .mcp.json approval)
+notes: >-
+  Claude Desktop reads a single user-scope JSON file with a top-level
+  "mcpServers" object. Claude Code reads project-scope ".mcp.json" (which the
+  host must approve interactively) and user-scope entries inside
+  "~/.claude.json". Linux Claude Desktop paths follow XDG_CONFIG_HOME and are
+  not documented by the MCP quickstart; the fallback matches AgentBus v0.27.
+approval:
+  mode: restart
+  guidance: >-
+    Restart the Claude app (or re-open the workspace in Claude Code). For
+    project-scope .mcp.json entries Claude Code additionally asks you to
+    approve the server on first use.
+installations:
+  - id: claude-desktop
+    title: Claude Desktop
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      linux: "${XDG_CONFIG_HOME:-~/.config}/Claude/claude_desktop_config.json"
+      darwin: "~/Library/Application Support/Claude/claude_desktop_config.json"
+      win32: "%APPDATA%/Claude/claude_desktop_config.json"
+    detection:
+      binaries: [claude-desktop]
+      app_dirs:
+        darwin: ["/Applications/Claude.app"]
+        linux: ["${XDG_CONFIG_HOME:-~/.config}/Claude"]
+        win32: ["%LOCALAPPDATA%/AnthropicClaude"]
+  - id: claude-code-project
+    title: Claude Code (project scope)
+    scope: project
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: false
+    paths:
+      all: "{workspace}/.mcp.json"
+    detection:
+      binaries: [claude]
+      app_dirs:
+        all: ["{workspace}/.claude"]
+  - id: claude-code-user
+    title: Claude Code (user scope)
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: false
+    paths:
+      all: "~/.claude.json"
+    detection:
+      binaries: [claude]

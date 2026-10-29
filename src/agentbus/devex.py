@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
@@ -18,7 +20,6 @@ except ImportError:
 from agentbus.auth import ensure_ephemeral_token, token_path
 from agentbus.rbac import bootstrap_default_producer, ensure_default_roles
 from agentbus.store import EventStore
-
 
 AGENTBUS_SERVER_KEY = "agentbus"
 
@@ -44,6 +45,9 @@ class InitResult:
     backups: list[str] = field(default_factory=list)
     bootstrap_role: str | None = None
     dry_run: bool = True
+    lock_wait_seconds: float = 0.0
+    runtime_initialized: bool = False
+    mcp_command: Any | None = None
 
 
 def resolve_workspace(path: str | Path | None = None) -> Path:
@@ -80,52 +84,66 @@ def resolve_workspace(path: str | Path | None = None) -> Path:
 
 
 def resolve_mcp_command() -> list[str]:
-    """Command argv for MCP clients (pip-friendly)."""
-    if shutil.which("agentbus"):
-        return ["agentbus", "mcp-serve"]
-    return ["python3", "-m", "agentbus.cli", "mcp-serve"]
+    """Command argv for MCP clients (durable and validated).
+
+    Delegates to :mod:`agentbus.adapters.command`, which prefers an absolute
+    console script next to the running interpreter and falls back to
+    ``<python> -m agentbus.cli``.  Raises ``McpCommandError`` when no dependable
+    command exists instead of returning one that cannot start.
+    """
+    from agentbus.adapters.command import resolve_mcp_command as _resolve
+
+    return list(_resolve().argv)
 
 
 def agentbus_mcp_entry(workspace: Path, producer_id: str) -> dict[str, Any]:
-    cmd = resolve_mcp_command()
-    return {
-        "command": cmd[0],
-        "args": [*cmd[1:], "--workspace", str(workspace)],
-        "env": {
-            "AGENTBUS_WORKSPACE": str(workspace),
-            "AGENTBUS_PRODUCER_ID": producer_id,
-        },
-    }
+    from agentbus.adapters.command import resolve_mcp_command as _resolve
+    from agentbus.adapters.manifest import build_command_entry
+
+    cmd = _resolve()
+    return build_command_entry(
+        cmd.argv, workspace=workspace.resolve(), producer_id=producer_id
+    )
 
 
 def discover_config_targets(workspace: Path) -> list[ConfigTarget]:
-    home = Path.home()
+    """Deprecated: discovered config files, derived from packaged manifests.
+
+    Read-only and kept for the TUI summary.  New code should use
+    :func:`agentbus.discovery.discover`, which distinguishes present, absent,
+    and unknown installations.
+    """
+    from agentbus.adapters.probe import CONFIG_VALID, probe_installations
+
     targets: list[ConfigTarget] = []
-
-    candidates: list[tuple[str, Path, str]] = [
-        ("cursor-user", home / ".cursor" / "mcp.json", "json"),
-        ("cursor-project", workspace / ".cursor" / "mcp.json", "json"),
-        ("claude-desktop", home / ".config" / "claude" / "claude_desktop_config.json", "json"),
-        ("gemini", home / ".gemini" / "config" / "mcp_config.json", "json"),
-        ("vscode", workspace / ".vscode" / "mcp.json", "json"),
-    ]
-
-    for client, path, fmt in candidates:
-        if path.exists():
-            targets.append(ConfigTarget(client=client, path=path, format=fmt))
-
+    for probe in probe_installations(workspace=workspace.resolve()):
+        if probe.config_state != CONFIG_VALID or probe.config_path is None:
+            continue
+        targets.append(
+            ConfigTarget(
+                client=probe.installation_id,
+                path=Path(probe.config_path),
+                format=probe.format,
+            )
+        )
     return targets
 
 
 def _load_json_config(path: Path) -> dict[str, Any]:
     try:
-        content = path.read_text(encoding="utf-8").strip()
+        from agentbus.safe_file import read_regular_file
+
+        content = read_regular_file(path).decode("utf-8").strip()
     except UnicodeDecodeError as exc:
         raise InvalidMcpConfigError(f"{path}: expected UTF-8 JSON") from exc
+    except OSError as exc:
+        raise InvalidMcpConfigError(f"{path}: unreadable: {exc}") from exc
     if not content:
         return {}
     try:
-        config = json.loads(content)
+        from agentbus.jsonc import loads
+
+        config = loads(content)
     except json.JSONDecodeError as exc:
         raise InvalidMcpConfigError(f"{path}: {exc}") from exc
     if not isinstance(config, dict):
@@ -158,6 +176,20 @@ def merge_json_config(
     return config, True
 
 
+def _invalid_config_error(path: str | None, fmt: str, reason: str) -> InvalidMcpConfigError:
+    """Build the legacy ``invalid_mcp_config`` error with a precise detail."""
+    if path is None:  # pragma: no cover - probe always resolves a path
+        return InvalidMcpConfigError(f"invalid client config: {reason}")
+    candidate = Path(path)
+    if fmt == "json":
+        try:
+            _load_json_config(candidate)
+        except InvalidMcpConfigError as exc:
+            return exc
+        return InvalidMcpConfigError(f"{candidate}: {reason}")
+    return InvalidMcpConfigError(f"{candidate}: {reason}")
+
+
 def apply_init(
     workspace: Path,
     *,
@@ -165,60 +197,273 @@ def apply_init(
     dry_run: bool = True,
     clients: list[str] | None = None,
     discover_clients: bool = True,
+    command: Any | None = None,
+    home: Path | None = None,
+    platform: str | None = None,
+    environ: Any | None = None,
+    which: Any = shutil.which,
+    manifests: Any | None = None,
+    lock_timeout: float = 10.0,
+    allow_user_scope: bool = False,
+    interactive: bool = False,
+    confirm: Any | None = None,
 ) -> InitResult:
-    targets = discover_config_targets(workspace) if discover_clients else []
-    loaded_configs = {
-        target.path: _load_json_config(target.path)
-        for target in targets
-        if target.format == "json" and (not clients or target.client in clients)
-    }
+    """Discover clients, wire agentbus, and bootstrap workspace runtime state.
 
-    # Parse every selected client config before creating runtime files or RBAC.
-    # A malformed config must not leave a partially initialized workspace.
-    ensure_ephemeral_token(workspace, rotate=False)
-    bootstrap_role = None
-    if not dry_run:
-        bootstrap_role = bootstrap_default_producer(workspace, producer_id)
-        ensure_default_roles(workspace)
-    marker = workspace / ".agentbus" / "workspace"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(str(workspace.resolve()) + "\n", encoding="utf-8")
-    entry = agentbus_mcp_entry(workspace, producer_id)
+    ``dry_run=True`` is strictly read-only: no token, marker, roles, database,
+    lock, backup, or client file is created or modified.  Mutating runs take
+    the workspace setup lock and install every client config inside one
+    rollback-capable transaction.  User-scope (global) configurations are
+    skipped unless ``allow_user_scope`` is true, and their writes additionally
+    take a global config lock shared by every workspace.
+
+    Failure boundary: the workspace runtime bootstrap (token, roles, marker)
+    and the client configs are not one atomic unit.  If a client write fails,
+    config files are rolled back, while an already-bootstrapped runtime stays.
+    """
+    from agentbus.adapters.command import McpCommandError, resolve_mcp_command as _resolve
+    from agentbus.adapters.manifest import build_entry, load_manifests
+    from agentbus.adapters.probe import (
+        CONFIG_MALFORMED,
+        CONFIG_UNREADABLE,
+        ENTRY_CONFLICT,
+        STATUS_ABSENT,
+        STATUS_UNKNOWN,
+        probe_installations,
+    )
+    from agentbus.adapters.writer import ConfigConflictError, plan_patch
+    from agentbus.discovery import (
+        SetupWriteError,
+        FileTransaction,
+        _escapes_workspace,
+        global_config_lock,
+        setup_lock,
+        client_selected,
+        auto_connect_allowed,
+    )
+
+    resolved = workspace.resolve()
     result = InitResult(
         workspace=workspace,
         token_path=token_path(workspace),
-        bootstrap_role=bootstrap_role,
         dry_run=dry_run,
     )
+    marker = resolved / ".agentbus" / "workspace"
 
-    for target in targets:
-        if clients and target.client not in clients:
-            result.skipped.append(f"{target.client}: filtered")
+    def _bootstrap_runtime() -> None:
+        from agentbus.rbac import roles_path
+
+        for runtime_file in (token_path(workspace), roles_path(workspace)):
+            if runtime_file.is_symlink():
+                raise OSError(f"refusing symlinked runtime file: {runtime_file}")
+        if marker.is_symlink():
+            raise OSError("refusing symlinked workspace marker")
+        ensure_ephemeral_token(workspace, rotate=False)
+        result.bootstrap_role = bootstrap_default_producer(workspace, producer_id)
+        ensure_default_roles(workspace)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(marker, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("workspace marker is not a regular file")
+            os.ftruncate(fd, 0)
+            os.write(fd, (str(resolved) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+
+    if not discover_clients:
+        if not dry_run:
+            lock = setup_lock(resolved, timeout=lock_timeout)
+            lock.acquire()
+            try:
+                result.lock_wait_seconds = lock.waited
+                _bootstrap_runtime()
+                result.runtime_initialized = True
+            finally:
+                lock.release()
+        return result
+
+    catalogue = tuple(load_manifests() if manifests is None else manifests)
+    try:
+        cmd = command or _resolve(environ=environ, which=which, validate=True)
+    except McpCommandError as exc:
+        result.skipped.append(f"mcp: no durable command ({exc.code}); clients not wired")
+        if not dry_run:
+            lock = setup_lock(resolved, timeout=lock_timeout)
+            lock.acquire()
+            try:
+                result.lock_wait_seconds = lock.waited
+                _bootstrap_runtime()
+                result.runtime_initialized = True
+            finally:
+                lock.release()
+        return result
+    result.mcp_command = cmd
+    expected = {
+        installation.installation_id: build_entry(
+            installation,
+            argv=cmd.argv,
+            workspace=resolved,
+            producer_id=producer_id,
+        )
+        for manifest in catalogue
+        for installation in manifest.installations
+    }
+    installations = {
+        installation.installation_id: installation
+        for manifest in catalogue
+        for installation in manifest.installations
+    }
+    probes = probe_installations(
+        workspace=resolved,
+        home=home,
+        platform=platform,
+        environ=environ,
+        expected_entries=expected,
+        manifests=catalogue,
+        which=which,
+    )
+
+    planned: list[tuple[Any, Path, Any]] = []
+    wanted = set(clients) if clients else set()
+    for probe in probes:
+        installation = installations[probe.installation_id]
+        named = client_selected(probe, wanted)
+        if clients and not named:
+            result.skipped.append(f"{probe.installation_id}: filtered")
             continue
-        result.scanned.append(target)
-
-        if target.format != "json":
-            result.skipped.append(f"{target.client}: unsupported format")
+        result.scanned.append(
+            ConfigTarget(
+                client=probe.installation_id,
+                path=Path(probe.config_path) if probe.config_path else Path(),
+                format=probe.format,
+            )
+        )
+        if not auto_connect_allowed(probe, installation, wanted):
+            result.skipped.append(
+                f"{probe.installation_id}: auto_connect disabled in manifest"
+            )
             continue
-
-        config = loaded_configs[target.path]
-        merged, changed = merge_json_config(config, entry)
-        if not changed:
-            result.skipped.append(f"{target.client}: already configured")
+        if probe.status == STATUS_ABSENT:
+            result.skipped.append(
+                f"{probe.installation_id}: not detected ({probe.reason})"
+            )
             continue
-
+        if probe.status == STATUS_UNKNOWN:
+            # A user-scope config this run can never write (no authorization,
+            # or a dry run) must not abort project-scope setup: a broken
+            # global IDE file is not a reason to leave the project unwired.
+            if installation.scope == "user" and (dry_run or not allow_user_scope):
+                result.skipped.append(
+                    f"{probe.installation_id}: {probe.reason} "
+                    "(user scope not authorized in this run)"
+                )
+                continue
+            if (
+                probe.config_state in (CONFIG_MALFORMED, CONFIG_UNREADABLE)
+                or probe.entry_state == ENTRY_CONFLICT
+            ):
+                raise _invalid_config_error(
+                    probe.config_path, probe.format, probe.reason
+                )
+            result.skipped.append(f"{probe.installation_id}: {probe.reason}")
+            continue
+        if installation.scope == "user" and not allow_user_scope and dry_run:
+            result.skipped.append(
+                f"{probe.installation_id}: user_scope_requires_authorization "
+                "(pass --allow-user-scope to preview global configs)"
+            )
+            continue
+        if installation.scope == "user" and not allow_user_scope and not dry_run:
+            authorized = False
+            if interactive and confirm is not None:
+                authorized = confirm(
+                    f"Write AgentBus server config to user-scope file "
+                    f"{probe.config_path}?"
+                )
+            if not authorized:
+                result.skipped.append(
+                    f"{probe.installation_id}: "
+                    "user_scope_requires_authorization "
+                    "(pass --allow-user-scope to write global configs)"
+                )
+                continue
+        path = Path(probe.config_path or "")
+        if installation.scope == "project" and _escapes_workspace(path, resolved):
+            raise InvalidMcpConfigError(f"project_path_escapes_workspace: {path}")
+        try:
+            patch = plan_patch(
+                installation,
+                path=path,
+                entry=expected[probe.installation_id],
+            )
+        except ConfigConflictError as exc:
+            raise InvalidMcpConfigError(str(exc)) from exc
+        if not patch.changed:
+            result.skipped.append(f"{probe.installation_id}: already configured")
+            continue
         if dry_run:
-            result.updated.append(f"{target.client}: would update {target.path}")
+            result.updated.append(
+                f"{probe.installation_id}: would update {path}"
+            )
             continue
+        planned.append((installation, path, patch))
 
-        backup = _backup_path(target.path)
-        if not backup.exists():
-            shutil.copy2(target.path, backup)
-            result.backups.append(str(backup))
-        _save_json_config(target.path, merged)
-        result.updated.append(f"{target.client}: updated {target.path}")
+    if dry_run:
+        return result
 
-    return result
+    lock = setup_lock(resolved, timeout=lock_timeout)
+    lock.acquire()
+    result.lock_wait_seconds = lock.waited
+    user_lock = None
+    try:
+        if any(installation.scope == "user" for installation, _p, _s in planned):
+            user_root = Path(home) if home is not None else Path.home()
+            user_lock = global_config_lock(user_root, timeout=lock_timeout)
+            user_lock.acquire()
+        _bootstrap_runtime()
+        transaction = FileTransaction()
+        staged: list[str] = []
+        for installation, path, _first in planned:
+            try:
+                if installation.scope == "project" and _escapes_workspace(path, resolved):
+                    raise ConfigConflictError("project_path_escapes_workspace", str(path))
+                fresh = plan_patch(
+                    installation,
+                    path=path,
+                    entry=expected[installation.installation_id],
+                )
+            except ConfigConflictError as exc:
+                # A concurrent writer may have made the file malformed,
+                # unowned, or unreadable since the pre-lock plan; surface the
+                # same typed error the first pass produces.
+                raise InvalidMcpConfigError(str(exc)) from exc
+            if not fresh.changed:
+                result.skipped.append(
+                    f"{installation.installation_id}: already configured"
+                )
+                continue
+            assert fresh.new_bytes is not None
+            transaction.stage(
+                path,
+                fresh.new_bytes,
+                original_bytes=fresh.original_bytes,
+            )
+            staged.append(f"{installation.installation_id}: updated {path}")
+        outcome = transaction.commit()
+        result.updated.extend(staged)
+        result.backups.extend(outcome.backups)
+        result.runtime_initialized = True
+        return result
+    except SetupWriteError as exc:
+        # The runtime bootstrap (token/roles/marker) already happened; say so.
+        exc.runtime_initialized = True  # type: ignore[attr-defined]
+        raise
+    finally:
+        if user_lock is not None:
+            user_lock.release()
+        lock.release()
 
 
 def detect_factory() -> bool:

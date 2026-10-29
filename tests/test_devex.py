@@ -87,7 +87,9 @@ def test_init_dry_run_and_apply(tmp_path):
     assert any("updated" in u for u in applied.updated)
     data = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert "agentbus" in data["mcpServers"]
-    assert (cfg_path.with_suffix(".json.agentbus.bak")).exists()
+    backups = list(cfg_path.parent.glob("mcp.json.agentbus.bak.*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == '{"mcpServers": {}}\n'
 
 
 def test_resolve_workspace_explicit_is_authoritative(tmp_path):
@@ -199,3 +201,53 @@ def test_mcp_serve_entry_shape(tmp_path):
     assert entry["env"]["AGENTBUS_WORKSPACE"] == str(tmp_path.resolve())
     assert entry["env"]["AGENTBUS_PRODUCER_ID"] == "cursor"
     assert "mcp-serve" in " ".join(entry["args"])
+
+
+def test_jsonc_vscode_config_preserves_comments_and_strings(tmp_path):
+    from agentbus.devex import _load_json_config
+    from agentbus.adapters.writer import plan_json_patch
+    from agentbus.jsonc import loads
+
+    path = tmp_path / '.vscode' / 'mcp.json'
+    path.parent.mkdir()
+    original = '{\n // line comment\n "servers": { /* block comment */ "other": {"url": "https://host/a//b"}, },\n}'
+    path.write_text(original)
+    assert _load_json_config(path)['servers']['other']['url'] == 'https://host/a//b'
+    patch = plan_json_patch(installation_id='vscode', path=path, root='servers', entry={'command': 'agentbus'})
+    updated = patch.new_bytes.decode()
+    assert '// line comment' in updated and '/* block comment */' in updated
+    assert loads(updated)['servers']['agentbus']['command'] == 'agentbus'
+    assert loads(updated)['servers']['other']['url'] == 'https://host/a//b'
+
+
+def test_no_mcp_reports_runtime_initialized(tmp_path):
+    from agentbus.devex import apply_init
+
+    result = apply_init(tmp_path, producer_id='local-user', dry_run=False, discover_clients=False)
+    assert result.runtime_initialized
+    runtime = tmp_path / ".agentbus"
+    assert (runtime / "token").is_file()
+    assert (runtime / "roles.yaml").is_file()
+    assert (runtime / "workspace").read_text().strip() == str(tmp_path.resolve())
+
+
+def test_jsonc_rejects_malformed_empty_member(tmp_path):
+    import pytest
+    from agentbus.devex import InvalidMcpConfigError, _load_json_config
+
+    path = tmp_path / "mcp.json"
+    path.write_text('{"servers": {,}}')
+    with pytest.raises(InvalidMcpConfigError):
+        _load_json_config(path)
+
+
+def test_jsonc_duplicate_root_refuses_non_roundtripping_patch(tmp_path):
+    import pytest
+    from agentbus.adapters.writer import ConfigConflictError, plan_json_patch
+
+    path = tmp_path / "mcp.json"
+    original = '{"servers": {}, "servers": {}}'
+    path.write_text(original)
+    with pytest.raises(ConfigConflictError, match="planned document"):
+        plan_json_patch(installation_id="vscode", path=path, root="servers", entry={"command": "agentbus"})
+    assert path.read_text() == original
