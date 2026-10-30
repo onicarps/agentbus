@@ -26,8 +26,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-import yaml
-
 from agentbus.adapters.manifest import (
     SERVER_NAME,
     Installation,
@@ -173,9 +171,12 @@ def _load_document(path: Path, fmt: str) -> tuple[str, Any, str]:
         except tomllib.TOMLDecodeError as exc:
             return CONFIG_MALFORMED, None, f"invalid toml: {exc}"
     elif fmt == "yaml":
+        from ruamel.yaml import YAML
+        from ruamel.yaml.error import YAMLError
+
         try:
-            document = yaml.safe_load(text)
-        except yaml.YAMLError as exc:
+            document = YAML(typ="safe").load(text)
+        except YAMLError as exc:
             return CONFIG_MALFORMED, None, f"invalid yaml: {exc}"
         if document is None:
             document = {}

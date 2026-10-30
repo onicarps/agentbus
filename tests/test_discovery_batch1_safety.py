@@ -11,6 +11,8 @@ import pytest
 import yaml
 
 from agentbus import discovery as discovery_module
+from agentbus.adapters.probe import CONFIG_MALFORMED, CONFIG_VALID, _load_document
+from agentbus.adapters.writer import entry_matches
 from agentbus.discovery import (
     ConcurrentEditError,
     FileTransaction,
@@ -25,6 +27,33 @@ ROLES = {
     "producers": {"alice": "engineer"},
     "token_roles": {"token-abc": "engineer"},
 }
+
+
+def test_probe_yaml_preserves_yaml12_plain_scalars(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "GOOSE_TOOLSHIM: off\nflag: on\nchoice: yes\nother: no\nactive: true\n"
+        "entry:\n  command: agentbus\n  args: [off]\n  envs: {MODE: off}\n",
+        encoding="utf-8",
+    )
+    state, document, detail = _load_document(path, "yaml")
+    assert state == CONFIG_VALID and not detail
+    assert [document[k] for k in ("GOOSE_TOOLSHIM", "flag", "choice", "other")] == [
+        "off", "on", "yes", "no"
+    ]
+    assert document["active"] is True
+    assert entry_matches(document["entry"], {
+        "command": "agentbus", "args": ["off"], "envs": {"MODE": "off"}
+    })
+
+
+def test_probe_yaml_malformed_syntax_returns_config_malformed(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("entry: {", encoding="utf-8")
+    state, document, detail = _load_document(path, "yaml")
+    assert state == CONFIG_MALFORMED
+    assert document is None
+    assert detail.startswith("invalid yaml:")
 
 
 def _write_roles(workspace: Path) -> Path:
