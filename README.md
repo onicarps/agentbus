@@ -236,6 +236,8 @@ When you inspect your tools, AgentBus clearly reports their status:
 ### Safety Guarantees
 
 * **Zero unexpected writes:** `agentbus discover` and `agentbus connect` (without `--apply`) never write, modify, or delete any files on your computer.
+* **One bounded version probe:** `agentbus connect` may run a single time-boxed `opencode --version` (with a temporary, isolated HOME) to tell the OpenCode v1 and v2 layouts apart. `agentbus discover` never launches a process.
+* **Conditional rollback:** Before each replacement AgentBus re-checks the file's SHA-256 digest and reports `file_created_externally`, `file_deleted_externally`, or `file_modified_externally` instead of overwriting a concurrent edit. If a later write fails, rollback restores only files that still match what AgentBus wrote and reports a conflict for anything changed or deleted since; outside work is never clobbered.
 * **Automatic backups:** When replacing an existing configuration file, AgentBus creates a unique backup file in the same directory (such as `.cursor/mcp.json.agentbus.bak.<timestamp>.<pid>`). Newly created files are not backed up. If an error occurs during an existing file's write, it makes a best-effort rollback.
 * **Secret protection:** Passwords, API keys, and sensitive environment variables are automatically masked as `[REDACTED]` in terminal displays, logs, and JSON outputs.
 * **Safe file replacement:** Configuration files are written to a temporary file first and replaced atomically per file so a crash during write does not leave a half-written file. Multi-file installations proceed sequentially, so crashes or non-cooperating writers can still leave partial multi-file state.
@@ -249,12 +251,18 @@ When you inspect your tools, AgentBus clearly reports their status:
 * **Codex CLI:** Project configuration (`.codex/config.toml`) and global settings (`~/.codex/config.toml`).
 * **VS Code:** Project configuration (`.vscode/mcp.json`, using the standard `servers` schema).
 * **Gemini:** AgentBus writes the legacy user configuration (`~/.gemini/config/mcp_config.json`) for compatibility. Gemini CLI reads `~/.gemini/settings.json`; add AgentBus to that file manually.
+* **Goose:** User configuration (`${XDG_CONFIG_HOME:-~/.config}/goose/config.yaml`, `%APPDATA%\Block\goose\config\config.yaml` on Windows) under the `extensions` map. AgentBus rewrites only `extensions.agentbus` with a round-trip YAML writer that preserves comments, anchors, and key order, and refuses multi-document, custom-tag, recursive-anchor, or duplicate-key files.
+* **Cline CLI:** User configuration (`~/.cline/data/settings/cline_mcp_settings.json`) with `"disabled": false`.
+* **Mistral Vibe:** Project configuration (`.vibe/config.toml`) and user configuration (`${VIBE_HOME:-~/.vibe}/config.toml`). AgentBus updates the matching `[[mcp_servers]]` element in place and preserves every other table and comment.
+* **GitHub Copilot CLI:** User configuration (`~/.copilot/mcp-config.json`) with `"type": "local"` and `"tools": ["*"]`.
+* **OpenCode:** Project (`opencode.json`) and user (`${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json`) configuration. OpenCode ships two incompatible layouts: v1 stores servers under `mcp` with `enabled`, v2 under `mcp.servers` with `disabled`. AgentBus selects one from `--client opencode-v1|opencode-v2`, then the config `$schema`, then a bounded `opencode --version` probe, then the file structure, and refuses to guess when the signals are missing or disagree.
+* **Qwen Code:** Project (`.qwen/settings.json`) and user (`~/.qwen/settings.json`) configuration.
 
 ### Manual Tool Configuration
 
 If you prefer editing configuration files by hand, you can add AgentBus directly.
 
-> **RBAC Producer Authorization Note:** In a workspace with role-based access control enabled (`.agentbus/roles.yaml`), any `AGENTBUS_PRODUCER_ID` you configure (such as `local-user`) must have a corresponding role mapping under `producers:` (for example: `producers: { local-user: engineer }`). If `roles.yaml` exists and the configured producer is not listed, publish calls will return `403 Forbidden`. You can change `local-user` in the snippets below to any producer ID that already has an authorized role mapping.
+> **RBAC Producer Authorization Note:** In a workspace with role-based access control enabled (`.agentbus/roles.yaml`), any `AGENTBUS_PRODUCER_ID` you configure (such as `local-user`) must have a corresponding role mapping under `producers:` (for example: `producers: { local-user: engineer }`). If `roles.yaml` exists and the configured producer is not listed, publish calls will return `403 Forbidden`. You can change `local-user` in the snippets below to any producer ID that already has an authorized role mapping. `agentbus connect` never creates or edits `.agentbus/roles.yaml`: connecting a client does not grant a producer role. Workspaces without an active RBAC configuration, or with `AGENTBUS_DISABLE_RBAC=1` outside protected identity mode, keep working as before.
 
 <details>
 <summary><b>Cursor (<code>.cursor/mcp.json</code> or <code>~/.cursor/mcp.json</code>)</b></summary>

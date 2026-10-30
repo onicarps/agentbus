@@ -1,0 +1,54 @@
+manifest_version: 1
+manifest_id: vibe
+client: vibe
+title: Mistral Vibe Code CLI
+version: "2026-10-30"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-30T04:20:00Z"
+sources:
+  - id: vibe-mcp-servers
+    resource: https://docs.mistral.ai/vibe/code/cli/mcp-servers
+    title: Mistral Vibe - MCP servers ([[mcp_servers]] array of tables)
+  - id: vibe-configuration
+    resource: https://docs.mistral.ai/vibe/code/cli/configuration
+    title: Mistral Vibe - configuration file locations (.vibe/config.toml)
+notes: >-
+  Vibe stores MCP servers as TOML array-of-tables under "mcp_servers". AgentBus
+  matches the element whose "name" is "agentbus", updates command/args/env in
+  place, and leaves every other table and comment untouched. Vibe merges the
+  closest project ".vibe/config.toml" over "${VIBE_HOME:-~/.vibe}/config.toml";
+  project-level files load only for trusted folders.
+approval:
+  mode: restart
+  guidance: >-
+    Start a new "vibe" session and run "/mcp" to confirm the agentbus server
+    is listed with its tools.
+installations:
+  - id: vibe-project
+    title: Mistral Vibe (project config)
+    scope: project
+    format: toml
+    root_kind: array
+    root: mcp_servers
+    entry_shape: vibe_stdio
+    auto_connect: true
+    paths:
+      all: "{workspace}/.vibe/config.toml"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.vibe"]
+  - id: vibe-user
+    title: Mistral Vibe (user config)
+    scope: user
+    format: toml
+    root_kind: array
+    root: mcp_servers
+    entry_shape: vibe_stdio
+    auto_connect: false
+    paths:
+      all: "${VIBE_HOME:-~/.vibe}/config.toml"
+    detection:
+      binaries: [vibe]
+      app_dirs:
+        all: ["${VIBE_HOME:-~/.vibe}"]

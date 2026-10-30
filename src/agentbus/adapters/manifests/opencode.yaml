@@ -1,0 +1,88 @@
+manifest_version: 1
+manifest_id: opencode
+client: opencode
+title: OpenCode (v1 and v2 layouts)
+version: "2026-10-30"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-30T04:20:00Z"
+sources:
+  - id: opencode-v1-docs
+    resource: https://opencode.ai/docs/mcp-servers/
+    title: OpenCode v1 MCP configuration (mcp.<name>, enabled)
+  - id: opencode-v2-docs
+    resource: https://dev.opencode.ai/v2/docs/mcp-servers/
+    title: OpenCode v2 MCP configuration (mcp.servers.<name>, disabled)
+notes: >-
+  OpenCode ships two incompatible MCP layouts that share one config filename.
+  v1 stores servers directly under "mcp" with "enabled": true; v2 stores them
+  under "mcp.servers" with "disabled": false, and the whole argv lives in one
+  "command" array with the environment under "environment". At most one
+  variant is ever connected. Selection order is: explicit --client
+  opencode-v1/opencode-v2, then $schema markers, then a bounded
+  "opencode --version" probe, then structural analysis. Disagreeing or absent
+  signals fail closed with an actionable error instead of guessing v2.
+approval:
+  mode: restart
+  guidance: >-
+    Start a new OpenCode session and run its MCP status command to confirm the
+    agentbus server is connected.
+installations:
+  - id: opencode-v1-project
+    title: OpenCode v1 (project config)
+    scope: project
+    format: json
+    root: mcp
+    entry_shape: opencode_v1
+    variant_group: opencode
+    variant: v1
+    auto_connect: true
+    paths:
+      all: "{workspace}/opencode.json"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.opencode"]
+  - id: opencode-v1-user
+    title: OpenCode v1 (user config)
+    scope: user
+    format: json
+    root: mcp
+    entry_shape: opencode_v1
+    variant_group: opencode
+    variant: v1
+    auto_connect: true
+    paths:
+      all: "${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json"
+    detection:
+      binaries: [opencode]
+      app_dirs:
+        all: ["${XDG_CONFIG_HOME:-~/.config}/opencode"]
+  - id: opencode-v2-project
+    title: OpenCode v2 (project config)
+    scope: project
+    format: json
+    root: mcp.servers
+    entry_shape: opencode_v2
+    variant_group: opencode
+    variant: v2
+    auto_connect: true
+    paths:
+      all: "{workspace}/opencode.json"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.opencode"]
+  - id: opencode-v2-user
+    title: OpenCode v2 (user config)
+    scope: user
+    format: json
+    root: mcp.servers
+    entry_shape: opencode_v2
+    variant_group: opencode
+    variant: v2
+    auto_connect: true
+    paths:
+      all: "${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json"
+    detection:
+      binaries: [opencode]
+      app_dirs:
+        all: ["${XDG_CONFIG_HOME:-~/.config}/opencode"]

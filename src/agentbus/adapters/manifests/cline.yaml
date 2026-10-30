@@ -1,0 +1,38 @@
+manifest_version: 1
+manifest_id: cline
+client: cline
+title: Cline CLI
+version: "2026-10-30"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-30T04:20:00Z"
+sources:
+  - id: cline-mcp-settings
+    resource: https://github.com/cline/cline#mcp-settings
+    title: Cline MCP settings (mcpServers object in cline_mcp_settings.json)
+notes: >-
+  Cline CLI reads one JSON file with a top-level "mcpServers" object. Each
+  stdio server uses command/args/env and a "disabled" flag; AgentBus writes
+  "disabled": false so the entry is active. The packaged path follows the
+  v0.28 discovery decision; Cline has shipped more than one settings location
+  across releases, so discovery reports "absent" rather than guessing when
+  the documented file is not present.
+approval:
+  mode: restart
+  guidance: >-
+    Restart the Cline CLI session and open the MCP servers panel to confirm
+    the agentbus server is enabled.
+installations:
+  - id: cline-user
+    title: Cline CLI (user config)
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: cline_stdio
+    auto_connect: true
+    paths:
+      all: "~/.cline/data/settings/cline_mcp_settings.json"
+    detection:
+      binaries: [cline]
+      app_dirs:
+        all: ["~/.cline"]

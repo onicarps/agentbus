@@ -1,0 +1,49 @@
+manifest_version: 1
+manifest_id: qwen
+client: qwen
+title: Qwen Code
+version: "2026-10-30"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-30T04:20:00Z"
+sources:
+  - id: qwen-code-mcp
+    resource: https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/
+    title: Qwen Code MCP configuration (mcpServers, user and project scopes)
+notes: >-
+  Qwen Code reads "mcpServers" from "~/.qwen/settings.json" (user scope) and
+  ".qwen/settings.json" (project scope). Stdio entries use command/args/env;
+  the CLI binary is "qwen" and some installs also expose "qwen-code", so both
+  are used as detection evidence. Unknown per-server options (timeout, trust,
+  tool filters) are preserved and never rewritten.
+approval:
+  mode: restart
+  guidance: >-
+    Start a new Qwen Code session and run "/mcp" to confirm the agentbus
+    server is connected.
+installations:
+  - id: qwen-user
+    title: Qwen Code (user config)
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      all: "~/.qwen/settings.json"
+    detection:
+      binaries: [qwen, qwen-code]
+      app_dirs:
+        all: ["~/.qwen"]
+  - id: qwen-project
+    title: Qwen Code (project config)
+    scope: project
+    format: json
+    root: mcpServers
+    entry_shape: command_args_env
+    auto_connect: true
+    paths:
+      all: "{workspace}/.qwen/settings.json"
+    detection:
+      app_dirs:
+        all: ["{workspace}/.qwen"]

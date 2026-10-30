@@ -1,0 +1,46 @@
+manifest_version: 1
+manifest_id: goose
+client: goose
+title: Goose (Block)
+version: "2026-10-30"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-30T04:20:00Z"
+sources:
+  - id: goose-config-files
+    resource: https://goose-docs.ai/docs/guides/config-files/
+    title: goose Configuration Files (config.yaml locations and stdio extension shape)
+  - id: goose-extension-stdio
+    resource: https://github.com/block/goose/blob/main/crates/goose/src/agents/extension.rs
+    title: goose ExtensionConfig::Stdio (cmd/args/envs, env accepted as alias)
+notes: >-
+  Goose stores MCP extensions as named entries under "extensions" in a single
+  YAML file. The documented stdio shape is type/name/enabled/cmd/args/envs;
+  "env" is only a deserialization alias in current goose, so AgentBus writes
+  the canonical "envs" key and treats both spellings as the environment map.
+  AgentBus patches only "extensions.agentbus" with a ruamel round-trip parser,
+  preserving comments, anchors, key order, and every other extension.
+  Windows uses %APPDATA%\Block\goose\config\config.yaml.
+approval:
+  mode: restart
+  guidance: >-
+    Restart goose (config.yaml is read at session start) and run
+    "goose info -v" to confirm the agentbus extension is loaded.
+installations:
+  - id: goose-user
+    title: Goose (user config)
+    scope: user
+    format: yaml
+    root: extensions
+    entry_shape: goose_stdio
+    auto_connect: true
+    paths:
+      linux: "${XDG_CONFIG_HOME:-~/.config}/goose/config.yaml"
+      darwin: "${XDG_CONFIG_HOME:-~/.config}/goose/config.yaml"
+      win32: "%APPDATA%/Block/goose/config/config.yaml"
+    detection:
+      binaries: [goose]
+      app_dirs:
+        linux: ["${XDG_CONFIG_HOME:-~/.config}/goose"]
+        darwin: ["${XDG_CONFIG_HOME:-~/.config}/goose"]
+        win32: ["%APPDATA%/Block/goose"]

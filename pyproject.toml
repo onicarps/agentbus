@@ -31,6 +31,9 @@ dependencies = [
     "cryptography~=50.0",
     "rich>=13.0",
     "textual>=0.80",
+    # Round-trip YAML keeps operator comments and ordering when AgentBus
+    # patches a client config (Goose). See adapters/writer.py.
+    "ruamel.yaml>=0.18.6",
 ]
 
 [project.optional-dependencies]

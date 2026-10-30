@@ -7,6 +7,8 @@ existing file cannot be changed without risking unrelated configuration.
 
 from __future__ import annotations
 
+import copy
+import io
 import json
 import re
 import tomllib
@@ -14,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote, urlsplit, urlunsplit
+
+import yaml as _pyyaml
 
 from agentbus.adapters.manifest import SERVER_NAME, Installation
 
@@ -54,7 +58,9 @@ _SECRET_URL_PARAM = re.compile(
 #: ``--flag=https://...`` keeps the flag visible and redacts only the value.
 _ASSIGNMENT_PREFIX = re.compile(r"^(?P<flag>--?[^=\s]+)=.*$")
 _REDACTED = "[REDACTED]"
-_ENV_CONTAINERS = frozenset({"env", "environment", "headers", "http_headers", "env_http_headers"})
+_ENV_CONTAINERS = frozenset(
+    {"env", "envs", "environment", "headers", "http_headers", "env_http_headers"}
+)
 
 
 class ConfigConflictError(ValueError):
@@ -209,10 +215,24 @@ def entry_env_keys(entry: Mapping[str, Any] | None) -> list[str]:
     """Sorted environment variable names of an entry, without values."""
     if not isinstance(entry, dict):
         return []
-    env = entry.get("env")
-    if not isinstance(env, dict):
-        return []
-    return sorted(str(key) for key in env)
+    names: set[str] = set()
+    for container in _ENTRY_ENV_KEYS:
+        env = entry.get(container)
+        if isinstance(env, dict):
+            names.update(str(key) for key in env)
+    return sorted(names)
+
+
+def _entry_command_names(entry: Mapping[str, Any]) -> list[str]:
+    """Every executable spelling an AgentBus entry may use."""
+    names: list[str] = []
+    for key in ("command", "cmd"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            names.append(value)
+        elif isinstance(value, (list, tuple)) and value and isinstance(value[0], str):
+            names.append(value[0])
+    return names
 
 
 def is_agentbus_entry(entry: Any) -> bool:
@@ -224,19 +244,22 @@ def is_agentbus_entry(entry: Any) -> bool:
     """
     if not isinstance(entry, dict):
         return False
-    env = entry.get("env")
-    if isinstance(env, dict) and (
-        "AGENTBUS_WORKSPACE" in env or "AGENTBUS_PRODUCER_ID" in env
-    ):
-        return True
-    command = entry.get("command")
-    if isinstance(command, str) and Path(command).name in (
-        "agentbus",
-        "agentbus.exe",
+    for container in _ENTRY_ENV_KEYS:
+        env = entry.get(container)
+        if isinstance(env, dict) and (
+            "AGENTBUS_WORKSPACE" in env or "AGENTBUS_PRODUCER_ID" in env
+        ):
+            return True
+    if any(
+        Path(name).name in ("agentbus", "agentbus.exe")
+        for name in _entry_command_names(entry)
     ):
         return True
     args = entry.get("args")
     if isinstance(args, list) and "mcp-serve" in args:
+        return True
+    command = entry.get("command")
+    if isinstance(command, list) and "mcp-serve" in command:
         return True
     return False
 
@@ -304,8 +327,32 @@ def serialize_json(document: Mapping[str, Any]) -> bytes:
 
 
 _UNSAFE_ENV = re.compile(r"^(PYTHON.*|LD_.*|DYLD_.*|NODE_OPTIONS|NODE_PATH|RUBYOPT|PERL5OPT|BASH_ENV|ENV|PATH|HOME|SSL_CERT_FILE|SSL_CERT_DIR|REQUESTS_CA_BUNDLE)$", re.IGNORECASE)
-_INERT_ENTRY_KEYS = {"disabled", "enabled", "startup_timeout_sec", "tool_timeout_sec"}
+_INERT_ENTRY_KEYS = {
+    # State flags the host owns.
+    "disabled",
+    "enabled",
+    # Timeouts.
+    "startup_timeout_sec",
+    "tool_timeout_sec",
+    "timeout",
+    # Metadata and per-client options that do not change the launch command.
+    # They are preserved as-is by merge and never validated or echoed.
+    "env_keys",
+    "available_tools",
+    "bundled",
+    "description",
+    "display_name",
+    "trust",
+    "includeTools",
+    "excludeTools",
+    "versionNegotiation",
+    "cwd",
+}
 _MANAGED_ENV = {"AGENTBUS_WORKSPACE", "AGENTBUS_PRODUCER_ID"}
+#: Clients spell the environment map differently: most use ``env``, Goose uses
+#: ``envs``, OpenCode uses ``environment``. All are merged key-by-key and never
+#: echoed.
+_ENTRY_ENV_KEYS = ("env", "envs", "environment")
 
 
 def _unsafe_env_key(key: object) -> bool:
@@ -316,7 +363,12 @@ def _unsafe_env_key(key: object) -> bool:
 
 
 def _unsafe_extra_keys(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> set[str]:
-    extra = set(actual) - set(expected) - _INERT_ENTRY_KEYS
+    extra = (
+        set(actual)
+        - set(expected)
+        - _INERT_ENTRY_KEYS
+        - set(_ENTRY_ENV_KEYS)
+    )
     if actual.get("type") == "stdio":
         extra.discard("type")
     return extra
@@ -326,7 +378,7 @@ def entry_matches(actual: Any, expected: Mapping[str, Any]) -> bool:
     if not isinstance(actual, dict) or _unsafe_extra_keys(actual, expected):
         return False
     for key, value in expected.items():
-        if key == "env" and isinstance(value, dict):
+        if key in _ENTRY_ENV_KEYS and isinstance(value, dict):
             current = actual.get(key)
             if not isinstance(current, dict) or any(_unsafe_env_key(k) for k in current):
                 return False
@@ -341,16 +393,27 @@ def _merge_entry(previous: Mapping[str, Any] | None, entry: Mapping[str, Any]) -
     merged = dict(previous or {})
     if _unsafe_extra_keys(merged, entry):
         raise ConfigConflictError("unsafe_entry_key", "existing entry has unrecognized launch settings; edit it manually")
-    for key, value in entry.items():
-        if key == "env" and isinstance(value, dict):
-            existing = merged.get(key, {})
-            if not isinstance(existing, dict):
+    # Clients disagree on the environment key name (``env``/``envs``/
+    # ``environment``). Fold every previous spelling into the single container
+    # this client uses; leaving two of them behind can be rejected as a
+    # duplicate field (Goose treats ``env`` as an alias of ``envs``).
+    env_key = next((key for key in _ENTRY_ENV_KEYS if key in entry), None)
+    existing_env: dict[str, Any] = {}
+    if env_key is not None:
+        for key in _ENTRY_ENV_KEYS:
+            value = merged.pop(key, None)
+            if value is None:
+                continue
+            if not isinstance(value, dict):
                 raise ConfigConflictError("env_not_object", "existing env must be a mapping")
-            if any(_unsafe_env_key(k) for k in existing):
-                raise ConfigConflictError(
-                    "unsafe_env", "existing environment contains unsafe keys; edit it manually"
-                )
-            merged[key] = {**existing, **value}
+            existing_env.update(value)
+        if any(_unsafe_env_key(k) for k in existing_env):
+            raise ConfigConflictError(
+                "unsafe_env", "existing environment contains unsafe keys; edit it manually"
+            )
+    for key, value in entry.items():
+        if key == env_key:
+            merged[key] = {**existing_env, **value}
         else:
             merged[key] = value
     return merged
@@ -366,16 +429,19 @@ def plan_json_patch(
 ) -> Patch:
     original = read_bytes(path) if raw is None else raw
     document = parse_json(original, path=path)
-    container = document.get(root)
-    if container is None:
-        container = {}
-        document[root] = container
-    elif not isinstance(container, dict):
-        raise ConfigConflictError(
-            "root_not_object",
-            f"{path}: {root!r} must be a JSON object, found "
-            f"{type(container).__name__}",
-        )
+    container: Any = document
+    for part in root.split("."):
+        current = container.get(part)
+        if current is None:
+            current = {}
+            container[part] = current
+        elif not isinstance(current, dict):
+            raise ConfigConflictError(
+                "root_not_object",
+                f"{path}: {part!r} must be a JSON object, found "
+                f"{type(current).__name__}",
+            )
+        container = current
 
     previous = container.get(SERVER_NAME)
     if previous is not None and not isinstance(previous, dict):
@@ -636,6 +702,420 @@ def plan_toml_patch(
     )
 
 
+# ---------------------------------------------------------------------------
+# YAML: round-trip, comment and ordering preserving
+# ---------------------------------------------------------------------------
+
+_YAML_STANDARD_TAG = "tag:yaml.org,2002:"
+#: Only the core data tags survive a round trip safely. Notably
+#: ``tag:yaml.org,2002:python/object`` shares the standard prefix but is an
+#: arbitrary-object constructor for unsafe loaders, so it is refused too.
+_YAML_SAFE_TAGS = frozenset(
+    _YAML_STANDARD_TAG + name
+    for name in (
+        "null",
+        "bool",
+        "int",
+        "float",
+        "str",
+        "seq",
+        "map",
+        "set",
+        "timestamp",
+        "binary",
+        "value",
+        "merge",
+    )
+)
+#: ``[[table]]`` array-of-tables header (distinct from ``[table]``).
+_ARRAY_HEADER = re.compile(r"^\s*\[\[\s*(?P<name>[^\[\]]+?)\s*\]\]\s*(?:#.*)?$")
+
+
+def _unsafe_yaml(path: Path, detail: str) -> ConfigConflictError:
+    return ConfigConflictError("unsafe_yaml_construct", f"{path}: {detail}")
+
+
+def _scan_yaml_constructs(text: str, *, path: Path) -> None:
+    """Reject YAML that cannot be rewritten without losing meaning.
+
+    Composition (not construction) is enough to see document count, tags, and
+    alias graphs, so this pass never instantiates untrusted Python objects.
+    """
+    try:
+        documents = list(_pyyaml.compose_all(text, Loader=_pyyaml.SafeLoader))
+    except _pyyaml.YAMLError as exc:
+        raise ConfigConflictError("malformed_yaml", f"{path}: {exc}") from exc
+    if len(documents) > 1:
+        raise _unsafe_yaml(path, "multi-document YAML ('---') is not supported")
+    if not documents:
+        return
+
+    def walk(node: Any, active: set[int]) -> None:
+        if id(node) in active:
+            raise _unsafe_yaml(path, "recursive anchors/aliases are not supported")
+        tag = getattr(node, "tag", "")
+        if tag and str(tag) not in _YAML_SAFE_TAGS:
+            raise _unsafe_yaml(path, f"custom YAML tag {tag!r} is not supported")
+        active.add(id(node))
+        try:
+            if isinstance(node, _pyyaml.MappingNode):
+                for key_node, value_node in node.value:
+                    walk(key_node, active)
+                    walk(value_node, active)
+            elif isinstance(node, _pyyaml.SequenceNode):
+                for child in node.value:
+                    walk(child, active)
+        finally:
+            active.discard(id(node))
+
+    walk(documents[0], set())
+
+
+def _plain_yaml(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {key: _plain_yaml(value) for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_plain_yaml(value) for value in node]
+    return node
+
+
+def _yaml_round_trip() -> Any:
+    from ruamel.yaml import YAML
+
+    parser = YAML(typ="rt")
+    parser.preserve_quotes = True
+    parser.allow_duplicate_keys = False
+    parser.width = 4096
+    # Match the two-space block style Goose documents for new mappings.
+    parser.indent(mapping=2, sequence=4, offset=2)
+    return parser
+
+
+def _load_yaml_document(text: str, *, path: Path) -> Any:
+    from ruamel.yaml.comments import CommentedMap
+    from ruamel.yaml.constructor import DuplicateKeyError
+    from ruamel.yaml.error import YAMLError as RoundTripYAMLError
+
+    if not text.strip():
+        return CommentedMap()
+    try:
+        document = _yaml_round_trip().load(text)
+    except DuplicateKeyError as exc:
+        raise _unsafe_yaml(path, f"duplicate mapping key: {exc}") from exc
+    except RoundTripYAMLError as exc:
+        raise ConfigConflictError("malformed_yaml", f"{path}: {exc}") from exc
+    if document is None:
+        return CommentedMap()
+    if not isinstance(document, dict):
+        raise ConfigConflictError("not_object", f"{path}: expected a YAML mapping")
+    return document
+
+
+def serialize_yaml(document: Any) -> bytes:
+    stream = io.StringIO()
+    _yaml_round_trip().dump(document, stream)
+    text = stream.getvalue()
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text.encode("utf-8")
+
+
+def plan_yaml_patch(
+    *,
+    installation_id: str,
+    path: Path,
+    root: str,
+    entry: Mapping[str, Any],
+    raw: bytes | None = None,
+) -> Patch:
+    original = read_bytes(path) if raw is None else raw
+    if original is None:
+        document: Any = None
+    else:
+        try:
+            text = original.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigConflictError(
+                "non_utf8", f"{path}: expected UTF-8 YAML"
+            ) from exc
+        _scan_yaml_constructs(text, path=path)
+        document = _load_yaml_document(text, path=path)
+
+    if document is None:
+        from ruamel.yaml.comments import CommentedMap
+
+        document = CommentedMap()
+
+    from ruamel.yaml.comments import CommentedMap
+
+    container: Any = document
+    for part in root.split("."):
+        current = container.get(part)
+        if current is None:
+            current = CommentedMap()
+            container[part] = current
+        elif not isinstance(current, dict):
+            raise ConfigConflictError(
+                "root_not_object",
+                f"{path}: {part!r} must be a YAML mapping, found "
+                f"{type(current).__name__}",
+            )
+        container = current
+
+    previous = container.get(SERVER_NAME)
+    if previous is not None and not isinstance(previous, dict):
+        raise ConfigConflictError(
+            "entry_not_object",
+            f"{path}: {root}.{SERVER_NAME} is not a YAML mapping",
+        )
+    if previous is not None and previous != entry and not is_agentbus_entry(
+        previous
+    ):
+        raise ConfigConflictError(
+            "entry_not_owned",
+            f"{path}: {root}.{SERVER_NAME} already exists and is not managed "
+            "by AgentBus; refusing to overwrite it",
+        )
+    if entry_matches(previous, entry):
+        return Patch(
+            installation_id=installation_id,
+            path=path,
+            format="yaml",
+            exists=original is not None,
+            changed=False,
+            original_bytes=original,
+            new_bytes=None,
+            reason="unchanged",
+            previous_entry=_plain_yaml(previous) if previous is not None else None,
+        )
+
+    container[SERVER_NAME] = _merge_entry(previous, entry)
+    new_bytes = serialize_yaml(document)
+    try:
+        patched = _pyyaml.safe_load(new_bytes.decode("utf-8"))
+    except _pyyaml.YAMLError as exc:
+        raise ConfigConflictError(
+            "patch_invalid_yaml", f"{path}: generated YAML is invalid: {exc}"
+        ) from exc
+    if patched != _plain_yaml(document):
+        raise ConfigConflictError(
+            "patch_roundtrip_mismatch",
+            f"{path}: patched YAML does not round-trip; edit manually",
+        )
+    return Patch(
+        installation_id=installation_id,
+        path=path,
+        format="yaml",
+        exists=original is not None,
+        changed=True,
+        original_bytes=original,
+        new_bytes=new_bytes,
+        reason="updated" if original is not None else "created",
+        previous_entry=_plain_yaml(previous) if previous is not None else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# TOML array-of-tables (name-matched, as used by Mistral Vibe)
+# ---------------------------------------------------------------------------
+
+
+def _dotted_get(document: Mapping[str, Any], table: str) -> Any:
+    node: Any = document
+    for part in table.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _dotted_set(document: dict[str, Any], table: str, value: Any) -> None:
+    parts = table.split(".")
+    node: dict[str, Any] = document
+    for part in parts[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[parts[-1]] = value
+
+
+def _array_header_indexes(lines: Sequence[str], table: str) -> list[int]:
+    indexes: list[int] = []
+    for index, line in enumerate(lines):
+        match = _ARRAY_HEADER.match(line)
+        if match and match.group("name").strip() == table:
+            indexes.append(index)
+    return indexes
+
+
+def _array_block_end(lines: Sequence[str], table: str, start: int) -> int:
+    """End (exclusive) of one ``[[table]]`` element, sub-tables included."""
+    for index in range(start + 1, len(lines)):
+        if _ARRAY_HEADER.match(lines[index]):
+            return index
+        match = _TABLE_HEADER.match(lines[index])
+        if not match:
+            continue
+        name = match.group("name").strip()
+        if name == table or name.startswith(table + "."):
+            continue
+        return index
+    return len(lines)
+
+
+def render_toml_array_entry(table: str, entry: Mapping[str, Any]) -> str:
+    lines: list[str] = [f"[[{table}]]"]
+    env_blocks: list[tuple[str, Mapping[str, Any]]] = []
+    for key, value in entry.items():
+        if key in _ENTRY_ENV_KEYS and isinstance(value, dict):
+            env_blocks.append((key, value))
+            continue
+        lines.append(f"{key} = {_render_toml_value(value)}")
+    for key, env in env_blocks:
+        if not env:
+            continue
+        lines.append("")
+        lines.append(f"[{table}.{key}]")
+        for name, value in env.items():
+            lines.append(f"{name} = {_render_toml_value(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def plan_toml_array_patch(
+    *,
+    installation_id: str,
+    path: Path,
+    table: str,
+    entry: Mapping[str, Any],
+    raw: bytes | None = None,
+) -> Patch:
+    original = read_bytes(path) if raw is None else raw
+    if original is None or not original.strip():
+        text = ""
+        document: dict[str, Any] = {}
+    else:
+        try:
+            text = original.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ConfigConflictError(
+                "non_utf8", f"{path}: expected UTF-8 TOML"
+            ) from exc
+        try:
+            document = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigConflictError("malformed_toml", f"{path}: {exc}") from exc
+
+    current_items = _dotted_get(document, table)
+    if current_items is not None and not isinstance(current_items, list):
+        raise ConfigConflictError(
+            "entry_not_object",
+            f"{path}: {table!r} must be an array of tables ([[{table}]])",
+        )
+    items = list(current_items or [])
+    index = next(
+        (
+            position
+            for position, item in enumerate(items)
+            if isinstance(item, dict) and item.get("name") == SERVER_NAME
+        ),
+        None,
+    )
+    current = items[index] if index is not None else None
+    if current is not None and not isinstance(current, dict):
+        raise ConfigConflictError(
+            "entry_not_object", f"{path}: [[{table}]] entry is not a table"
+        )
+    if current is not None and current != entry and not is_agentbus_entry(
+        current
+    ):
+        raise ConfigConflictError(
+            "entry_not_owned",
+            f"{path}: a [[{table}]] entry named {SERVER_NAME!r} already exists "
+            "and is not managed by AgentBus; refusing to overwrite it",
+        )
+    if entry_matches(current, entry):
+        return Patch(
+            installation_id=installation_id,
+            path=path,
+            format="toml",
+            exists=original is not None,
+            changed=False,
+            original_bytes=original,
+            new_bytes=None,
+            reason="unchanged",
+            previous_entry=current,
+        )
+
+    merged = _merge_entry(current, entry)
+    rendered = render_toml_array_entry(table, merged)
+    lines = text.splitlines(keepends=True)
+    header_indexes = _array_header_indexes(lines, table)
+
+    if index is not None:
+        if len(header_indexes) != len(items):
+            raise ConfigConflictError(
+                "toml_structure_conflict",
+                f"{path}: cannot map [[{table}]] blocks onto parsed tables",
+            )
+        start = header_indexes[index]
+        end = _array_block_end(lines, table, start)
+        head = "".join(lines[:start])
+        tail = "".join(lines[end:])
+        candidate = head + rendered
+        if tail:
+            if not candidate.endswith("\n"):
+                candidate += "\n"
+            if not tail.startswith("\n"):
+                candidate += "\n"
+            candidate += tail
+    else:
+        if items and len(header_indexes) != len(items):
+            raise ConfigConflictError(
+                "toml_structure_conflict",
+                f"{path}: {table!r} is defined without array-of-table headers",
+            )
+        prefix = text
+        if prefix and not prefix.endswith("\n"):
+            prefix += "\n"
+        if prefix.strip():
+            prefix += "\n"
+        candidate = prefix + rendered
+
+    try:
+        patched = tomllib.loads(candidate)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigConflictError(
+            "patch_invalid_toml", f"{path}: generated TOML is invalid: {exc}"
+        ) from exc
+
+    expected_document = copy.deepcopy(document)
+    expected_items = list(_dotted_get(expected_document, table) or [])
+    if index is None:
+        expected_items.append(merged)
+    else:
+        expected_items[index] = merged
+    _dotted_set(expected_document, table, expected_items)
+    if patched != expected_document:
+        raise ConfigConflictError(
+            "patch_roundtrip_mismatch",
+            f"{path}: patched [[{table}]] does not round-trip; edit manually",
+        )
+
+    return Patch(
+        installation_id=installation_id,
+        path=path,
+        format="toml",
+        exists=original is not None,
+        changed=True,
+        original_bytes=original,
+        new_bytes=candidate.encode("utf-8"),
+        reason="updated" if original is not None else "created",
+        previous_entry=current,
+    )
+
+
 def plan_patch(
     installation: Installation,
     *,
@@ -652,10 +1132,26 @@ def plan_patch(
             raw=raw,
         )
     if installation.format == "toml":
+        if installation.root_kind == "array":
+            return plan_toml_array_patch(
+                installation_id=installation.installation_id,
+                path=path,
+                table=installation.root,
+                entry=entry,
+                raw=raw,
+            )
         return plan_toml_patch(
             installation_id=installation.installation_id,
             path=path,
             table=installation.root,
+            entry=entry,
+            raw=raw,
+        )
+    if installation.format == "yaml":
+        return plan_yaml_patch(
+            installation_id=installation.installation_id,
+            path=path,
+            root=installation.root,
             entry=entry,
             raw=raw,
         )

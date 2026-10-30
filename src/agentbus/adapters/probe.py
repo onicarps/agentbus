@@ -3,10 +3,15 @@
 Guarantees:
 
 * never creates, modifies, or deletes anything;
-* never launches a process or opens a socket;
+* never opens a socket;
 * never reads a value it reports as a secret (only structure is inspected);
 * reports ``unknown`` whenever evidence is ambiguous or unreadable instead of
   guessing ``present`` or ``absent``.
+
+The one process boundary is a bounded, read-only ``<binary> --version`` probe
+used only to disambiguate client *variants* that share a config filename and
+format (OpenCode v1/v2). It runs only when the client is already evidenced as
+installed, never for ordinary clients.
 """
 
 from __future__ import annotations
@@ -17,9 +22,11 @@ import platform as platform_module
 import shutil
 import stat
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, Sequence
+
+import yaml
 
 from agentbus.adapters.manifest import (
     SERVER_NAME,
@@ -27,6 +34,11 @@ from agentbus.adapters.manifest import (
     Manifest,
     expand_template,
     load_manifests,
+)
+from agentbus.adapters.opencode import (
+    AMBIGUITY_ACTION,
+    OpenCodeVersionAmbiguityError,
+    detect_variant,
 )
 
 STATUS_PRESENT = "present"
@@ -64,6 +76,8 @@ class ClientProbe:
     approval_mode: str = "restart"
     approval_guidance: str = ""
     auto_connect: bool = True
+    #: Variant label (``v1``/``v2``) for clients with incompatible layouts.
+    variant: str = ""
 
     @property
     def present(self) -> bool:
@@ -145,6 +159,13 @@ def _load_document(path: Path, fmt: str) -> tuple[str, Any, str]:
             document = tomllib.loads(text)
         except tomllib.TOMLDecodeError as exc:
             return CONFIG_MALFORMED, None, f"invalid toml: {exc}"
+    elif fmt == "yaml":
+        try:
+            document = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            return CONFIG_MALFORMED, None, f"invalid yaml: {exc}"
+        if document is None:
+            document = {}
     else:  # pragma: no cover - guarded by manifest validation
         return CONFIG_MALFORMED, None, f"unsupported format {fmt!r}"
     if not isinstance(document, dict):
@@ -175,6 +196,8 @@ def _server_entry(
     use a server container (``mcpServers``) and need one more ``agentbus``
     lookup; TOML clients already address ``mcp_servers.agentbus`` directly.
     The final path segment decides, so no client-specific branching is needed.
+    ``root_kind: array`` addresses an array of tables matched by ``name``
+    (Mistral Vibe) instead of a mapping key.
     """
     parts = installation.root.split(".")
     node: Any = document
@@ -184,6 +207,15 @@ def _server_entry(
         if part not in node:
             return ENTRY_ABSENT, None
         node = node[part]
+
+    if installation.root_kind == "array":
+        if not isinstance(node, list):
+            return ENTRY_CONFLICT, None
+        for item in node:
+            if isinstance(item, dict) and item.get("name") == SERVER_NAME:
+                return ENTRY_MATCHES, item
+        return ENTRY_ABSENT, None
+
     if not isinstance(node, dict):
         return ENTRY_CONFLICT, None
     if parts and parts[-1] == SERVER_NAME:
@@ -297,6 +329,7 @@ def probe_installation(
             approval_mode=installation.approval.mode,
             approval_guidance=guidance,
             auto_connect=installation.auto_connect,
+            variant=installation.variant,
         )
 
     try:
@@ -323,6 +356,7 @@ def probe_installation(
             approval_mode=installation.approval.mode,
             approval_guidance=guidance,
             auto_connect=installation.auto_connect,
+            variant=installation.variant,
         )
 
     evidence = _evidence_binaries(installation, which=which)
@@ -360,6 +394,7 @@ def probe_installation(
             approval_mode=installation.approval.mode,
             approval_guidance=guidance,
             auto_connect=installation.auto_connect,
+            variant=installation.variant,
         )
 
     if state in ("file", "other"):
@@ -389,6 +424,7 @@ def probe_installation(
                 approval_mode=installation.approval.mode,
                 approval_guidance=guidance,
                 auto_connect=installation.auto_connect,
+                variant=installation.variant,
             )
         entry_state, entry = _server_entry(document, installation)
         managed = entry is not None
@@ -413,6 +449,7 @@ def probe_installation(
                 approval_mode=installation.approval.mode,
                 approval_guidance=guidance,
                 auto_connect=installation.auto_connect,
+                variant=installation.variant,
             )
         if entry_state == ENTRY_MATCHES:
             entry_state = (
@@ -439,6 +476,7 @@ def probe_installation(
             approval_mode=installation.approval.mode,
             approval_guidance=guidance,
             auto_connect=installation.auto_connect,
+            variant=installation.variant,
         )
 
     strong_evidence = tuple(
@@ -464,6 +502,7 @@ def probe_installation(
             approval_mode=installation.approval.mode,
             approval_guidance=guidance,
             auto_connect=installation.auto_connect,
+            variant=installation.variant,
         )
 
     if evidence:
@@ -488,6 +527,7 @@ def probe_installation(
             approval_mode=installation.approval.mode,
             approval_guidance=guidance,
             auto_connect=installation.auto_connect,
+            variant=installation.variant,
         )
 
     return ClientProbe(
@@ -509,6 +549,7 @@ def probe_installation(
         approval_mode=installation.approval.mode,
         approval_guidance=guidance,
         auto_connect=installation.auto_connect,
+        variant=installation.variant,
     )
 
 
@@ -517,8 +558,119 @@ def _selected(
 ) -> bool:
     if clients is None:
         return True
-    wanted = set(clients)
-    return installation.installation_id in wanted or installation.client in wanted
+    return any(installation.selected_by(name) for name in clients)
+
+
+def _variant_groups(
+    catalogue: Iterable[Manifest],
+) -> dict[tuple[str, str], list[Installation]]:
+    groups: dict[tuple[str, str], list[Installation]] = {}
+    for manifest in catalogue:
+        for installation in manifest.installations:
+            if installation.variant_group:
+                groups.setdefault(
+                    (installation.client, installation.variant_group), []
+                ).append(installation)
+    return groups
+
+
+def _resolve_variant_groups(
+    groups: Mapping[tuple[str, str], Sequence[Installation]],
+    *,
+    workspace: Path,
+    home: Path,
+    platform: str,
+    environ: Mapping[str, str],
+    clients: Iterable[str] | None,
+    which: Callable[[str], str | None],
+    probe_versions: bool,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Pick at most one installation per variant group.
+
+    Returns ``(suppressed, ambiguous)``. ``suppressed`` maps the losing
+    installation id to a reason (it is not probed at all); ``ambiguous`` maps
+    every member to the fail-closed reason that replaces its probe status.
+    """
+    suppressed: dict[str, str] = {}
+    ambiguous: dict[str, str] = {}
+    wanted = set(clients) if clients is not None else None
+
+    for members in groups.values():
+        if wanted is not None and not any(
+            member.selected_by(name)
+            for member in members
+            for name in wanted
+        ):
+            continue
+        # An explicit variant selector (``opencode-v1``) or an explicit
+        # installation id pins the variant. Naming the whole family
+        # (``opencode``) leaves detection in charge.
+        requested_variants = {
+            member.variant
+            for member in members
+            for name in wanted or ()
+            if name == member.variant_selector or name == member.installation_id
+        }
+        if len(requested_variants) > 1:
+            detail = (
+                "conflicting variant selectors "
+                f"{sorted(requested_variants)} were requested explicitly"
+            )
+            for member in members:
+                ambiguous[member.installation_id] = (
+                    f"opencode_version_ambiguous: {detail}. {AMBIGUITY_ACTION}"
+                )
+            continue
+        forced = next(iter(requested_variants), None)
+
+        config_paths: list[Path] = []
+        for member in members:
+            try:
+                path = member.path_for(
+                    platform=platform,
+                    workspace=workspace,
+                    home=home,
+                    environ=environ,
+                )
+            except Exception:  # unresolved paths are not evidence
+                continue
+            if path not in config_paths:
+                config_paths.append(path)
+        existing = [path for path in config_paths if path.exists()]
+
+        binary: str | None = None
+        for member in members:
+            for name in member.binaries:
+                binary = which(name)
+                if binary:
+                    break
+            if binary:
+                break
+
+        if forced is None and binary is None and not existing:
+            # Nothing installed: ordinary ``absent`` probes are accurate and
+            # an ambiguity error would be noise.
+            continue
+        try:
+            decision = detect_variant(
+                forced=forced,
+                config_paths=existing,
+                environ=environ,
+                which=which,
+                probe_versions=probe_versions,
+            )
+        except OpenCodeVersionAmbiguityError as exc:
+            for member in members:
+                ambiguous[member.installation_id] = (
+                    f"opencode_version_ambiguous: {exc}"
+                )
+            continue
+        for member in members:
+            if member.variant != decision.variant:
+                suppressed[member.installation_id] = (
+                    f"variant_not_selected:{decision.variant}"
+                )
+    return suppressed, ambiguous
 
 
 def probe_installations(
@@ -531,30 +683,51 @@ def probe_installations(
     expected_entries: Mapping[str, Mapping[str, Any]] | None = None,
     manifests: Iterable[Manifest] | None = None,
     which: Callable[[str], str | None] = shutil.which,
+    probe_versions: bool = False,
 ) -> tuple[ClientProbe, ...]:
-    """Probe every manifest installation (or only ``clients``)."""
+    """Probe every manifest installation (or only ``clients``).
+
+    ``probe_versions`` defaults to ``False`` so discovery stays free of
+    process launches; mutating callers opt in when they are already about to
+    write configuration.
+    """
     resolved_home = Path.home() if home is None else home
     resolved_platform = current_platform() if platform is None else platform
     resolved_env = dict(os.environ if environ is None else environ)
     catalogue = tuple(load_manifests() if manifests is None else manifests)
+
+    suppressed, ambiguous = _resolve_variant_groups(
+        _variant_groups(catalogue),
+        workspace=workspace,
+        home=resolved_home,
+        platform=resolved_platform,
+        environ=resolved_env,
+        clients=clients,
+        which=which,
+        probe_versions=probe_versions,
+    )
 
     probes: list[ClientProbe] = []
     for manifest in catalogue:
         for installation in manifest.installations:
             if not _selected(installation, clients):
                 continue
+            if installation.installation_id in suppressed:
+                continue
             expected = None
             if expected_entries is not None:
                 expected = expected_entries.get(installation.installation_id)
-            probes.append(
-                probe_installation(
-                    installation,
-                    workspace=workspace,
-                    home=resolved_home,
-                    platform=resolved_platform,
-                    environ=resolved_env,
-                    expected_entry=expected,
-                    which=which,
-                )
+            probe = probe_installation(
+                installation,
+                workspace=workspace,
+                home=resolved_home,
+                platform=resolved_platform,
+                environ=resolved_env,
+                expected_entry=expected,
+                which=which,
             )
+            reason = ambiguous.get(installation.installation_id)
+            if reason is not None:
+                probe = replace(probe, status=STATUS_UNKNOWN, reason=reason)
+            probes.append(probe)
     return tuple(probes)

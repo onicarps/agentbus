@@ -68,9 +68,19 @@ def loads(text: str):
 
 
 def update_entry(text: str, root: str, name: str, value: dict) -> str:
-    """Update one object member while retaining unrelated source and comments."""
+    """Update one object member while retaining unrelated source and comments.
+
+    ``root`` may be dotted (``mcp.servers``). Missing intermediate objects are
+    created with the remaining chain already populated, so the patched
+    document is valid in one pass.
+    """
+    parts = [part for part in str(root).split(".") if part]
+    if not parts:
+        raise ValueError("root must name at least one object")
+
     clean = sanitize(text)
     decoder = json.JSONDecoder()
+    encoded = json.dumps(value, indent=2, ensure_ascii=False)
 
     def members(start: int):
         i = start + 1
@@ -78,7 +88,7 @@ def update_entry(text: str, root: str, name: str, value: dict) -> str:
             while clean[i].isspace() or clean[i] == ',':
                 i += 1
             if clean[i] == '}':
-                return i, None
+                return
             key, end = decoder.raw_decode(clean, i)
             i = end
             while clean[i].isspace() or clean[i] == ':':
@@ -101,14 +111,28 @@ def update_entry(text: str, root: str, name: str, value: dict) -> str:
         comma = ',' if body and not untrimmed.endswith(',') else ''
         return text[:close] + '\n' + comma + '\n' + json.dumps(key) + ': ' + val + '\n' + text[close:]
 
+    def nest(chain: list[str]) -> str:
+        payload = '{' + json.dumps(name) + ': ' + encoded + '}'
+        for part in reversed(chain):
+            payload = '{' + json.dumps(part) + ': ' + payload + '}'
+        return payload
+
     start = len(clean) - len(clean.lstrip())
-    found = locate(start, root)
-    encoded = json.dumps(value, indent=2, ensure_ascii=False)
-    if found is None:
-        return insert(start, root, '{' + json.dumps(name) + ': ' + encoded + '}')
-    begin, _ = found
-    found_entry = locate(begin, name)
-    if found_entry is None:
-        return insert(begin, name, encoded)
-    begin, end = found_entry
-    return text[:begin] + encoded + text[end:]
+    for index, part in enumerate(parts):
+        found = locate(start, part)
+        if found is None:
+            return insert(start, part, nest(parts[index + 1:]))
+        begin, _ = found
+        if index == len(parts) - 1:
+            entry = locate(begin, name)
+            if entry is None:
+                return insert(begin, name, encoded)
+            entry_begin, entry_end = entry
+            return text[:entry_begin] + encoded + text[entry_end:]
+        probe = begin
+        while clean[probe].isspace():
+            probe += 1
+        if clean[probe] != '{':
+            raise ValueError(f"{root!r}: {part!r} is not a JSON object")
+        start = begin
+    raise ValueError(f"{root!r}: could not resolve object path")

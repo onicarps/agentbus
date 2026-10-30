@@ -1,0 +1,38 @@
+manifest_version: 1
+manifest_id: copilot
+client: copilot
+title: GitHub Copilot CLI
+version: "2026-10-30"
+generated:
+  by: factory/deepseek-v4.1-flash
+  at: "2026-10-30T04:20:00Z"
+sources:
+  - id: copilot-cli-mcp
+    resource: https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers
+    title: Adding MCP servers for GitHub Copilot CLI (~/.copilot/mcp-config.json)
+notes: >-
+  Copilot CLI reads the user file "~/.copilot/mcp-config.json" with a top-level
+  "mcpServers" object. Local stdio servers use "type": "local" plus
+  command/args/env; "tools" defaults to ["*"]. Project-level ".mcp.json" and
+  ".github/mcp.json" exist but are only loaded after folder trust, so AgentBus
+  does not auto-wire them. Copilot inherits PATH but requires every other
+  variable to be declared, which matches the AgentBus env entry.
+approval:
+  mode: restart
+  guidance: >-
+    Start a new Copilot CLI session and run "/mcp list" to confirm the agentbus
+    server appears with its tools.
+installations:
+  - id: copilot-user
+    title: GitHub Copilot CLI (user config)
+    scope: user
+    format: json
+    root: mcpServers
+    entry_shape: copilot_local
+    auto_connect: true
+    paths:
+      all: "~/.copilot/mcp-config.json"
+    detection:
+      binaries: [copilot]
+      app_dirs:
+        all: ["~/.copilot"]

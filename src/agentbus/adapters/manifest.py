@@ -17,8 +17,18 @@ import yaml
 
 MANIFEST_VERSION = 1
 MANIFEST_SUFFIX = ".yaml"
-ENTRY_SHAPES = ("command_args_env", "vscode_stdio")
-FORMATS = ("json", "toml")
+ENTRY_SHAPES = (
+    "command_args_env",
+    "vscode_stdio",
+    "goose_stdio",
+    "copilot_local",
+    "cline_stdio",
+    "vibe_stdio",
+    "opencode_v1",
+    "opencode_v2",
+)
+FORMATS = ("json", "toml", "yaml")
+ROOT_KINDS = ("map", "array")
 SCOPES = ("user", "project")
 APPROVAL_MODES = ("restart", "reload", "approve", "none")
 SERVER_NAME = "agentbus"
@@ -57,10 +67,29 @@ class Installation:
     app_dirs: Mapping[str, tuple[str, ...]]
     approval: Approval
     manifest_version: str
+    #: ``map`` (a server container object) or ``array`` (TOML array-of-tables
+    #: matched by a ``name`` key, as used by Mistral Vibe).
+    root_kind: str = "map"
+    #: Installations sharing a variant group describe incompatible config
+    #: layouts of one client (OpenCode v1/v2). At most one may be connected.
+    variant_group: str = ""
+    variant: str = ""
 
     @property
     def identifier(self) -> str:
         return self.installation_id
+
+    @property
+    def variant_selector(self) -> str:
+        """``opencode-v1``-style selector, empty for ordinary installs."""
+        return f"{self.client}-{self.variant}" if self.variant else ""
+
+    def selected_by(self, name: str) -> bool:
+        """Whether a ``--client`` selector names this installation."""
+        if name in (self.installation_id, self.client):
+            return True
+        selector = self.variant_selector
+        return bool(selector) and name == selector
 
     def supports(self, platform: str) -> bool:
         return "all" in self.paths or platform in self.paths
@@ -205,6 +234,21 @@ def _parse_manifest(document: Any, *, source: str) -> Manifest:
         root = str(_require(raw, "root", where=where))
         if not root.strip():
             raise ManifestError(f"{where}: root must be a non-empty string")
+        root_kind = str(raw.get("root_kind", "map"))
+        if root_kind not in ROOT_KINDS:
+            raise ManifestError(f"{where}: root_kind must be one of {ROOT_KINDS}")
+        variant_group = str(raw.get("variant_group", "") or "")
+        variant = str(raw.get("variant", "") or "")
+        if variant and not variant_group:
+            raise ManifestError(f"{where}: variant requires variant_group")
+        if variant_group and not variant:
+            raise ManifestError(f"{where}: variant_group requires variant")
+        if fmt == "yaml" and root_kind != "map":
+            raise ManifestError(f"{where}: yaml configs only support root_kind 'map'")
+        if shape == "vibe_stdio" and (fmt != "toml" or root_kind != "array"):
+            raise ManifestError(
+                f"{where}: vibe_stdio requires format 'toml' and root_kind 'array'"
+            )
         paths_raw = _require(raw, "paths", where=where)
         if not isinstance(paths_raw, dict) or not paths_raw:
             raise ManifestError(f"{where}: paths must be a non-empty mapping")
@@ -247,6 +291,9 @@ def _parse_manifest(document: Any, *, source: str) -> Manifest:
                     fallback=default_approval,
                 ),
                 manifest_version=version_label,
+                root_kind=root_kind,
+                variant_group=variant_group,
+                variant=variant,
             )
         )
 
@@ -376,6 +423,49 @@ def build_entry(
     base = build_command_entry(
         argv, workspace=workspace, producer_id=producer_id
     )
-    if installation.entry_shape == "vscode_stdio":
+    shape = installation.entry_shape
+    if shape == "command_args_env":
+        return base
+    if shape == "vscode_stdio":
         return {"type": "stdio", **base}
-    return base
+    if shape == "goose_stdio":
+        # Goose calls the executable "cmd" and names the environment map
+        # "envs" (``env`` is only a deserialization alias).
+        return {
+            "type": "stdio",
+            "name": SERVER_NAME,
+            "enabled": True,
+            "cmd": base["command"],
+            "args": list(base["args"]),
+            "envs": dict(base["env"]),
+        }
+    if shape == "copilot_local":
+        return {"type": "local", **base, "tools": ["*"]}
+    if shape == "cline_stdio":
+        return {**base, "disabled": False}
+    if shape == "vibe_stdio":
+        # Vibe stores servers as an array of tables matched by "name".
+        return {
+            "name": SERVER_NAME,
+            "transport": "stdio",
+            "command": base["command"],
+            "args": list(base["args"]),
+            "env": dict(base["env"]),
+        }
+    if shape in ("opencode_v1", "opencode_v2"):
+        # OpenCode keeps the whole argv (including --workspace) in one array
+        # and calls the environment mapping "environment".
+        command = [base["command"], *base["args"]]
+        entry: dict[str, Any] = {
+            "type": "local",
+            "command": command,
+            "environment": dict(base["env"]),
+        }
+        if shape == "opencode_v1":
+            entry["enabled"] = True
+        else:
+            entry["disabled"] = False
+        return entry
+    raise ManifestError(
+        f"{installation.installation_id}: unknown entry_shape {shape!r}"
+    )

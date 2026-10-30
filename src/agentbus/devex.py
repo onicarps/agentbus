@@ -320,9 +320,13 @@ def apply_init(
         home=home,
         platform=platform,
         environ=environ,
+        clients=clients,
         expected_entries=expected,
         manifests=catalogue,
         which=which,
+        # Dry runs stay process-free; a mutating init may probe the CLI to
+        # disambiguate versions before it writes anything.
+        probe_versions=not dry_run,
     )
 
     planned: list[tuple[Any, Path, Any]] = []
@@ -349,6 +353,14 @@ def apply_init(
             result.skipped.append(
                 f"{probe.installation_id}: not detected ({probe.reason})"
             )
+            continue
+        if probe.status == STATUS_UNKNOWN and probe.reason.startswith(
+            "opencode_version_ambiguous"
+        ):
+            # Never guess the OpenCode layout. Skip the client with the
+            # actionable selector guidance: init leaves an ambiguous config
+            # untouched instead of writing to the wrong version's layout.
+            result.skipped.append(f"{probe.installation_id}: {probe.reason}")
             continue
         if probe.status == STATUS_UNKNOWN:
             # A user-scope config this run can never write (no authorization,

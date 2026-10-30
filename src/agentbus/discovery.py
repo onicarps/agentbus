@@ -110,7 +110,19 @@ class SetupLockSecurityError(RuntimeError):
 
 
 class ConcurrentEditError(RuntimeError):
-    """A config file changed between planning and commit."""
+    """A config file changed between planning and commit.
+
+    ``code`` is machine-readable so callers can distinguish an externally
+    created file from an externally deleted or modified one:
+
+    * ``file_created_externally``
+    * ``file_deleted_externally``
+    * ``file_modified_externally``
+    """
+
+    def __init__(self, message: str, *, code: str = "concurrent_edit"):
+        self.code = code
+        super().__init__(message)
 
 
 class UnknownClientError(ValueError):
@@ -135,6 +147,8 @@ def known_client_ids(
         for installation in manifest.installations:
             known.add(installation.client)
             known.add(installation.installation_id)
+            if installation.variant_selector:
+                known.add(installation.variant_selector)
     return tuple(sorted(known))
 
 
@@ -455,12 +469,37 @@ def global_config_lock(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _LinkSnapshot:
+    target: str
+    inode: int
+
+
 @dataclass
 class _Staged:
     path: Path
     new_bytes: bytes
     original_bytes: bytes | None
     original_mode: int | None
+    #: SHA-256 of ``original_bytes`` (``None`` when the file was absent).
+    original_digest: str | None = None
+    #: Symlink identity at planning time, so a repointed link is an edit.
+    link: _LinkSnapshot | None = None
+
+
+def _sha256(data: bytes | None) -> str | None:
+    return None if data is None else hashlib.sha256(data).hexdigest()
+
+
+def _snapshot_symlink(path: Path) -> _LinkSnapshot | None:
+    try:
+        if not path.is_symlink():
+            return None
+        info = path.lstat()
+        target = os.readlink(path)
+    except OSError:
+        return None
+    return _LinkSnapshot(target=target, inode=info.st_ino)
 
 
 @dataclass(frozen=True)
@@ -550,6 +589,7 @@ def _create_backup(path: Path, data: bytes, mode: int) -> Path:
     """Create a new backup without ever replacing an existing one."""
     timestamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
     for counter in range(1000):
+        # ``.agentbus.bak.<timestamp>.<pid>`` plus an O_EXCL collision counter.
         stamp = f"{timestamp}.{os.getpid()}.{counter}"
         candidate = backup_path(path, stamp=stamp)
         try:
@@ -606,6 +646,8 @@ class FileTransaction:
                 new_bytes=new_bytes,
                 original_bytes=original_bytes,
                 original_mode=mode,
+                original_digest=_sha256(original_bytes),
+                link=_snapshot_symlink(path),
             )
         )
 
@@ -620,6 +662,55 @@ class FileTransaction:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._created_dirs.extend(reversed(missing))
 
+    def _read_current(self, path: Path) -> bytes | None:
+        try:
+            return read_regular_file(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ConcurrentEditError(
+                f"{path}: cannot re-read before write: {exc}",
+                code="file_unreadable",
+            ) from exc
+
+    def _verify_symlink(self, item: _Staged) -> None:
+        if item.link is None:
+            return
+        if _snapshot_symlink(item.path) != item.link:
+            raise ConcurrentEditError(
+                f"{item.path}: symlink was repointed or replaced after planning",
+                code="file_modified_externally",
+            )
+
+    def _verify_unchanged(self, item: _Staged) -> None:
+        """Fail closed unless the file still matches the planned snapshot.
+
+        Distinguishes the three filesystem lifecycle states so the error tells
+        the operator what actually happened instead of a generic collision.
+        The digest is computed immediately before ``os.replace``; a
+        non-cooperating writer inside the remaining check-to-replace window
+        cannot be excluded in user space, which is why backups are retained.
+        """
+        self._verify_symlink(item)
+        current = self._read_current(item.path)
+        if item.original_bytes is None:
+            if current is not None:
+                raise ConcurrentEditError(
+                    f"{item.path}: file was created by another writer after planning",
+                    code="file_created_externally",
+                )
+            return
+        if current is None:
+            raise ConcurrentEditError(
+                f"{item.path}: file was deleted by another writer after planning",
+                code="file_deleted_externally",
+            )
+        if _sha256(current) != item.original_digest:
+            raise ConcurrentEditError(
+                f"{item.path}: changed by another writer after planning",
+                code="file_modified_externally",
+            )
+
     def commit(self) -> TransactionOutcome:
         written: list[str] = []
         backups: list[str] = []
@@ -627,19 +718,7 @@ class FileTransaction:
         try:
             for item in self._staged:
                 self._ensure_parent(item.path)
-                current = None
-                try:
-                    current = read_regular_file(item.path)
-                except FileNotFoundError:
-                    current = None
-                except OSError as exc:
-                    raise ConcurrentEditError(
-                        f"{item.path}: cannot re-read before write: {exc}"
-                    ) from exc
-                if current != item.original_bytes:
-                    raise ConcurrentEditError(
-                        f"{item.path}: changed by another writer after planning"
-                    )
+                self._verify_unchanged(item)
                 if item.original_bytes is not None:
                     try:
                         backup = _create_backup(
@@ -649,11 +728,15 @@ class FileTransaction:
                         )
                     except OSError as exc:
                         raise ConcurrentEditError(
-                            f"{item.path}: cannot create backup: {exc}"
+                            f"{item.path}: cannot create backup: {exc}",
+                            code="backup_failed",
                         ) from exc
                     backups.append(str(backup))
                     backup_map[str(item.path)] = str(backup)
                     self._backups[item.path] = backup
+                # Second digest check immediately before replacement: the
+                # backup write above is itself a window for another writer.
+                self._verify_unchanged(item)
                 _atomic_write(
                     item.path, item.new_bytes, item.original_mode or 0o600
                 )
@@ -696,6 +779,13 @@ class FileTransaction:
         errors: list[str] = []
         for item in reversed(self._applied):
             try:
+                if item.link is not None and _snapshot_symlink(item.path) != item.link:
+                    conflict = self._conflict(
+                        item,
+                        detail="symlink was repointed or replaced after AgentBus wrote it",
+                    )
+                    errors.append(str(conflict))
+                    continue
                 try:
                     current = read_regular_file(item.path)
                 except FileNotFoundError:
@@ -815,8 +905,14 @@ def discover(
     which: Callable[[str], str | None] = shutil.which,
     python: str | None = None,
     manifests: Sequence[Manifest] | None = None,
+    probe_versions: bool = False,
 ) -> DiscoveryReport:
-    """Read-only discovery of MCP client installations."""
+    """Read-only discovery of MCP client installations.
+
+    ``probe_versions`` is ``False`` by default: discovery never launches a
+    process. ``connect`` opts in because resolving a variant is part of
+    deciding what it would write.
+    """
     resolved_workspace = Path(workspace).resolve()
     resolved_platform = current_platform() if platform is None else platform
     pid = producer_id or default_producer_id(environ)
@@ -851,6 +947,7 @@ def discover(
         expected_entries=expected,
         manifests=catalogue,
         which=which,
+        probe_versions=probe_versions,
     )
     warnings: list[str] = []
     if resolved_command is not None:
@@ -987,11 +1084,20 @@ class ConnectReport:
 
 
 def client_selected(probe: ClientProbe, wanted: set[str]) -> bool:
-    return not wanted or probe.installation_id in wanted or probe.client in wanted
+    if not wanted:
+        return True
+    if probe.installation_id in wanted or probe.client in wanted:
+        return True
+    return bool(probe.variant) and f"{probe.client}-{probe.variant}" in wanted
 
 
 def auto_connect_allowed(probe: ClientProbe, installation: Installation, wanted: set[str]) -> bool:
-    return installation.auto_connect or probe.installation_id in wanted
+    if installation.auto_connect:
+        return True
+    if installation.installation_id in wanted:
+        return True
+    selector = installation.variant_selector
+    return bool(selector) and selector in wanted
 
 
 def _select(probes: Iterable[ClientProbe], *, clients: Iterable[str] | None) -> list[ClientProbe]:
@@ -1114,6 +1220,11 @@ def connect(
         which=which,
         python=python,
         manifests=catalogue,
+        # Connect is an action, not the read-only discovery report: run the
+        # single bounded ``<client> --version`` probe so a preview shows the
+        # same OpenCode layout an apply would write. The probe is time-boxed
+        # and uses a hermetic temporary HOME, and it never writes config.
+        probe_versions=True,
     )
 
     errors: list[str] = []
@@ -1125,9 +1236,25 @@ def connect(
     ]
 
     items: list[ConnectItem] = []
+
+    def _explicitly_named(probe: ClientProbe) -> bool:
+        if probe.installation_id in (clients or ()):
+            return True
+        return bool(probe.variant) and (
+            f"{probe.client}-{probe.variant}" in (clients or ())
+        )
+
+    def _probe_matches_name(probe: ClientProbe, name: str) -> bool:
+        if name in (probe.installation_id, probe.client):
+            return True
+        return bool(probe.variant) and name == f"{probe.client}-{probe.variant}"
+
     for name in clients or ():
-        if not any(name in (probe.installation_id, probe.client) for probe in selected):
-            excluded = next((probe for probe in requested if name in (probe.installation_id, probe.client)), None)
+        if not any(_probe_matches_name(probe, name) for probe in selected):
+            excluded = next(
+                (probe for probe in requested if _probe_matches_name(probe, name)),
+                None,
+            )
             if excluded is not None:
                 items.append(_refusal(excluded, f"excluded_by_scope:{scope}"))
     candidates: list[tuple[ClientProbe, Installation]] = []
@@ -1136,7 +1263,7 @@ def connect(
         for probe in selected:
             items.append(
                 _skip(probe, "client_not_detected")
-                if probe.status == STATUS_ABSENT and probe.installation_id not in (clients or ())
+                if probe.status == STATUS_ABSENT and not _explicitly_named(probe)
                 else _refusal(probe, "no_durable_mcp_command")
             )
         return ConnectReport(
@@ -1167,6 +1294,9 @@ def connect(
     named_clients = set(clients) if clients else set()
 
     for probe in selected:
+        # An installation id demands that exact install; a family or variant
+        # selector (``opencode``, ``opencode-v1``) pins a layout without
+        # requiring every scope of it to be installed.
         named_exactly = probe.installation_id in named_clients
         if probe.status == STATUS_ABSENT:
             # An unnamed client that is not installed is not a failure; an
@@ -1178,10 +1308,14 @@ def connect(
             )
             continue
         if probe.status == STATUS_UNKNOWN:
+            reason = probe.reason or "unknown_evidence"
+            # Variant ambiguity is always a refusal: silently skipping it
+            # would leave the operator without the actionable selector hint.
+            fail_closed = reason.startswith("opencode_version_ambiguous")
             items.append(
-                _refusal(probe, probe.reason or "unknown_evidence")
-                if named_exactly
-                else _skip(probe, probe.reason or "unknown_evidence")
+                _refusal(probe, reason)
+                if named_exactly or fail_closed
+                else _skip(probe, reason)
             )
             continue
         if probe.entry_state == ENTRY_CONFLICT:
