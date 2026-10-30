@@ -236,6 +236,16 @@ def detect_variant(
                 f"unknown OpenCode variant selector {forced!r}; "
                 f"expected one of {VARIANTS}"
             )
+        for path in config_paths:
+            document, _problem = _read_json_document(Path(path))
+            if document is None:
+                continue
+            structure, explanation = inspect_config_structure(document)
+            if structure is not None and structure != normalized:
+                raise OpenCodeVersionAmbiguityError(
+                    f"--client opencode-{normalized} contradicts {path}: {explanation}",
+                    evidence=(f"{path}: {explanation}",),
+                )
         return VariantDecision(normalized, (f"explicit_selector:{normalized}",))
 
     evidence: dict[str, list[str]] = {VARIANT_V1: [], VARIANT_V2: []}

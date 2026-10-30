@@ -373,17 +373,29 @@ def test_token_role_authorizes_an_unmapped_producer(tmp_path: Path) -> None:
 def test_rbac_disable_switch_only_applies_when_identity_is_unprotected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from agentbus.identity import bootstrap_workspace_identity, set_policy_mode
+
     _write_roles(tmp_path)
     monkeypatch.setenv("AGENTBUS_DISABLE_RBAC", "1")
+    # Unprotected mode: switch bypasses RBAC for unmapped producer
     check_publish_rbac(
         tmp_path, producer_id="local-user", topic="okf/handoff", payload={}
     )
+
+    # Protected mode: switch is ignored, unmapped producer is rejected
+    bootstrap_workspace_identity(tmp_path)
+    set_policy_mode(tmp_path, "protected")
+    with pytest.raises(ForbiddenError):
+        check_publish_rbac(
+            tmp_path, producer_id="local-user", topic="okf/handoff", payload={}
+        )
 
 
 def test_connect_does_not_grant_roles_while_adding_entries(
     tmp_path: Path,
 ) -> None:
     """Connecting a client must never rewrite the workspace RBAC file."""
+    import json
     from agentbus.adapters.command import McpCommand
     from agentbus.discovery import connect
 
@@ -394,15 +406,23 @@ def test_connect_does_not_grant_roles_while_adding_entries(
     roles = _write_roles(workspace)
     before = roles.read_bytes()
 
-    connect(
+    # Pre-create a detectable client config so connect actually writes an entry
+    qwen_cfg = workspace / ".qwen" / "settings.json"
+    qwen_cfg.parent.mkdir(parents=True)
+    qwen_cfg.write_text("{}\n", encoding="utf-8")
+
+    report = connect(
         workspace=workspace,
         home=home,
         platform="linux",
         environ={"HOME": str(home)},
         command=McpCommand(("/usr/bin/agentbus", "mcp-serve"), "test"),
-        which=lambda _name: None,
+        which=lambda name: "/usr/bin/qwen" if name == "qwen" else None,
         apply=True,
         allow_user_scope=True,
     )
+    assert report.exit_code == 0
+    written = json.loads(qwen_cfg.read_text(encoding="utf-8"))
+    assert "agentbus" in written.get("mcpServers", {})
 
     assert roles.read_bytes() == before

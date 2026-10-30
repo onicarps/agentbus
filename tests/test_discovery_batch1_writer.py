@@ -509,9 +509,20 @@ def test_schema_markers_are_honored() -> None:
     assert inspect_schema({"$schema": "https://opencode.ai/config.json"}) is None
 
 
-def test_detect_variant_prefers_explicit_selector(tmp_path: Path) -> None:
+def test_detect_variant_refuses_selector_contradicting_structure(tmp_path: Path) -> None:
     config = tmp_path / "opencode.json"
     config.write_text('{"mcp": {"agentbus": {"command": ["x"]}}}\n', encoding="utf-8")
+    with pytest.raises(OpenCodeVersionAmbiguityError):
+        detect_variant(
+            forced="opencode-v2",
+            config_paths=[config],
+            which=lambda _name: None,
+        )
+
+
+def test_detect_variant_accepts_selector_when_no_structural_conflict(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.json"
+    config.write_text("{}\n", encoding="utf-8")
     decision = detect_variant(
         forced="opencode-v2",
         config_paths=[config],
