@@ -230,6 +230,17 @@ def _absolutize_argv(
     return tuple(argv)
 
 
+def _loose_root_binary(binary: str | Path, workspace: Path | None = None) -> bool:
+    try:
+        parent = Path(binary).expanduser().resolve().parent
+        roots = [Path.cwd().resolve()]
+        if workspace is not None:
+            roots.append(workspace.resolve())
+        return parent in roots
+    except (OSError, RuntimeError, ValueError):
+        return True
+
+
 def validate_mcp_command(
     cmd: McpCommand,
     *,
@@ -328,6 +339,7 @@ def resolve_mcp_command(
     python: str | None = None,
     validate: bool = True,
     probe_runner: Callable[[str], CommandProbe] | None = None,
+    workspace: Path | None = None,
 ) -> McpCommand:
     """Resolve argv for the MCP server, preferring durable absolute paths."""
     env = dict(os.environ if environ is None else environ)
@@ -353,6 +365,10 @@ def resolve_mcp_command(
         argv = _parse_override(override)
         # A GUI client may launch with a minimal PATH: always write the
         # resolved absolute executable into the client configuration.
+        if argv[0] == "agentbus":
+            found = which("agentbus")
+            if found and _loose_root_binary(found, workspace):
+                raise McpCommandError("invalid_override", "untrusted root executable on PATH")
         argv = list(_absolutize_argv(argv, which=which))
         cmd = McpCommand(tuple(argv), "env-override", ())
         if validate:
@@ -376,6 +392,9 @@ def resolve_mcp_command(
         warnings.append(f"ignored {shim}: {probe.detail}")
 
     on_path = which("agentbus")
+    if on_path and _loose_root_binary(on_path, workspace):
+        warnings.append(f"ignored untrusted root executable: {on_path}")
+        on_path = None
     if on_path:
         resolved = Path(on_path).expanduser().absolute()
         if resolved.is_file() and os.access(resolved, os.X_OK):

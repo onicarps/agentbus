@@ -86,7 +86,7 @@ def variant_from_version_text(text: str) -> str | None:
     if match is None:
         return None
     major = int(match.group(1))
-    if major == 1:
+    if major in (0, 1):
         return VARIANT_V1
     if major == 2:
         return VARIANT_V2
@@ -208,9 +208,22 @@ def _read_json_document(path: Path) -> tuple[object | None, str | None]:
         return None, f"{path}: unparsable config ({exc})"
 
 
+def is_safe_client_executable(binary: str, *, workspace: Path | None = None) -> bool:
+    """Reject client executables within the current directory or workspace."""
+    try:
+        resolved = Path(binary).expanduser().resolve()
+        roots = [Path.cwd().resolve()]
+        if workspace is not None:
+            roots.append(workspace.resolve())
+        return all(resolved != root and root not in resolved.parents for root in roots)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def detect_variant(
     *,
     forced: str | None = None,
+    workspace: Path | None = None,
     config_paths: Iterable[Path] = (),
     environ: Mapping[str, str] | None = None,
     which: Callable[[str], str | None] = shutil.which,
@@ -268,6 +281,9 @@ def detect_variant(
             notes.append(f"{path}: {explanation}")
 
     binary = which("opencode")
+    if binary and not is_safe_client_executable(binary, workspace=workspace):
+        notes.append(f"untrusted binary inside workspace/cwd ignored: {binary}")
+        binary = None
     if not probe_versions:
         notes.append("version probe suppressed in read-only mode")
     elif binary:

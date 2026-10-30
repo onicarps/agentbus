@@ -398,3 +398,28 @@ def test_resolution_does_not_probe_same_executable_twice(tmp_path, monkeypatch):
     with pytest.raises(McpCommandError):
         resolve_mcp_command(environ={}, which=lambda name: str(shim), python=str(tmp_path / "missing"), probe_runner=runner)
     assert calls == [str(shim)]
+
+@pytest.mark.parametrize("directory", ["root", ".venv/bin", ".venv/Scripts"])
+def test_path_command_trust_boundary(tmp_path, monkeypatch, directory):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    target = workspace if directory == "root" else workspace / directory
+    target.mkdir(parents=True, exist_ok=True)
+    binary = target / "agentbus"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    calls = []
+    cmd = resolve_mcp_command(environ={}, which=lambda _: str(binary),
+                              python=str(tmp_path / "missing"), workspace=workspace,
+                              validate=False, probe_runner=lambda path: calls.append(path)) if directory != "root" else None
+    if directory == "root":
+        with pytest.raises(McpCommandError):
+            resolve_mcp_command(environ={}, which=lambda _: str(binary),
+                                python=str(tmp_path / "missing"), workspace=workspace,
+                                probe_runner=lambda path: calls.append(path))
+        assert not calls
+    else:
+        assert cmd.command == str(binary)

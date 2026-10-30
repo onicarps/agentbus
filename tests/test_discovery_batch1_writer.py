@@ -633,3 +633,44 @@ def test_version_probe_is_bounded_and_uses_a_throwaway_home(tmp_path: Path) -> N
     # The client's $HOME write landed in the scratch dir, not the real one.
     assert not (real_home / "probe-wrote-here").exists()
     assert list(real_home.iterdir()) == []
+
+@pytest.mark.parametrize("text", ["opencode v0.15.3", "0.15.3", "opencode v0.1.0"])
+def test_opencode_zero_versions(text: str) -> None:
+    assert variant_from_version_text(text) == VARIANT_V1
+
+
+def test_untrusted_opencode_is_never_executed(tmp_path: Path, monkeypatch) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(cwd)
+    for binary in (cwd / "opencode", workspace / "nested" / "opencode"):
+        calls = []
+        with pytest.raises(OpenCodeVersionAmbiguityError, match="untrusted binary"):
+            detect_variant(workspace=workspace, which=lambda _: str(binary),
+                           version_probe=lambda *args: calls.append(args))
+        assert not calls
+
+
+def test_zero_version_conflicts_with_v2_structure(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.json"
+    config.write_text('{"mcp":{"servers":{"agentbus":{"command":["x"]}}}}')
+    with pytest.raises(OpenCodeVersionAmbiguityError, match="conflicting version evidence"):
+        detect_variant(config_paths=[config], which=lambda _: "/usr/bin/opencode",
+                       version_probe=lambda *_: "opencode v0.15.3")
+
+
+def test_client_discovery_ignores_workspace_and_cwd_binaries(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from agentbus.adapters.probe import _evidence_binaries
+
+    cwd = tmp_path / "cwd"
+    workspace = tmp_path / "workspace"
+    cwd.mkdir()
+    workspace.mkdir()
+    monkeypatch.chdir(cwd)
+    installation = SimpleNamespace(binaries=("client",))
+    for binary in (cwd / "client", workspace / "nested" / "client"):
+        assert not _evidence_binaries(installation, workspace=workspace, which=lambda _: str(binary))
+    assert _evidence_binaries(installation, workspace=workspace, which=lambda _: "/usr/bin/client")

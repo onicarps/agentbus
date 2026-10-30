@@ -39,6 +39,7 @@ from agentbus.adapters.opencode import (
     AMBIGUITY_ACTION,
     OpenCodeVersionAmbiguityError,
     detect_variant,
+    is_safe_client_executable,
 )
 
 STATUS_PRESENT = "present"
@@ -301,11 +302,12 @@ def _evidence_binaries(
     installation: Installation,
     *,
     which: Callable[[str], str | None],
+    workspace: Path,
 ) -> list[str]:
     found: list[str] = []
     for name in installation.binaries:
         resolved = which(name)
-        if resolved:
+        if resolved and is_safe_client_executable(resolved, workspace=workspace):
             found.append(f"binary:{name}={resolved}")
     return found
 
@@ -371,7 +373,7 @@ def probe_installation(
             variant=installation.variant,
         )
 
-    evidence = _evidence_binaries(installation, which=which)
+    evidence = _evidence_binaries(installation, which=which, workspace=workspace)
     evidence.extend(
         _evidence_app_dirs(
             installation,
@@ -654,6 +656,8 @@ def _resolve_variant_groups(
         for member in members:
             for name in member.binaries:
                 binary = which(name)
+                if binary and not is_safe_client_executable(binary, workspace=workspace):
+                    binary = None
                 if binary:
                     break
             if binary:
@@ -666,6 +670,7 @@ def _resolve_variant_groups(
         try:
             decision = detect_variant(
                 forced=forced,
+                workspace=workspace,
                 config_paths=existing,
                 environ=environ,
                 which=which,

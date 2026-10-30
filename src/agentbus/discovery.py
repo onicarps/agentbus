@@ -923,7 +923,8 @@ def discover(
     if resolved_command is None:
         try:
             resolved_command = resolve_mcp_command(
-                environ=environ, which=which, validate=True, python=python
+                environ=environ, which=which, validate=True, python=python,
+                workspace=resolved_workspace
             )
         except McpCommandError as exc:
             command_error = {
