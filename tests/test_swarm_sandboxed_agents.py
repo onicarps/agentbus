@@ -681,6 +681,64 @@ def test_connect_verification_never_writes_outside_the_sandbox(
     assert not any(sandbox.bin_dir.iterdir())
 
 
+def test_connect_user_scope_without_authorization_is_refused_and_preserves_bytes(
+    sandbox: Sandbox,
+) -> None:
+    """Refuse user-scope writes when allow_user_scope is false; preserve seeded bytes."""
+    _seed_gemini(sandbox)
+    gemini_config = sandbox.home / ".gemini" / "config" / "mcp_config.json"
+    original_bytes = gemini_config.read_bytes()
+    EventStore(sandbox.workspace).close()
+
+    report = connect(
+        workspace=sandbox.workspace,
+        clients=["gemini"],
+        apply=True,
+        allow_user_scope=False,
+        home=sandbox.home,
+        platform="linux",
+        environ=sandbox.environ,
+        command=MCP_COMMAND,
+        which=lambda _name: None,
+    )
+    assert report.exit_code != 0
+    items = {item.installation_id: item for item in report.items}
+    item = items["gemini"]
+    assert item.state == "refused"
+    assert item.reason == "user_scope_requires_authorization"
+    assert gemini_config.read_bytes() == original_bytes
+
+
+def test_connect_never_discloses_environment_tokens(sandbox: Sandbox) -> None:
+    """Managed server configs omit secret env vars like AGENTBUS_TOKEN."""
+    _seed_gemini(sandbox)
+    secret_token = "sandbox-secret-token-12345"
+    sandbox.environ["AGENTBUS_TOKEN"] = secret_token
+    EventStore(sandbox.workspace).close()
+
+    report = connect(
+        workspace=sandbox.workspace,
+        clients=["gemini"],
+        apply=True,
+        verify=True,
+        allow_user_scope=True,
+        home=sandbox.home,
+        platform="linux",
+        environ=sandbox.environ,
+        command=MCP_COMMAND,
+        which=lambda _name: None,
+    )
+    assert report.exit_code == 0, report.errors
+    gemini_config = sandbox.home / ".gemini" / "config" / "mcp_config.json"
+    content = gemini_config.read_text(encoding="utf-8")
+    assert secret_token not in content
+
+    data = json.loads(content)
+    server_env = data["mcpServers"]["agentbus"]["env"]
+    assert "AGENTBUS_TOKEN" not in server_env
+    assert set(server_env.keys()) == {"AGENTBUS_WORKSPACE", "AGENTBUS_PRODUCER_ID"}
+
+
 def _which_from_bin(sandbox: Sandbox, *names: str) -> Callable[[str], str | None]:
     """Resolve only the sandbox stub binaries, never the operator's PATH."""
 
