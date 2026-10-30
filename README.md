@@ -1,4 +1,4 @@
-# AgentBus 🚌
+# AgentBus
 
 [![Test](https://github.com/onicarps/agentbus/actions/workflows/test.yml/badge.svg)](https://github.com/onicarps/agentbus/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/okf-agentbus.svg)](https://pypi.org/project/okf-agentbus/)
@@ -6,29 +6,25 @@
 [![npm](https://img.shields.io/npm/v/@agentbus/agentbus-client.svg)](https://www.npmjs.com/package/@agentbus/agentbus-client)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**The friendly, zero-daemon event bus and visual cockpit for your AI coding agents.**
+**A private, local walkie-talkie and dashboard for your AI coding assistants.**
 
-Have you ever tried getting **Cursor**, **Claude Desktop**, **Antigravity**, terminal coding bots, and custom Python scripts to collaborate on the same project?
+If you use AI coding tools like Cursor, Claude Code, VS Code, or custom scripts on the same project, you have likely run into the coordination problem:
+* **Overwritten code:** Two AI assistants edit the same file at the same time and erase each other's changes.
+* **Lost context:** A plan or decision stays trapped in one chat window, forcing you to copy and paste text back and forth.
+* **Risky actions:** An assistant prepares to run a database migration or delete files before you have had a chance to look it over.
+* **Heavy infrastructure:** Setting up cloud message brokers or Docker containers just to let local tools talk to each other is complicated, slow, and expensive.
 
-Without a clean coordination channel, things get messy quickly:
-* 💥 **File collisions:** Two agents edit the same file simultaneously and wipe out each other's work.
-* 👻 **Lost context:** Crucial handoffs and design decisions vanish into transient chat windows or get lost in cluttered markdown files.
-* ⚠️ **Unreviewed actions:** An agent prepares to execute a risky migration or destructive command before you've had a chance to verify it.
-* 🏗️ **Heavy infrastructure fatigue:** Trying to solve this with Redis, Kafka, or cloud platforms brings Docker bloat, open network ports, and monthly SaaS bills for something that should just run locally.
+**AgentBus solves this right inside your project folder.** It gives your AI tools a fast, private messaging channel backed by a single local database file (`.agentbus/events.db`), and gives you an interactive visual dashboard in your terminal to watch every handoff, track progress, and approve sensitive actions in real time.
 
-**AgentBus solves this right inside your project folder.** It gives your AI agents a fast, typed, private pub/sub channel backed by a local SQLite file (`.agentbus/events.db`), and gives **you** an interactive terminal **Mission Control Cockpit** to watch every handoff, trace lineage, and approve sensitive actions in real time.
-
-No Docker required. No cloud accounts. Zero background daemons needed for standard local pub/sub.
+No cloud accounts. No subscriptions. No background servers required for local coordination.
 
 ---
 
-## ⚡ 30-Second Quickstart (The "Aha!" Moment)
+## Quickstart in 60 Seconds
 
-You don't need complex configurations or deep systems knowledge to see AgentBus in action.
+### 1. Install AgentBus
 
-### 1. Install
-
-Pick the method that best matches your setup:
+Choose the method that works best for your system:
 
 #### Option A: Package Manager (Recommended)
 
@@ -40,230 +36,228 @@ uv tool install okf-agentbus
 pipx install okf-agentbus
 ```
 
-#### Option B: Standalone Bootstrap Script (install.sh)
+#### Option B: Standalone Installer Script
 
 ```bash
-# Bootstraps an isolated runtime even on machines without system Python
 # 1. Download install.sh pinned to release commit 0f6d389
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/onicarps/agentbus/0f6d389622a168b78eb3bdc3b02729c5bc4680aa/install.sh -o install.sh
 
-# 2. Verify script SHA-256 and run with pinned release v0.27.0:
+# 2. Verify script SHA-256 and run with release v0.27.0:
 # On Linux:
 echo "03e64e9bb7e252c072ba77e0cc62324f3e3d34a9c4aaeb4886a0e897c80528b2  install.sh" | sha256sum --check && AGENTBUS_PACKAGE_NAME="okf-agentbus==0.27.0" bash install.sh
 # On macOS:
 echo "03e64e9bb7e252c072ba77e0cc62324f3e3d34a9c4aaeb4886a0e897c80528b2  install.sh" | shasum -a 256 --check && AGENTBUS_PACKAGE_NAME="okf-agentbus==0.27.0" bash install.sh
 ```
 
-> **Supply-Chain Verification Scope:** The SHA-256 checksum verifies the `install.sh` script itself. It does not verify downstream artifacts (such as the separately downloaded `uv` installer when `uv` is not already installed, or the fetched Python package wheels and their dependencies). For audited environments with strict verification policies, install pinned packages using your standard package manager, lockfiles, or internal artifact mirror.
+> **Supply-Chain Verification Note:** The SHA-256 checksum verifies the `install.sh` script itself. It does not verify downstream artifacts (such as the separately downloaded `uv` installer when `uv` is not already installed, or the fetched Python package wheels and their dependencies). For audited environments with strict verification policies, install pinned packages using your standard package manager, lockfiles, or internal artifact mirror.
+>
+> **Path Note:** The installer places the executable in `${XDG_BIN_HOME:-$HOME/.local/bin}` and updates your shell profile for new sessions. For your current terminal, make sure that directory is on your PATH (for example: `export PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$PATH"`).
 
-> **Tip:** The installer places the binary in `${XDG_BIN_HOME:-$HOME/.local/bin}` and configures your shell configuration files for new terminals. For your current terminal session, ensure that directory is on your PATH (e.g. `export PATH="${XDG_BIN_HOME:-$HOME/.local/bin}:$PATH"`).
+### 2. Connect Your Project (Terminal A)
 
-### 2. Initialize & Launch Mission Control (Terminal A)
-
-Create or open any project directory:
+Go to your project directory and run the companion setup:
 
 ```bash
-mkdir -p ~/my-agent-workspace && cd ~/my-agent-workspace
+cd ~/my-project
 
-# 1. Run the setup companion (in an interactive terminal, prompts to configure existing MCP client configs like Cursor and Claude Desktop with your consent)
+# Run the setup assistant (finds installed tools and asks to connect them)
 agentbus
+```
 
-# 2. Launch your visual Mission Control cockpit
+Now open the visual dashboard:
+
+```bash
 agentbus monitor
 ```
 
-*(Note: In a non-interactive shell or CI pipeline, running bare `agentbus` on a fresh workspace initializes it non-interactively with project-scoped MCP discovery applied, or emits workspace status JSON if already initialized. Headless setup only touches workspace-scoped configs such as `.cursor/mcp.json` and `.vscode/mcp.json`; user-global configs require an explicit `agentbus connect --apply --allow-user-scope`.)*
+You are now in the terminal dashboard:
+* **Live Feed:** Watch messages and tasks as they are sent between tools.
+* **Task History:** Inspect which agent started a task and who is continuing it.
+* **One-Key Approvals:** Press `a` to approve or `r` to reject actions waiting for human review.
 
-You are now in the terminal TUI dashboard:
-* **Live Event Stream:** Watch multi-agent activity as it happens.
-* **Trace Waterfall:** Inspect parent/child task lineage (`trace_id`).
-* **Human-in-the-Loop Hotkeys:** Review pending requests with one keystroke (`[a]` approve / `[r]` reject).
+*(Note: In automated scripts or CI pipelines, running `agentbus` on a fresh project initializes it non-interactively with project-scoped tool discovery applied, or outputs JSON status if already set up. Automated setup only changes project files like `.cursor/mcp.json` or `.vscode/mcp.json`. Changes to global user files require the explicit flag `agentbus connect --apply --allow-user-scope`.)*
 
 ### 3. Send Your First Message (Terminal B)
 
-Open another terminal in the same folder and publish a handoff:
+Open a second terminal window in the same folder and publish a message:
 
 ```bash
 agentbus publish \
   --topic okf/handoff \
   --producer-id local-user \
-  --payload '{"from":"local-user","to":"reviewer","summary":"Built the auth endpoints! Ready for review."}'
+  --payload '{"from":"local-user","to":"reviewer","summary":"Built the auth endpoints. Ready for review."}'
 ```
 
-👉 **Look back at Terminal A:** the event immediately pops up on your Mission Control screen!
+Switch back to Terminal A: your message appears immediately on your dashboard screen.
 
 ---
 
-## 🌟 Five Superpowers for Everyday Multi-Agent Workflows
+## How It Works in Practice
 
-### 1. 🕹️ God View Mission Control TUI
+Here is an everyday example of how AgentBus helps two different AI assistants work together smoothly:
 
-Instead of guessing what your agents are doing across disconnected windows, launch `agentbus monitor`. You get a high-density, real-time visual feed of all published events, execution traces, and active file leases.
+```
+[Claude Code] ---------------------------> [AgentBus] ---------------------------> [Codex CLI]
+(Writes code in terminal)           (Local events.db)                 (Runs automated audit)
+       |                                   |                                     |
+       | 1. Takes advisory lease           |                                     |
+       |    on src/auth.py                 |                                     |
+       | 2. Updates endpoints              |                                     |
+       | 3. Publishes handoff event -----> | Stores event #42                    |
+       |                                   | Notifies subscribers -------------> | 4. Reads event #42
+       |                                   |                                     | 5. Audits src/auth.py
+       |                                   | <--- 6. Publishes review passed --- | 6. Sends completion report
+       |                                   |
+                               [Your Terminal Cockpit]
+                         (Watch handoffs live, approve/reject)
+```
 
-### 2. 🔒 Advisory File Leases ("Don't Touch My Code!")
+1. **Claude Code** finishes writing an authentication feature and publishes a handoff event to AgentBus.
+2. **AgentBus** logs the message to your project's local `.agentbus/events.db` file.
+3. **Codex CLI** polls the bus, sees the handoff assigned to it, and runs verification checks.
+4. **You** watch the entire conversation unfold on your terminal dashboard (`agentbus monitor`) without needing to switch windows or copy-paste prompts.
 
-Prevent agents from accidentally clobbering each other's edits. Cooperating agents and tools can request and respect advisory leases on workspace files:
+---
+
+## Five Core Capabilities
+
+### 1. Live Visual Dashboard
+
+Instead of wondering what your AI assistants are doing across separate editor windows, run `agentbus monitor`. You get a clean, high-density live view of:
+* Active messages and task handoffs.
+* Task relationships (`trace_id`) showing which action triggered another.
+* Pending requests waiting for human approval.
+* Active file reservations.
+
+### 2. File Reservations (Advisory Leases)
+
+Prevent two AI assistants from editing the same file at the same time:
 
 ```bash
-# Agent acquires an exclusive advisory lease on an absolute file path for 300 seconds:
+# Agent 1 checks out models.py for 5 minutes (300 seconds):
 agentbus lock acquire --resource "$PWD/src/models.py" --owner-id agent-1 --ttl-seconds 300
 
-# Other agents (and your tooling) check if a file is currently leased:
+# Other tools can check if someone else is currently editing the file:
 agentbus lock status --resource "$PWD/src/models.py"
 
-# When finished, the agent releases its lease:
+# When Agent 1 finishes, it releases the reservation:
 agentbus lock release --resource "$PWD/src/models.py" --owner-id agent-1
 ```
 
-> **Advisory Scope:** Leases are **advisory**. Cooperating tools and agents check status and honor active leases before writing. AgentBus coordinates permissions across agents but does not intercept low-level OS file system calls or automatically block external editors.
+> **Advisory Scope Note:** File leases are **advisory**. Cooperating tools and agents check status and honor active leases before writing. AgentBus coordinates permissions across agents but does not intercept low-level operating system file calls or block external text editors.
 
-### 3. 🛑 Human-in-the-Loop (HITL) Event Intercepts
+### 3. Human Approval Gates
 
-Catch sensitive actions (e.g. database migrations, deletions, or external deploys) before other agents act on them:
+Hold high-risk actions (such as database migrations, deletions, or external deployments) until a human gives permission:
 
 ```bash
-# 1. Register intercept rules: matching events published to the bus require human approval
+# 1. Create a safety rule: any handoff containing 'DROP' or 'MIGRATE' requires approval
 agentbus config set-intercept --topic okf/handoff --contains "DROP" --ttl-minutes 30
 agentbus config set-intercept --topic okf/handoff --contains "MIGRATE" --ttl-minutes 30
 
-# 2. When an agent publishes a matching event, AgentBus places it in PENDING_APPROVAL status.
-# 3. Downstream executors and subscriber agents do not process the event until you approve it.
-# 4. In your terminal monitor, inspect the payload and press [a] to approve or [r] to reject!
-# (From CLI, approve/reject using an authorized reviewer role, e.g. --reviewer-id agy):
+# 2. When an agent publishes a matching action, AgentBus pauses it in PENDING_APPROVAL status.
+# 3. Downstream agents will not execute the action until you approve it.
+# 4. In your terminal dashboard, press 'a' to approve or 'r' to reject.
+# (Or approve via the command line with an authorized role):
 # agentbus approve <event_id> --reviewer-id agy
 # agentbus reject <event_id> --reviewer-id agy --reason "Needs schema migration plan"
 ```
 
-> **How Intercepts Work:** Intercepts hold matching *events published to AgentBus*; they do not automatically intercept arbitrary shell commands, raw database operations, or out-of-band actions. Systems coordinate safety by publishing planned actions as bus events and awaiting sign-off before proceeding.
-> **Approval Permissions (RBAC):** Approving or rejecting events requires a reviewer mapped to a role with `can_approve: true` in `.agentbus/roles.yaml` (such as the default `architect` role mapped to `agy`, or configuring a reviewer like `producers: { human: architect }`). The default setup bootstraps first-run users as an `engineer`, which cannot approve events.
+> **How Approvals Work:** Approval rules hold matching *events published to AgentBus*. They do not intercept arbitrary shell commands or out-of-band actions. Tools coordinate safety by publishing planned actions as bus events and waiting for human sign-off before proceeding.
+> **Reviewer Roles:** Approving or rejecting events requires a reviewer mapped to a role with `can_approve: true` in `.agentbus/roles.yaml` (such as the default `architect` role mapped to `agy`, or configuring a reviewer in `producers`). The initial setup configures the default user as an `engineer`, which cannot approve events without an authorized reviewer role.
 
-### 4. 📝 Memory & Handoff Distillation (`agentbus distill` / `project-log`)
+### 4. Automatic Project Documentation
 
-Tired of losing agent plans and progress when chat context windows clear?
-AgentBus turns raw pub/sub coordination events into structured, human-readable documentation:
+Do not lose progress when an AI assistant's chat history clears. AgentBus can convert raw coordination messages into structured Markdown notes:
 
-* **`agentbus distill`**: Materializes bounded batches of recent handoffs into structured OKF concepts under `okf/` (`okf/handoffs/` and `okf/log.md`).
-* **`agentbus project-log`**: Projects recent handoffs into your project changelog (`okf/log.md` when the OKF knowledge plane is scaffolded, falling back to root `log.md` in non-OKF workspaces).
+* **`agentbus distill`**: Materializes recent `okf/handoff` events into deterministic concept documents under `okf/handoffs/YYYY/MM/`, indexed by a bounded `okf/log.md`.
+* **`agentbus project-log`**: In an OKF workspace with default settings, runs the bounded distiller to update `okf/log.md` and partitioned concepts; in non-OKF workspaces, appends recent handoffs to the root `log.md`.
 
 ```bash
-# Materialize bounded batches of recent handoffs into structured OKF handoff docs:
+# Save recent handoffs into organized documentation:
 agentbus distill --limit 100
 
-# Or project recent entries into the project log:
+# Update the project changelog:
 agentbus project-log
 ```
 
-Now your team has a durable, bounded, human-readable paper trail of what was built, why, and by whom.
+This leaves your team with a durable, human-readable paper trail of what was built, why, and by whom.
 
-### 5. 🛡️ Cryptographic Tamper-Evident History (`agentbus verify`)
+### 5. Verifiable Message History
 
-Events are linked using a forward **SHA-256 hash chain**. `agentbus verify` audits internal hash continuity and detects sequence gaps across retained events:
+Retained events are linked using a cryptographic SHA-256 hash chain (starting from the workspace genesis checkpoint or post-migration cutover boundary). You can check hash continuity across stored events at any time:
 
 ```bash
 agentbus verify
 ```
 
-> **Integrity Scope:** `agentbus verify` checks the internal hash continuity of retained events against the checkpoint recorded in the database. Because a local writer could recompute the chain, detecting an externally recomputed database requires independently preserving and comparing the reported head hash against an external record (such as a git commit or external ledger); retention and genesis cutover boundaries apply.
+> **Integrity Scope Note:** `agentbus verify` checks internal hash continuity across retained events against the checkpoint stored in the database. Because pre-hash legacy rows serve as the initial unhashed checkpoint and a local writer could recompute the entire chain, detecting an externally recomputed database requires comparing the reported head hash against an external record (such as a git commit hash or external log).
 
 ---
 
-## 🔌 Connecting Your Favorite AI Tools (MCP)
+## Connecting Your AI Tools (Model Context Protocol)
 
-AgentBus speaks standard **Model Context Protocol (MCP)** over stdio, allowing AI coding tools to communicate through the bus natively.
+AgentBus supports the open **Model Context Protocol (MCP)** over standard input/output (stdio). This allows tools like Cursor, Claude Code, and VS Code to talk to AgentBus natively.
 
 ### Automatic Setup: Discover, Preview, Connect
 
-AgentBus discovers MCP client installations from packaged, versioned manifests
-(`src/agentbus/adapters/manifests/*.yaml`). Discovery is read-only and always
-distinguishes three states instead of guessing:
+AgentBus includes built-in discovery for popular AI tools. Discovery is completely safe and read-only by default:
 
 ```bash
-# Read-only: what exists, what is already wired, what could not be determined
+# 1. Discover: See what tools exist on your system and what is already connected
 agentbus discover
 agentbus discover --json
 
-# Preview (default): plan config changes without writing anything
+# 2. Preview: Plan configuration changes without writing any files
 agentbus connect
 
-# Apply to detected clients (project scope needs no extra flag)
+# 3. Apply: Connect detected auto-connect tools for the current project
 agentbus connect --apply
 
-# Optional: prove the configured command completes an MCP handshake
+# 4. Verify: Test that the connection command successfully communicates
 agentbus connect --apply --verify
 
-# User/global configs need explicit, non-interactive authorization
+# Optional: Connect opt-in tools that default to auto_connect: false
+agentbus connect --apply --client claude-code-project
+agentbus connect --apply --client codex-project
+
+# Optional: Connect global user tools (in interactive terminals you can confirm via prompt; non-interactive runs require --allow-user-scope)
 agentbus connect --scope user --apply --allow-user-scope
 ```
 
-`agentbus init` keeps the original behaviour: a preview by default, writes only
-with `--apply`. It shares the same discovery pipeline, the same
-`.agentbus/init.lock` serialization, and the same rollback-capable writer.
-`init --apply` likewise requires `--allow-user-scope` (or an interactive
-confirmation) before touching global client configs, and otherwise skips them
-with a typed diagnostic. The lock is held across the whole init lifecycle,
-including `okf/` scaffolding, `.gitignore` edits, and runtime state.
+*(Note: Standard bulk runs with `agentbus connect --apply` configure auto-connect tools such as Cursor and VS Code. Opt-in tools like Claude Code (`--client claude-code-project` or `--client claude-code-user`) and Codex project (`--client codex-project`) declare `auto_connect: false` and are connected by specifying their client name. For user-scope files, interactive terminals prompt for confirmation, while non-interactive runs require `--allow-user-scope`.)*
 
-State language is deliberate:
+When you inspect your tools, AgentBus clearly reports their status:
+* **Configured:** The configuration file matches what AgentBus expects.
+* **Differs:** A configuration already exists but has different settings. AgentBus will not silently overwrite it.
+* **Awaiting Approval:** The configuration file was created or updated, but your AI tool needs to be restarted or needs you to click "Allow" in its settings.
+* **Command Verified:** When run with `--verify`, AgentBus proved that the configured command starts and answers MCP requests properly.
 
-* **Configured** — the file on disk matches what AgentBus requires.
-* **Differs** — an existing AgentBus entry has different parameters. It is
-  never reported as configured.
-* **Awaiting Approval** — the file was written, but the client has not
-  restarted, reloaded, or approved the server yet.
-* **Command Verified** (`--verify`) — the exact configured argv completed an
-  MCP `initialize` + `tools/list` exchange. This proves the command works; it
-  does **not** prove your client approved or connected the server, so client
-  exchange remains unobserved and the state stays `awaiting_approval`.
+### Safety Guarantees
 
-Nothing is written by `agentbus discover`, by `agentbus init` without `--apply`,
-or by `agentbus connect` without `--apply`: no token, marker, database, lock,
-backup, or client file.
+* **Zero unexpected writes:** `agentbus discover` and `agentbus connect` (without `--apply`) never write, modify, or delete any files on your computer.
+* **Automatic backups:** When replacing an existing configuration file, AgentBus creates a unique backup file in the same directory (such as `.cursor/mcp.json.agentbus.bak.<timestamp>.<pid>`). Newly created files are not backed up. If an error occurs during an existing file's write, it makes a best-effort rollback.
+* **Secret protection:** Passwords, API keys, and sensitive environment variables are automatically masked as `[REDACTED]` in terminal displays, logs, and JSON outputs.
+* **Safe file replacement:** Configuration files are written to a temporary file first and replaced atomically per file so a crash during write does not leave a half-written file. Multi-file installations proceed sequentially, so crashes or non-cooperating writers can still leave partial multi-file state.
+* **Process locking:** Setup operations use an advisory lock file (`.agentbus/init.lock`) so two setup commands running at the same time cannot corrupt each other.
 
-**Supported clients:** Cursor (project `.cursor/mcp.json` and user
-`~/.cursor/mcp.json`), Claude Desktop (Linux, macOS and Windows paths),
-Claude Code (project `.mcp.json` and user `~/.claude.json`), Codex CLI
-(`~/.codex/config.toml` → `[mcp_servers.agentbus]`), VS Code
-(`.vscode/mcp.json`, correctly using the top-level `servers` schema rather than
-`mcpServers`), and the legacy Gemini path (`~/.gemini/config/mcp_config.json`).
+### Supported Tools
 
-**Limitations, stated honestly:**
+* **Cursor:** Project configuration (`.cursor/mcp.json`) and user configuration (`~/.cursor/mcp.json`).
+* **Claude Desktop:** Linux, macOS, and Windows configuration files.
+* **Claude Code:** Project configuration (`.mcp.json`) and user configuration (`~/.claude.json`).
+* **Codex CLI:** Project configuration (`.codex/config.toml`) and global settings (`~/.codex/config.toml`).
+* **VS Code:** Project configuration (`.vscode/mcp.json`, using the standard `servers` schema).
+* **Gemini:** AgentBus writes the legacy user configuration (`~/.gemini/config/mcp_config.json`) for compatibility. Gemini CLI reads `~/.gemini/settings.json`; add AgentBus to that file manually.
 
-* A client is reported `present` only on positive evidence: its config file
-  exists or its binary is on PATH. An app directory alone is weak evidence and
-  is reported as `unknown`, not `present`. Unreadable files, malformed
-  JSON/TOML, and unsupported platforms are reported as `unknown` with the
-  underlying diagnostic; AgentBus will not write into an ambiguous config.
-* Existing entries are redacted before they reach stdout, logs, or JSON:
-  every `env`/header value becomes `[REDACTED]`, secret-looking keys and
-  argument values are masked, and only environment key names are exposed.
-* Client config changes are installed one file at a time with a same-directory
-  temp file, `fsync`, atomic replace, a collision-resistant
-  `.agentbus.bak.<timestamp>.<pid>` backup (created with `O_EXCL`, never
-  overwritten), and rollback on failure. This is not a cross-file transaction:
-  independent filesystems, crashes, and non-cooperating writers can still
-  leave partial state. Concurrent setup runs are serialized by an advisory
-  `.agentbus/init.lock` that is released automatically when the process exits;
-  user-scope writes also take a global `~/.agentbus/user-config.lock`.
-* User/global client configs are never written by a non-interactive run without
-  `--allow-user-scope`.
-* Gemini CLI's newer `~/.gemini/settings.json` location is not auto-wired; the
-  legacy path is preserved to avoid wiring one agent into two files.
-* Codex project-scope `.codex/config.toml` and Claude Code project `.mcp.json`
-  and user `~/.claude.json` declare `auto_connect: false`; bulk runs skip them
-  unless explicitly selected with `--client codex-project`,
-  `--client claude-code-project`, or `--client claude-code-user`.
-* The MCP command written into client configs is resolved to a durable absolute
-  executable. Console scripts are checked with `--version`; the Python module
-  fallback is checked by importing `agentbus.cli`. Both probes have a ten-second
-  bound and reject broken executables or missing dependencies. Override the
-  command with `AGENTBUS_MCP_COMMAND`.
+### Manual Tool Configuration
 
-### Manual IDE Setup
+If you prefer editing configuration files by hand, you can add AgentBus directly.
 
-If you prefer configuring things manually:
+> **RBAC Producer Authorization Note:** In a workspace with role-based access control enabled (`.agentbus/roles.yaml`), any `AGENTBUS_PRODUCER_ID` you configure (such as `local-user`) must have a corresponding role mapping under `producers:` (for example: `producers: { local-user: engineer }`). If `roles.yaml` exists and the configured producer is not listed, publish calls will return `403 Forbidden`. You can change `local-user` in the snippets below to any producer ID that already has an authorized role mapping.
 
 <details>
-<summary><b>For Cursor (<code>.cursor/mcp.json</code> or <code>~/.cursor/mcp.json</code>)</b></summary>
+<summary><b>Cursor (<code>.cursor/mcp.json</code> or <code>~/.cursor/mcp.json</code>)</b></summary>
 
 ```json
 {
@@ -280,12 +274,10 @@ If you prefer configuring things manually:
 }
 ```
 
-*(Use an authorized producer ID, such as `local-user` initialized by the companion, or your custom configured producer).*
-
 </details>
 
 <details>
-<summary><b>For Claude Desktop (<code>claude_desktop_config.json</code>)</b></summary>
+<summary><b>Claude Desktop (<code>claude_desktop_config.json</code>)</b></summary>
 
 ```json
 {
@@ -302,12 +294,30 @@ If you prefer configuring things manually:
 }
 ```
 
-*(Use an authorized producer ID, such as `local-user` initialized by the companion, or your custom configured producer).*
+</details>
+
+<details>
+<summary><b>Claude Code (<code>.mcp.json</code>)</b></summary>
+
+```json
+{
+  "mcpServers": {
+    "agentbus": {
+      "command": "agentbus",
+      "args": ["mcp-serve"],
+      "env": {
+        "AGENTBUS_WORKSPACE": "/path/to/your/project",
+        "AGENTBUS_PRODUCER_ID": "local-user"
+      }
+    }
+  }
+}
+```
 
 </details>
 
 <details>
-<summary><b>For VS Code (<code>.vscode/mcp.json</code>)</b></summary>
+<summary><b>VS Code (<code>.vscode/mcp.json</code>)</b></summary>
 
 ```json
 {
@@ -325,14 +335,27 @@ If you prefer configuring things manually:
 }
 ```
 
-*(Use an authorized producer ID, such as `local-user` initialized by the companion, or your custom configured producer).*
+</details>
+
+<details>
+<summary><b>Codex CLI (<code>.codex/config.toml</code> or <code>~/.codex/config.toml</code>)</b></summary>
+
+```toml
+[mcp_servers.agentbus]
+command = "agentbus"
+args = ["mcp-serve"]
+
+[mcp_servers.agentbus.env]
+AGENTBUS_WORKSPACE = "/path/to/your/project"
+AGENTBUS_PRODUCER_ID = "local-user"
+```
+
+*(Place this configuration in your workspace at `.codex/config.toml` for project scope, or in `~/.codex/config.toml` for user global scope. Note: Codex loads project-scope `.codex/config.toml` only for trusted projects; for untrusted projects, trust the workspace or configure the user-scope file `~/.codex/config.toml` so AgentBus is available).*
 
 </details>
 
 <details>
-<summary><b>For Gemini (<code>~/.gemini/settings.json</code> for Gemini CLI, or <code>~/.gemini/config/mcp_config.json</code>)</b></summary>
-
-Depending on your Gemini tooling, add the `agentbus` definition to `~/.gemini/settings.json` (for Gemini CLI) or `~/.gemini/config/mcp_config.json` (for other Gemini clients):
+<summary><b>Gemini CLI (<code>~/.gemini/settings.json</code>) or legacy (<code>~/.gemini/config/mcp_config.json</code>)</b></summary>
 
 ```json
 {
@@ -349,34 +372,32 @@ Depending on your Gemini tooling, add the `agentbus` definition to `~/.gemini/se
 }
 ```
 
-*(Use an authorized producer ID, such as `local-user` initialized by the companion, or your custom configured producer).*
-
 </details>
 
-Once connected, your AI agents automatically gain coordination tools:
-* `agentbus_publish` — publish task updates, handoffs, and questions.
-* `agentbus_poll` — check for incoming tasks assigned to them.
-* `agentbus_lock_acquire` / `agentbus_lock_release` — coordinate advisory file locks.
-* `agentbus_review` / `agentbus_approve` / `agentbus_reject` — review and approve pending actions.
+Once connected, your AI tools gain these functions:
+* `agentbus_publish`: Send task updates, questions, and handoffs.
+* `agentbus_poll`: Check for incoming tasks assigned to them.
+* `agentbus_lock_acquire` / `agentbus_lock_release`: Reserve files before editing.
+* `agentbus_review` / `agentbus_approve` / `agentbus_reject`: Review and approve actions that need human permission.
 
 ---
 
-## 💻 Zero-Friction Code Examples
+## Code Examples
 
-AgentBus is a first-class citizen across Python, TypeScript/Node.js, and Bash.
+AgentBus works seamlessly with Python, TypeScript/Node.js, and shell scripts.
 
 ### Python SDK
 
-Integrate custom Python agents, scripts, or LangChain/CrewAI nodes in just a few lines:
+Integrate custom Python agents, scripts, or LangChain/CrewAI tools in a few lines:
 
 ```python
 from pathlib import Path
 from agentbus.store import EventStore
 
-# Connect to the current project's SQLite bus
+# Connect to the SQLite bus in the current project directory
 store = EventStore(Path.cwd())
 
-# Publish a handoff using an authorized producer (e.g. 'local-user' configured by default companion)
+# Send a message to other agents
 event, _ = store.publish(
     topic="okf/handoff",
     producer_id="local-user",
@@ -385,7 +406,7 @@ event, _ = store.publish(
 )
 print(f"Published event #{event.event_id}")
 
-# Poll for new messages
+# Read incoming messages
 messages = store.poll("okf/handoff", since_id=0)
 for ev in messages["events"]:
     print(f"[{ev['event_id']}] {ev['payload']['summary']}")
@@ -395,13 +416,13 @@ store.close()
 
 ### TypeScript / Node.js SDK
 
-Using Node.js or building tools for web agents? Use [`@agentbus/agentbus-client`](https://www.npmjs.com/package/@agentbus/agentbus-client):
+For Node.js projects, install [`@agentbus/agentbus-client`](https://www.npmjs.com/package/@agentbus/agentbus-client):
 
 ```bash
 npm install @agentbus/agentbus-client
 ```
 
-> **Prerequisites:** Requires Node.js 18+ and the `agentbus` CLI binary on your `PATH` (the client spawns `agentbus mcp-serve` via stdio MCP; see [Install](#1-install)).
+> **Prerequisites:** Node.js 18+ and the `agentbus` command available on your PATH.
 
 ```typescript
 import { AgentBus } from "@agentbus/agentbus-client";
@@ -412,15 +433,13 @@ async function main() {
     topics: ["okf/handoff"],
   });
 
-  // 1. Register listener FIRST so catch-up events emitted during connect() are received
+  // Register listener before connecting so you do not miss initial events
   bus.on("okf/handoff", (payload, meta) => {
-    console.log(`[Event #${meta.event_id}] From: ${payload.from} → ${payload.summary}`);
+    console.log(`[Event #${meta.event_id}] From: ${payload.from} -> ${payload.summary}`);
   });
 
-  // 2. Connect stdio MCP transport
   await bus.connect();
 
-  // Disconnect on process termination
   process.on("SIGINT", async () => {
     await bus.disconnect();
     process.exit(0);
@@ -435,104 +454,119 @@ main().catch((error) => {
 
 ---
 
-## 🛠️ Why AgentBus?
+## Comparison: Why AgentBus?
 
-| Approach | Limitations | How AgentBus Solves It |
+| Approach | Drawbacks | How AgentBus Solves It |
 |---|---|---|
-| **Shared `log.md` file** | Race conditions, zero schemas, easily corrupted by simultaneous writes | Transactional SQLite storage with configurable journal mode (defaulting to WAL on POSIX and MEMORY on Windows with weaker hard-crash durability; override via `AGENTBUS_SQLITE_JOURNAL`), atomic writes, monotonic event IDs, advisory file leases |
-| **Cloud SaaS (e.g. LangSmith)** | Setup latency, cloud data egress, privacy concerns, monthly SaaS bills | Local-first SQLite database (`.agentbus/events.db`) keeps coordination data in your repo without mandatory cloud egress (telemetry and remote bridges are strictly opt-in) |
-| **Heavy Brokers (Redis, Kafka)** | Background daemon requirements, port conflicts, heavy Docker containers | Embedded-first operation over SQLite; zero background daemons required for standard pub/sub (optional worker daemons can be launched via `agentbus up -d`) |
-| **Framework Runtimes (LangGraph, CrewAI)** | Locked into a single language/process runtime | Connects heterogeneous agents across Cursor, Claude, Antigravity, and CLI bots via standard MCP and CLI |
+| **Shared text files (`log.md`)** | Collisions when two agents write at once, no structure, easy to corrupt | Uses a local SQLite database with transactional writes, monotonic event numbering, and advisory file reservations. |
+| **Cloud platforms (e.g. LangSmith)** | Setup friction, network latency, data leaves your machine, monthly subscription costs | Local-first design. Event storage and auxiliary files in `.agentbus/` stay on your machine by default (outbound PostHog telemetry is strictly opt-in and sends only allowlisted metadata when configured). |
+| **Heavy brokers (Redis, Kafka)** | Requires background servers, Docker containers, open ports, and system administration | Runs directly in your project. Standard messaging requires zero background daemons. |
+| **Single-framework runtimes** | Locks you into a single library or programming language | Connects any assistant (Cursor, Claude Code, VS Code, Python scripts) using open Model Context Protocol standards. |
 
 ---
 
-## ⚡ Under the Hood: Built for Speed & Reliability
+## Technical Architecture (Under the Hood)
 
-AgentBus is engineered to stay out of your way for simple local scripts while remaining rock-solid for multi-agent workflows:
+<details>
+<summary><b>Click to expand technical specifications</b></summary>
 
-* **Fast Lazy-Loaded CLI:** A 3-tier lazy-loaded console entrypoint strips heavy imports (`rich`, `textual`, `mcp`, `cryptography`) from the hot command path, keeping startup overhead low for commands like `publish` and `poll`.
+AgentBus is designed to stay out of the way for simple local scripts while remaining reliable under multi-process workloads:
+
+* **Fast Lazy-Loaded CLI:** A 3-tier lazy-loaded console entrypoint strips heavy imports (`rich`, `textual`, `mcp`, `cryptography`) from the hot command path, keeping startup latency low for commands like `publish` and `poll`.
 * **SQLite Transactional Concurrency:** Multi-process read concurrency with serialized atomic writes using WAL journal mode on POSIX platforms. On Windows, SQLite defaults to `MEMORY` journal mode to reduce file locking contention under antivirus and EDR software (which offers best-effort operation but has weaker hard-crash durability than WAL or DELETE); you can override the journal mode on any platform via the `AGENTBUS_SQLITE_JOURNAL` environment variable (e.g. `WAL`, `DELETE`, or `MEMORY`). Multiple agents can read concurrently with standard SQLite transaction isolation.
-* **Materialized Projections:** Plane counters are maintained in transaction-scoped tables, providing fast status queries without table scans.
+* **Materialized Projections:** Total, latest, pending-approval, SLA, and topic counters are maintained in transaction-scoped tables, providing fast status queries without full-table scans.
 * **Embedded-First Architecture:** For standard local pub/sub, state is stored directly in `.agentbus/events.db` (with auxiliary state files in `.agentbus/`). No background daemons are required unless you explicitly launch background worker processes via `agentbus up -d`.
 * **OKF v0.2 Native:** Designed to integrate with the Open Knowledge Format standard for agent memory, roles, and handoffs.
 
----
-
-## ⌨️ CLI Cheat Sheet
-
-### 🚀 Everyday Commands
-
-| Command | What it does |
-|---|---|
-| `agentbus` | Companion launcher: initializes new projects (interactive prompts or non-interactive JSON), or opens Mission Control / emits status in initialized projects |
-| `agentbus monitor` | Open the interactive God View TUI cockpit (`agentbus-monitor` also works) |
-| `agentbus publish --topic <t> --producer-id <id> --payload '<json>'` | Send an event to the local SQLite bus |
-| `agentbus poll --topic <t> [--since-id <id>]` | Read published events from the bus |
-| `agentbus status` | Check the current health, event count, and active topics of your bus |
-
-### 🔒 Collaboration & Advisory Leases
-
-| Command | What it does |
-|---|---|
-| `agentbus lock acquire --resource <abs_path> --owner-id <id> [--ttl-seconds 300]` | Acquire an exclusive advisory lease on a resource |
-| `agentbus lock status --resource <abs_path>` | Check who currently holds a lease on a file |
-| `agentbus lock release --resource <abs_path> --owner-id <id>` | Release an advisory lease when finished |
-
-### 🛡️ Safety & Approvals (HITL)
-
-| Command | What it does |
-|---|---|
-| `agentbus config set-intercept --topic <t> --contains "<pattern>"` | Create Human-in-the-Loop intercept rules for matching published payloads |
-| `agentbus review` | List events currently waiting for your human approval |
-| `agentbus approve <event_id> [--reviewer-id <id>]` | Approve a held event using an authorized approver role (e.g. `--reviewer-id agy` or configured in `roles.yaml`) |
-| `agentbus reject <event_id> [--reviewer-id <id>] [--reason "<text>"]` | Reject a held event using an authorized approver role |
-
-### 📝 Memory & Verification
-
-| Command | What it does |
-|---|---|
-| `agentbus distill [--limit <n>]` | Materialize bounded batches of raw coordination events into OKF handoff docs (`okf/handoffs/`) |
-| `agentbus project-log` | Update your project's changelog (`okf/log.md`, or root `log.md` fallback) |
-| `agentbus verify` | Check internal hash continuity across retained events (see Integrity Scope for external comparison and retention limits) |
-| `agentbus doctor` | Run non-destructive diagnostic checks on SQLite, schema, and environment |
-
-### 🤖 Multi-Agent Swarm Orchestration (Optional)
-
-| Command | What it does |
-|---|---|
-| `agentbus up [-d]` | Start local agent workers defined in `.agentbus/swarm.yaml` (runs foreground monitor and stops workers on exit; use `-d` / `--detach` for background daemons) |
-| `agentbus ps` | List active background worker processes |
-| `agentbus down` | Cleanly terminate all background worker processes |
+</details>
 
 ---
 
-## 📚 Complete Examples & Deep-Dive Guides
+## CLI Reference
 
-Looking for ready-to-run recipes? Check out the **[`examples/`](examples/)** folder:
+### Daily Essentials
 
-* **[`01_core_pub_sub.py`](examples/01_core_pub_sub.py)** — Fundamental publish and poll flow.
-* **[`02_hitl_intercepts.py`](examples/02_hitl_intercepts.py)** — Catching sensitive payloads for human sign-off.
-* **[`03_swarm_rbac.py`](examples/03_swarm_rbac.py)** — Role-based topic permissions and identity tokens.
-* **[`04_sla_timeouts.py`](examples/04_sla_timeouts.py)** — Automated dead-letter routing when an agent ghosts.
-* **[`05_observability.py`](examples/05_observability.py)** — Distributed trace waterfalls (`trace_id`, `parent_span_id`).
-* **[`06_distributed_context.py`](examples/06_distributed_context.py)** — Sharing large artifacts and diffs via content hashing.
-* **[`07_pydantic_schemas.py`](examples/07_pydantic_schemas.py)** — Validating topic payloads with Pydantic models.
-* **[`08_god_view.py`](examples/08_god_view.py)** — Passive OS filesystem, shell, and MCP call observation.
-* **[`09_langgraph_bridge.py`](examples/09_langgraph_bridge.py)** — Bridging LangGraph nodes with AgentBus.
-* **[`10_crewai_bridge.py`](examples/10_crewai_bridge.py)** — Bridging CrewAI tasks with AgentBus.
+| Command | What it does |
+|---|---|
+| `agentbus` | Companion assistant: sets up new projects with interactive prompts, or opens the dashboard |
+| `agentbus monitor` | Open the interactive terminal dashboard |
+| `agentbus publish --topic <topic> --producer-id <id> --payload '<json>'` | Send a message or handoff to the bus |
+| `agentbus poll --topic <topic> [--since-id <id>]` | Read published messages from the bus |
+| `agentbus status` | Check project bus health, event totals, and active topics |
 
-### Additional Reading
+### Tool Discovery & Connection
 
-* 📖 [End-to-End Walkthrough (Alice, Bob, & Charlie)](docs/WALKTHROUGH.md)
-* 🔌 [Model Context Protocol (MCP) Tool Schema](docs/MCP_SCHEMA.md)
-* 🔐 [AgentID Security Model & Identity System](docs/AGENTID.md)
-* 💻 [Client Compatibility Matrix](docs/CLIENT_MATRIX.md)
-* 📊 [PostHog Outbound Telemetry](docs/POSTHOG.md)
-* 🚢 [Release Runbook & Process](docs/RELEASE.md)
-* 🗺️ [Roadmap](ROADMAP.md)
+| Command | What it does |
+|---|---|
+| `agentbus discover` | Safely inspect installed AI tools and their connection status |
+| `agentbus connect` | Preview planned configuration changes without writing anything |
+| `agentbus connect [--scope project] --apply [--client <id>]` | Apply connections to detected tools (defaults to all scopes; non-interactive runs require `--allow-user-scope` before writing user-level files, and `--client` to connect opt-in tools) |
+| `agentbus connect --apply --verify` | Apply connections and verify MCP handshake communication |
+| `agentbus connect --scope user --apply --allow-user-scope` | Connect global user-level tools with explicit authorization |
+
+### File Reservations (Advisory Leases)
+
+| Command | What it does |
+|---|---|
+| `agentbus lock acquire --resource <path> --owner-id <id> [--ttl-seconds 300]` | Reserve a file before editing it |
+| `agentbus lock status --resource <path>` | Check whether a file is currently reserved |
+| `agentbus lock release --resource <path> --owner-id <id>` | Release a file reservation when finished |
+
+### Human Safety & Approvals
+
+| Command | What it does |
+|---|---|
+| `agentbus config set-intercept --topic <topic> --contains "<pattern>"` | Require human approval for messages matching a keyword |
+| `agentbus review` | List actions currently waiting for approval |
+| `agentbus approve <event_id> [--reviewer-id <id>]` | Approve a held action using an authorized reviewer role |
+| `agentbus reject <event_id> [--reviewer-id <id>] [--reason "<text>"]` | Reject a held action with an explanation |
+
+### Documentation & Maintenance
+
+| Command | What it does |
+|---|---|
+| `agentbus distill [--limit <count>]` | Materialize recent handoff events into deterministic OKF concept documents |
+| `agentbus project-log` | Update your project changelog (runs bounded distiller in OKF workspaces, or appends to `log.md`) |
+| `agentbus verify` | Check cryptographic hash continuity across stored events |
+| `agentbus doctor` | Run non-destructive health checks on your database and setup |
+
+### Swarm Worker Daemons (Optional)
+
+| Command | What it does |
+|---|---|
+| `agentbus up [-d]` | Start workers defined in `.agentbus/swarm.yaml`; use `-d` / `--detach` to run them in the background |
+| `agentbus ps` | List running background worker processes |
+| `agentbus down` | Safely stop all background worker processes |
 
 ---
 
-## 📄 License
+## Examples and Guides
 
-MIT — see [LICENSE](LICENSE).
+Explore complete, ready-to-run examples in the **[`examples/`](examples/)** folder:
+
+* [`01_core_pub_sub.py`](examples/01_core_pub_sub.py) - Basic publish and poll workflow.
+* [`02_hitl_intercepts.py`](examples/02_hitl_intercepts.py) - Pausing sensitive actions for human approval.
+* [`03_swarm_rbac.py`](examples/03_swarm_rbac.py) - Topic permissions and security roles.
+* [`04_sla_timeouts.py`](examples/04_sla_timeouts.py) - Automated routing when an assistant stops responding.
+* [`05_observability.py`](examples/05_observability.py) - Distributed trace waterfalls (`trace_id`, `parent_span_id`).
+* [`06_distributed_context.py`](examples/06_distributed_context.py) - Sharing large files and diffs via content hashing.
+* [`07_pydantic_schemas.py`](examples/07_pydantic_schemas.py) - Validating message payloads with Pydantic.
+* [`08_god_view.py`](examples/08_god_view.py) - File system, shell, and MCP observation.
+* [`09_langgraph_bridge.py`](examples/09_langgraph_bridge.py) - Bridging LangGraph nodes with AgentBus.
+* [`10_crewai_bridge.py`](examples/10_crewai_bridge.py) - Bridging CrewAI tasks with AgentBus.
+
+### Additional Documentation
+
+* [End-to-End Walkthrough (Alice, Bob, and Charlie)](docs/WALKTHROUGH.md)
+* [Model Context Protocol (MCP) Tool Reference](docs/MCP_SCHEMA.md)
+* [AgentID Security Model and Identity System](docs/AGENTID.md)
+* [Client Compatibility Matrix](docs/CLIENT_MATRIX.md)
+* [Telemetry and Diagnostics](docs/POSTHOG.md)
+* [Release Runbook and Verification](docs/RELEASE.md)
+* [Project Roadmap](ROADMAP.md)
+
+---
+
+## License
+
+MIT - see [LICENSE](LICENSE).
