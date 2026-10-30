@@ -412,6 +412,26 @@ def build_command_entry(
     }
 
 
+def entry_launch(entry: Mapping[str, Any]) -> tuple[list[str], dict[str, str]]:
+    """Recover the launch arguments and environment from a client entry."""
+    if not isinstance(entry, Mapping):
+        return [], {}
+    command = entry.get("command", entry.get("cmd"))
+    if isinstance(command, (list, tuple)):
+        argv = [str(part) for part in command]
+    elif command is not None:
+        args = entry.get("args")
+        argv = [str(command), *([str(arg) for arg in args] if isinstance(args, (list, tuple)) else [])]
+    else:
+        argv = []
+    env: dict[str, str] = {}
+    for key in ("env", "envs", "environment"):
+        value = entry.get(key)
+        if isinstance(value, Mapping):
+            env.update({str(k): str(v) for k, v in value.items()})
+    return argv, env
+
+
 def build_entry(
     installation: Installation,
     *,

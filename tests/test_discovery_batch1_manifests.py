@@ -490,6 +490,41 @@ def test_apply_all_six_then_idempotent(
     assert {name: path.read_bytes() for name, path in paths.items()} == before_second
 
 
+def test_connect_apply_and_verify_alternate_entry_shapes(
+    tmp_path: Path, isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentbus.discovery as discovery
+    from agentbus.store import EventStore
+
+    workspace = _workspace(tmp_path)
+    _prepare_all_six(workspace, isolated_home)
+    EventStore(workspace).close()
+    calls = []
+
+    def handshake(argv, *, env, workspace):
+        calls.append((argv, env, workspace))
+        return discovery.HandshakeResult(ok=True, server_name="agentbus", tool_count=2)
+
+    monkeypatch.setattr(discovery, "verify_mcp_handshake", handshake)
+    report = connect(
+        workspace=workspace, home=isolated_home, platform="linux",
+        environ={"HOME": str(isolated_home), "PYTHONPATH": "transient"},
+        command=FAKE_COMMAND, which=_no_which, apply=True, verify=True,
+        allow_user_scope=True, clients=["goose-user", "opencode-v2-project"],
+    )
+    assert report.exit_code == 0, report.errors
+    assert report.verification["ok"] is True
+    assert {r["installation"] for r in report.verification["results"]} == {
+        "goose-user", "opencode-v2-project"
+    }
+    assert len(calls) == 2
+    for argv, env, actual_workspace in calls:
+        assert argv[:2] == ["/usr/bin/agentbus", "mcp-serve"]
+        assert env["AGENTBUS_WORKSPACE"] == str(workspace)
+        assert "PYTHONPATH" not in env
+        assert actual_workspace == workspace
+
+
 def test_opencode_v1_server_named_servers_is_not_treated_as_v2(
     tmp_path: Path, isolated_home: Path
 ) -> None:

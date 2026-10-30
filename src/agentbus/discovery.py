@@ -49,6 +49,7 @@ from agentbus.adapters.manifest import (
     Installation,
     Manifest,
     build_entry,
+    entry_launch,
     load_manifests,
 )
 from agentbus.adapters.probe import (
@@ -1691,7 +1692,7 @@ def _run_verification(
         entry = expected.get(item.installation_id)
         if not entry:
             continue
-        argv = [str(entry["command"]), *[str(a) for a in entry.get("args", [])]]
+        argv, entry_env = entry_launch(entry)
         base = os.environ if environ is None else environ
         # Match the command probe: the host client will not inherit this
         # shell's PYTHONPATH, so a handshake that only works with it would
@@ -1701,7 +1702,7 @@ def _run_verification(
             for key, value in base.items()
             if str(key).upper() != "PYTHONPATH"
         }
-        env.update({str(k): str(v) for k, v in (entry.get("env") or {}).items()})
+        env.update(entry_env)
         result = verify_mcp_handshake(argv, env=env, workspace=workspace)
         results.append({"installation": item.installation_id, **result.to_dict()})
         # A successful stdio handshake proves the *command* speaks MCP. It is
