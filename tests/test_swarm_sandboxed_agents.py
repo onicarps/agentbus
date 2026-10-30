@@ -388,7 +388,13 @@ record = {
     "producer": os.environ.get("AGENTBUS_PRODUCER_ID"),
     "workspace": os.environ.get("AGENTBUS_WORKSPACE"),
     "wake_event": os.environ.get("AGENTBUS_WAKE_EVENT_ID"),
-    "inherited_token": os.environ.get("AGENTBUS_TOKEN"),
+    "credentials": {
+        key: os.environ.get(key)
+        for key in (
+            "AGENTBUS_TOKEN", "AGENTBUS_WEBHOOK_TOKEN", "AGENTBUS_IDENTITY_PRIVATE_KEY",
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
+        )
+    },
     "cwd": os.getcwd(),
     "pty_line": line,
 }
@@ -410,7 +416,10 @@ def _go_worker() -> Path:
     """Use a prebuilt worker; building inside the sandbox may access the network."""
     if GO_WORKER.is_file() and os.access(GO_WORKER, os.X_OK):
         return GO_WORKER
-    pytest.skip(f"prebuild agentbus-go-worker before running this test: {GO_WORKER}")
+    message = f"prebuild agentbus-go-worker before running this test: {GO_WORKER}"
+    if os.environ.get("CI") or os.environ.get("AGENTBUS_REQUIRE_GO_WORKER"):
+        pytest.fail(message)
+    pytest.skip(message)
 
 
 def _write_worker_config(workspace: Path, agent: str) -> Path:
@@ -987,7 +996,15 @@ def test_runner_executes_agent_adapter_against_sandbox_stub(
     dump = sandbox.root / f"dump-{case.agent}.json"
     monkeypatch.setenv("STUB_DUMP", str(dump))
     # Ambient bus authority must never reach the child.
-    monkeypatch.setenv("AGENTBUS_TOKEN", "inherited-secret")
+    for key in (
+        "AGENTBUS_TOKEN",
+        "AGENTBUS_WEBHOOK_TOKEN",
+        "AGENTBUS_IDENTITY_PRIVATE_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+    ):
+        monkeypatch.setenv(key, "test-value")
 
     published = _publish_handoffs(sandbox.workspace, (case.agent,))
     _write_wake_file(sandbox.workspace, case.agent, published[case.agent])
@@ -1023,7 +1040,14 @@ def test_runner_executes_agent_adapter_against_sandbox_stub(
     assert record["workspace"] == str(sandbox.workspace)
     assert record["wake_event"] == str(published[case.agent])
     assert record["cwd"] == str(sandbox.workspace)
-    assert record["inherited_token"] is None, "AGENTBUS_TOKEN leaked into the child"
+    for key in (
+        "AGENTBUS_TOKEN",
+        "AGENTBUS_WEBHOOK_TOKEN",
+        "AGENTBUS_IDENTITY_PRIVATE_KEY",
+    ):
+        assert record["credentials"][key] is None
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
+        assert record["credentials"][key] == "test-value"
 
     store = EventStore(sandbox.workspace)
     try:
@@ -1092,8 +1116,10 @@ def test_aider_bridge_runs_via_stub_and_leaves_parked_config_alone(
 
     # Aider is parked: AgentBus neither parses nor rewrites its config file.
     assert parked.read_bytes() == parked_before
-    manifest_ids = {manifest.manifest_id for manifest in load_manifests()}
-    assert "aider" not in manifest_ids
+    manifests = load_manifests()
+    assert "aider" not in {manifest.manifest_id for manifest in manifests}
+    assert all(manifest.client != "aider" for manifest in manifests)
+    assert all(manifest.installation("aider") is None for manifest in manifests)
 
 
 def test_aider_yes_flag_is_opt_in() -> None:
