@@ -26,7 +26,8 @@ or an external network/API:
 
 ``LEDGER`` records what each row of evidence actually proves. Tests that need
 a capability this environment does not provide (the prebuilt Go worker
-binary) skip with an explicit reason instead of substituting a fake.
+binary) skip with an explicit reason instead of substituting a fake. In CI,
+or when ``AGENTBUS_REQUIRE_GO_WORKER`` is set, a missing worker fails the test.
 """
 
 from __future__ import annotations
