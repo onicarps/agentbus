@@ -189,7 +189,9 @@ def _default_version_probe(
 
 def _read_json_document(path: Path) -> tuple[object | None, str | None]:
     try:
-        raw = path.read_bytes()
+        from agentbus.safe_file import read_regular_file
+
+        raw = read_regular_file(path)
     except FileNotFoundError:
         return None, None
     except OSError as exc:

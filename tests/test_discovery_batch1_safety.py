@@ -20,6 +20,41 @@ from agentbus.discovery import (
 )
 from agentbus.rbac import ForbiddenError, check_publish_rbac
 
+
+def test_opencode_reader_rejects_device_and_preserves_missing_file(tmp_path: Path) -> None:
+    from agentbus.adapters.opencode import _read_json_document
+
+    assert _read_json_document(tmp_path / "missing") == (None, None)
+    device = Path("/dev/null")
+    if not device.exists():
+        pytest.skip("device unavailable")
+    config = tmp_path / "opencode.json"
+    config.symlink_to(device)
+    document, problem = _read_json_document(config)
+    assert document is None
+    assert problem and "unreadable" in problem and "not a regular file" in problem
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs unavailable")
+def test_opencode_variant_rejects_fifo_without_blocking(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    config = tmp_path / "opencode.json"
+    os.mkfifo(config)
+    script = """
+import sys
+from pathlib import Path
+from agentbus.adapters.opencode import detect_variant, OpenCodeVersionAmbiguityError
+try:
+    detect_variant(config_paths=[Path(sys.argv[1])], which=lambda _: None, probe_versions=False)
+except OpenCodeVersionAmbiguityError as exc:
+    assert any('unreadable' in note and 'not a regular file' in note for note in exc.evidence)
+else:
+    raise AssertionError('expected ambiguous variant')
+"""
+    subprocess.run([sys.executable, "-c", script, str(config)], check=True, timeout=5)
+
 ROLES = {
     "roles": {
         "engineer": {"can_publish_topics": ["okf/*"]},
