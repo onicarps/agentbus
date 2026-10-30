@@ -849,12 +849,12 @@ def test_worker_to_runner_handoff_stays_within_one_agent(sandbox: Sandbox) -> No
         assert results[0]["event_id"] == published[agent]
         consumed[agent] = results[0]["event_id"]
 
-        # No other agent's runner has seen this wake file yet, but the wake
-        # file for the next agent must not exist from this worker's drain.
+        # Only workers drained so far may have created wake files.
         remaining = {
             p.name for p in (sandbox.workspace / ".agentbus").glob("WAKE.*.json")
         }
-        assert f"WAKE.{agent}.json" in remaining
+        drained_so_far = TARGETED_DAEMONS[: TARGETED_DAEMONS.index(agent) + 1]
+        assert remaining == {f"WAKE.{name}.json" for name in drained_so_far}
 
     assert consumed == published
 
