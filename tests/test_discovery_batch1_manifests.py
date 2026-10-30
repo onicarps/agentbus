@@ -41,6 +41,15 @@ BATCH1 = {"goose", "cline", "vibe", "copilot", "opencode", "qwen"}
 
 
 @pytest.fixture(autouse=True)
+def _no_real_version_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agentbus.adapters.opencode as opencode_module
+
+    monkeypatch.setattr(
+        opencode_module, "_default_version_probe", lambda _binary, _env: None
+    )
+
+
+@pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
