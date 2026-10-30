@@ -83,6 +83,18 @@ class ClientProbe:
     def present(self) -> bool:
         return self.status == STATUS_PRESENT
 
+    @property
+    def variant_selector(self) -> str:
+        """``opencode-v1``-style selector, empty for ordinary installs."""
+        return f"{self.client}-{self.variant}" if self.variant else ""
+
+    def selected_by(self, name: str) -> bool:
+        """Whether a ``--client`` selector names this probe."""
+        if name in (self.installation_id, self.client):
+            return True
+        selector = self.variant_selector
+        return bool(selector) and name == selector
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "client": self.client,

@@ -1061,6 +1061,11 @@ def plan_toml_array_patch(
             )
         start = header_indexes[index]
         end = _array_block_end(lines, table, start)
+        if end < len(lines):
+            while end > start + 1 and (
+                not lines[end - 1].strip() or lines[end - 1].lstrip().startswith("#")
+            ):
+                end -= 1
         head = "".join(lines[:start])
         tail = "".join(lines[end:])
         candidate = head + rendered

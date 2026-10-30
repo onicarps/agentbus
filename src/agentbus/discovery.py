@@ -1086,9 +1086,7 @@ class ConnectReport:
 def client_selected(probe: ClientProbe, wanted: set[str]) -> bool:
     if not wanted:
         return True
-    if probe.installation_id in wanted or probe.client in wanted:
-        return True
-    return bool(probe.variant) and f"{probe.client}-{probe.variant}" in wanted
+    return any(probe.selected_by(name) for name in wanted)
 
 
 def auto_connect_allowed(probe: ClientProbe, installation: Installation, wanted: set[str]) -> bool:
@@ -1238,16 +1236,13 @@ def connect(
     items: list[ConnectItem] = []
 
     def _explicitly_named(probe: ClientProbe) -> bool:
-        if probe.installation_id in (clients or ()):
-            return True
-        return bool(probe.variant) and (
-            f"{probe.client}-{probe.variant}" in (clients or ())
+        wanted = clients or ()
+        return probe.installation_id in wanted or (
+            bool(probe.variant_selector) and probe.variant_selector in wanted
         )
 
     def _probe_matches_name(probe: ClientProbe, name: str) -> bool:
-        if name in (probe.installation_id, probe.client):
-            return True
-        return bool(probe.variant) and name == f"{probe.client}-{probe.variant}"
+        return probe.selected_by(name)
 
     for name in clients or ():
         if not any(_probe_matches_name(probe, name) for probe in selected):

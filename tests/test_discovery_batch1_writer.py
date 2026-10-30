@@ -274,6 +274,41 @@ def test_toml_array_updates_named_entry_in_place() -> None:
     assert document["mcp_servers"][1]["command"] == "x"
 
 
+def test_toml_array_preserves_comments_before_following_element() -> None:
+    raw = (
+        b"[[mcp_servers]]\n"
+        b'name = "agentbus"\n'
+        b'transport = "stdio"\n'
+        b'command = "/usr/bin/agentbus"\n'
+        b'args = ["mcp-serve"]\n'
+        b"[mcp_servers.env]\n"
+        b'AGENTBUS_WORKSPACE = "/old"\n\n'
+        b"# Important fetch server comment\n"
+        b"[[mcp_servers]]\n"
+        b'name = "fetch"\n'
+        b'transport = "stdio"\n'
+        b'command = "fetch-mcp"\n'
+    )
+    entry = {
+        "name": SERVER_NAME,
+        "transport": "stdio",
+        "command": "/usr/bin/agentbus",
+        "args": ["mcp-serve"],
+        "env": {"AGENTBUS_WORKSPACE": "/new", "AGENTBUS_PRODUCER_ID": "local-user"},
+    }
+    patch = plan_toml_array_patch(
+        installation_id="vibe-project",
+        path=Path("/tmp/vibe.toml"),
+        table="mcp_servers",
+        entry=entry,
+        raw=raw,
+    )
+    text = (patch.new_bytes or b"").decode("utf-8")
+    assert "# Important fetch server comment" in text
+    document = tomllib.loads(text)
+    assert [item["name"] for item in document["mcp_servers"]] == ["agentbus", "fetch"]
+
+
 def test_toml_array_refuses_unowned_entry() -> None:
     raw = (
         b"[[mcp_servers]]\n"

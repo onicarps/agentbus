@@ -601,12 +601,12 @@ def test_opencode_conflicting_selectors_fail_closed(
     )
 
 
-def test_opencode_selector_is_a_valid_client_name(tmp_path: Path) -> None:
-    from agentbus.discovery import validate_client_selection
+def test_opencode_selector_is_a_valid_client_name() -> None:
+    from agentbus.discovery import UnknownClientError, validate_client_selection
 
     validate_client_selection(["opencode-v1"])
     validate_client_selection(["opencode-v2"])
-    with pytest.raises(Exception):
+    with pytest.raises(UnknownClientError, match="opencode-v3"):
         validate_client_selection(["opencode-v3"])
 
 
