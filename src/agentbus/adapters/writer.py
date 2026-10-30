@@ -899,9 +899,11 @@ def plan_yaml_patch(
 
     container[SERVER_NAME] = _merge_entry(previous, entry)
     new_bytes = serialize_yaml(document)
+    from ruamel.yaml.error import YAMLError as RoundTripYAMLError
+
     try:
-        patched = _pyyaml.safe_load(new_bytes.decode("utf-8"))
-    except _pyyaml.YAMLError as exc:
+        patched = _plain_yaml(_yaml_round_trip().load(new_bytes.decode("utf-8")))
+    except RoundTripYAMLError as exc:
         raise ConfigConflictError(
             "patch_invalid_yaml", f"{path}: generated YAML is invalid: {exc}"
         ) from exc

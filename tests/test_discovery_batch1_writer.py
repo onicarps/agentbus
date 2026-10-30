@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from ruamel.yaml import YAML
 
 from agentbus.adapters.manifest import SERVER_NAME, build_entry, install_target
 from agentbus.adapters.opencode import (
@@ -47,6 +48,21 @@ def _entry(installation_id: str, workspace: Path) -> dict:
 # ---------------------------------------------------------------------------
 # YAML round-trip
 # ---------------------------------------------------------------------------
+
+
+def test_yaml_patch_preserves_yaml12_plain_scalars(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    raw = b"GOOSE_TOOLSHIM: off\nextensions:\n  other:\n    flag: on\n"
+    installation = install_target("goose-user")
+    entry = _entry("goose-user", tmp_path)
+
+    patch = plan_patch(installation, path=path, entry=entry, raw=raw)
+    assert patch.changed and patch.new_bytes is not None
+    document = YAML(typ="safe").load(patch.new_bytes.decode("utf-8"))
+    assert document["GOOSE_TOOLSHIM"] == "off"
+    assert document["extensions"]["other"]["flag"] == "on"
+    assert document["extensions"]["agentbus"]["cmd"] == "/usr/bin/agentbus"
+    assert not plan_patch(installation, path=path, entry=entry, raw=patch.new_bytes).changed
 
 
 def test_yaml_patch_preserves_comments_order_and_anchors(tmp_path: Path) -> None:
