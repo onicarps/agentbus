@@ -360,10 +360,16 @@ def resolve_mcp_command(
         argv = _parse_override(override)
         # A GUI client may launch with a minimal PATH: always write the
         # resolved absolute executable into the client configuration.
-        if argv[0] == "agentbus":
-            found = which("agentbus")
+        executable = argv[0]
+        bare = not Path(executable).expanduser().is_absolute() and not any(
+            sep in executable for sep in (os.sep, "/", "\\")
+        )
+        if bare:
+            found = which(executable)
             if found and _untrusted_path_binary(found, workspace):
-                raise McpCommandError("invalid_override", "untrusted workspace executable on PATH")
+                raise McpCommandError(
+                    "invalid_override", f"untrusted workspace executable on PATH: {found}"
+                )
             argv = list(_absolutize_argv(argv, which=lambda _name: found))
         else:
             argv = list(_absolutize_argv(argv, which=which))

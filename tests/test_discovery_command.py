@@ -488,3 +488,35 @@ def test_override_checks_the_path_result_it_uses(tmp_path):
                               which=lambda _: next(results), workspace=workspace,
                               validate=False)
     assert cmd.command == str(trusted)
+
+
+@pytest.mark.parametrize("name", ["python", "agentbus.exe"])
+@pytest.mark.parametrize("directory", ["bin", ".venv/bin"])
+def test_bare_override_rejects_workspace_binary(tmp_path, name, directory):
+    workspace = tmp_path / "workspace"
+    binary = _write_executable(workspace / directory / name)
+    with pytest.raises(McpCommandError, match="untrusted workspace executable on PATH") as excinfo:
+        resolve_mcp_command(environ={ENV_OVERRIDE: name}, which=lambda _: str(binary),
+                            workspace=workspace, validate=False)
+    assert excinfo.value.code == "invalid_override"
+
+
+@pytest.mark.parametrize("result", ["python", "./python"])
+def test_bare_override_rejects_relative_lookup_outside_workspace(tmp_path, monkeypatch, result):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    with pytest.raises(McpCommandError, match="untrusted workspace executable on PATH"):
+        resolve_mcp_command(environ={ENV_OVERRIDE: "python"}, which=lambda _: result,
+                            workspace=tmp_path / "workspace", validate=False)
+
+
+def test_bare_override_accepts_verified_external_lookup_once(tmp_path):
+    trusted = _write_executable(tmp_path / "runtime" / "python")
+    workspace = tmp_path / "workspace"
+    untrusted = _write_executable(workspace / "bin" / "python")
+    results = iter([str(trusted), str(untrusted)])
+    cmd = resolve_mcp_command(environ={ENV_OVERRIDE: "python -m agentbus.cli mcp-serve"},
+                              which=lambda _: next(results), workspace=workspace,
+                              validate=False)
+    assert cmd.command == str(trusted)
