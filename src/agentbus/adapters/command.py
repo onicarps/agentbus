@@ -230,13 +230,13 @@ def _absolutize_argv(
     return tuple(argv)
 
 
-def _loose_root_binary(binary: str | Path, workspace: Path | None = None) -> bool:
+def _untrusted_path_binary(binary: str | Path, workspace: Path | None = None) -> bool:
     try:
-        parent = Path(binary).expanduser().resolve().parent
+        resolved = Path(binary).expanduser().resolve()
         roots = [Path.cwd().resolve()]
         if workspace is not None:
-            roots.append(workspace.resolve())
-        return parent in roots
+            roots.append(workspace.expanduser().resolve())
+        return any(resolved == root or root in resolved.parents for root in roots)
     except (OSError, RuntimeError, ValueError):
         return True
 
@@ -367,9 +367,11 @@ def resolve_mcp_command(
         # resolved absolute executable into the client configuration.
         if argv[0] == "agentbus":
             found = which("agentbus")
-            if found and _loose_root_binary(found, workspace):
-                raise McpCommandError("invalid_override", "untrusted root executable on PATH")
-        argv = list(_absolutize_argv(argv, which=which))
+            if found and _untrusted_path_binary(found, workspace):
+                raise McpCommandError("invalid_override", "untrusted workspace executable on PATH")
+            argv = list(_absolutize_argv(argv, which=lambda _name: found))
+        else:
+            argv = list(_absolutize_argv(argv, which=which))
         cmd = McpCommand(tuple(argv), "env-override", ())
         if validate:
             probe = probe_command(cmd)
@@ -392,8 +394,8 @@ def resolve_mcp_command(
         warnings.append(f"ignored {shim}: {probe.detail}")
 
     on_path = which("agentbus")
-    if on_path and _loose_root_binary(on_path, workspace):
-        warnings.append(f"ignored untrusted root executable: {on_path}")
+    if on_path and _untrusted_path_binary(on_path, workspace):
+        warnings.append(f"ignored untrusted workspace executable: {on_path}")
         on_path = None
     if on_path:
         resolved = Path(on_path).expanduser().absolute()

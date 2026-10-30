@@ -399,14 +399,14 @@ def test_resolution_does_not_probe_same_executable_twice(tmp_path, monkeypatch):
         resolve_mcp_command(environ={}, which=lambda name: str(shim), python=str(tmp_path / "missing"), probe_runner=runner)
     assert calls == [str(shim)]
 
-@pytest.mark.parametrize("directory", ["root", "cwd", ".venv/bin", ".venv/Scripts"])
+@pytest.mark.parametrize("directory", ["root", "cwd", "cwd/bin", "bin", ".venv/bin", ".venv/Scripts"])
 def test_path_command_trust_boundary(tmp_path, monkeypatch, directory):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
-    target = cwd if directory == "cwd" else workspace if directory == "root" else workspace / directory
+    target = cwd if directory == "cwd" else cwd / "bin" if directory == "cwd/bin" else workspace if directory == "root" else workspace / directory
     binary = _write_executable(target / "agentbus")
     interpreter = _write_executable(tmp_path / "runtime" / "python")
     calls = []
@@ -418,16 +418,42 @@ def test_path_command_trust_boundary(tmp_path, monkeypatch, directory):
     cmd = resolve_mcp_command(environ={}, which=lambda _: str(binary),
                               python=str(interpreter), workspace=workspace,
                               probe_runner=runner)
-    if directory in ("root", "cwd"):
-        assert cmd.command == str(interpreter)
-        assert any("ignored untrusted root executable" in warning for warning in cmd.warnings)
-        assert str(binary) not in calls
-        with pytest.raises(McpCommandError) as excinfo:
-            resolve_mcp_command(environ={ENV_OVERRIDE: "agentbus"},
-                                which=lambda _: str(binary), workspace=workspace,
-                                probe_runner=runner)
-        assert excinfo.value.code == "invalid_override"
-        assert str(binary) not in calls
-    else:
-        assert cmd.command == str(binary)
-        assert calls == [str(binary)]
+    assert cmd.command == str(interpreter)
+    assert any("ignored untrusted workspace executable" in warning for warning in cmd.warnings)
+    assert calls == [str(interpreter)]
+    with pytest.raises(McpCommandError) as excinfo:
+        resolve_mcp_command(environ={ENV_OVERRIDE: "agentbus"},
+                            which=lambda _: str(binary), workspace=workspace,
+                            probe_runner=runner)
+    assert excinfo.value.code == "invalid_override"
+    assert calls == [str(interpreter)]
+
+
+def test_workspace_interpreter_sibling_is_trusted(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    interpreter = _write_executable(workspace / ".venv" / "bin" / "python")
+    shim = _write_executable(interpreter.parent / "agentbus")
+    monkeypatch.chdir(workspace)
+    calls = []
+
+    def runner(path):
+        calls.append(path)
+        return CommandProbe(True, "ok")
+
+    cmd = resolve_mcp_command(environ={}, which=lambda _: str(shim),
+                              python=str(interpreter), workspace=workspace,
+                              probe_runner=runner)
+    assert cmd.source == "installed-console-script"
+    assert cmd.command == str(shim)
+    assert calls == [str(shim)]
+
+
+def test_override_checks_the_path_result_it_uses(tmp_path):
+    trusted = _write_executable(tmp_path / "trusted" / "agentbus")
+    workspace = tmp_path / "workspace"
+    untrusted = _write_executable(workspace / "bin" / "agentbus")
+    results = iter([str(trusted), str(untrusted)])
+    cmd = resolve_mcp_command(environ={ENV_OVERRIDE: "agentbus"},
+                              which=lambda _: next(results), workspace=workspace,
+                              validate=False)
+    assert cmd.command == str(trusted)
