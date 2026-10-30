@@ -1,11 +1,21 @@
 # Changelog
 
-## [0.29.0] - Unreleased
+## [0.29.0] - 2026-10-30
 
-### Added
+### Added — Hermetic sandboxed multi-agent swarm testing & expanded client discovery
 
-- Expanded MCP client discovery and connection support for additional agent clients.
-- Sandboxed integration coverage for discovery, wake delivery, runner dispatch, and adapter command execution.
+- **Sandboxed multi-agent swarm testing suite (`tests/test_swarm_sandboxed_agents.py`)**:
+  Hermetically isolated end-to-end integration coverage for all 8 active swarm agents
+  (Agy, Codex, OpenCode, Factory, Hermes, Pi, Freebuff, Aider) in throwaway environments
+  without touching host configurations, live bus databases, or external networks.
+- **Fail-closed security hardening**: Verified user-scope mutation refusal without explicit
+  `allow_user_scope`, configuration byte preservation, and token non-disclosure across
+  client configurations and serialized reports.
+- **Client manifests & discovery (Batch 1)**: Declarative discovery and connection support
+  for Goose, Cline, Mistral Vibe, GitHub Copilot CLI, OpenCode, and Qwen Code.
+- **Engine safety**: Safe in-memory YAML/TOML comment-preserving writer primitives,
+  polymorphic entry launch extraction (`entry_launch`), regular-file reading boundaries,
+  and fail-closed path/execution boundaries.
 
 ## [0.28.0] - 2026-10-30
 
