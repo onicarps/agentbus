@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0] - Unreleased
+
+### Added
+
+- Expanded MCP client discovery and connection support for additional agent clients.
+- Sandboxed integration coverage for discovery, wake delivery, runner dispatch, and adapter command execution.
+
 ## [0.28.0] - 2026-10-30
 
 ### Added — Declarative discovery and safe client connection
