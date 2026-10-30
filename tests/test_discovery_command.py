@@ -399,14 +399,14 @@ def test_resolution_does_not_probe_same_executable_twice(tmp_path, monkeypatch):
         resolve_mcp_command(environ={}, which=lambda name: str(shim), python=str(tmp_path / "missing"), probe_runner=runner)
     assert calls == [str(shim)]
 
-@pytest.mark.parametrize("directory", ["root", "cwd", "cwd/bin", "bin", ".venv/bin", ".venv/Scripts"])
+@pytest.mark.parametrize("directory", ["root", "bin", ".venv/bin", ".venv/Scripts"])
 def test_path_command_trust_boundary(tmp_path, monkeypatch, directory):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
-    target = cwd if directory == "cwd" else cwd / "bin" if directory == "cwd/bin" else workspace if directory == "root" else workspace / directory
+    target = workspace if directory == "root" else workspace / directory
     binary = _write_executable(target / "agentbus")
     interpreter = _write_executable(tmp_path / "runtime" / "python")
     calls = []
@@ -427,6 +427,37 @@ def test_path_command_trust_boundary(tmp_path, monkeypatch, directory):
                             probe_runner=runner)
     assert excinfo.value.code == "invalid_override"
     assert calls == [str(interpreter)]
+
+
+@pytest.mark.parametrize("binary", ["agentbus", "./agentbus", "bin/agentbus"])
+def test_relative_path_command_is_untrusted(tmp_path, monkeypatch, binary):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    workspace = tmp_path / "workspace"
+    interpreter = _write_executable(tmp_path / "runtime" / "python")
+    calls = []
+    cmd = resolve_mcp_command(environ={}, which=lambda _: binary,
+                              python=str(interpreter), workspace=workspace,
+                              probe_runner=lambda path: calls.append(path) or CommandProbe(True, "ok"))
+    assert cmd.command == str(interpreter)
+    assert calls == [str(interpreter)]
+    with pytest.raises(McpCommandError, match="untrusted"):
+        resolve_mcp_command(environ={ENV_OVERRIDE: "agentbus"}, which=lambda _: binary,
+                            workspace=workspace, validate=False)
+
+
+def test_absolute_cwd_command_is_trusted(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    binary = _write_executable(cwd / "bin" / "agentbus")
+    monkeypatch.chdir(cwd)
+    interpreter = _write_executable(tmp_path / "runtime" / "python")
+    calls = []
+    cmd = resolve_mcp_command(environ={}, which=lambda _: str(binary),
+                              python=str(interpreter), workspace=tmp_path / "workspace",
+                              probe_runner=lambda path: calls.append(path) or CommandProbe(True, "ok"))
+    assert cmd.command == str(binary)
+    assert calls == [str(binary)]
 
 
 def test_workspace_interpreter_sibling_is_trusted(tmp_path, monkeypatch):

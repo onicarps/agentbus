@@ -208,14 +208,18 @@ def _read_json_document(path: Path) -> tuple[object | None, str | None]:
         return None, f"{path}: unparsable config ({exc})"
 
 
-def is_safe_client_executable(binary: str, *, workspace: Path | None = None) -> bool:
-    """Reject client executables within the current directory or workspace."""
+def is_safe_client_executable(binary: str | Path, *, workspace: Path | None = None) -> bool:
+    """Reject relative search results and executables within the workspace."""
     try:
-        resolved = Path(binary).expanduser().resolve()
-        roots = [Path.cwd().resolve()]
+        raw = Path(binary).expanduser()
+        if not raw.is_absolute():
+            return False
+        resolved = raw.resolve()
         if workspace is not None:
-            roots.append(workspace.resolve())
-        return all(resolved != root and root not in resolved.parents for root in roots)
+            ws = workspace.expanduser().resolve()
+            if resolved == ws or ws in resolved.parents:
+                return False
+        return True
     except (OSError, RuntimeError, ValueError):
         return False
 
@@ -282,7 +286,7 @@ def detect_variant(
 
     binary = which("opencode")
     if binary and not is_safe_client_executable(binary, workspace=workspace):
-        notes.append(f"untrusted binary inside workspace/cwd ignored: {binary}")
+        notes.append(f"untrusted relative or workspace binary ignored: {binary}")
         binary = None
     if not probe_versions:
         notes.append("version probe suppressed in read-only mode")

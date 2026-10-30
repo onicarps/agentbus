@@ -645,9 +645,9 @@ def test_untrusted_opencode_is_never_executed(tmp_path: Path, monkeypatch) -> No
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.chdir(cwd)
-    for binary in (cwd / "opencode", workspace / "nested" / "opencode"):
+    for binary in ("opencode", "./opencode", workspace / "nested" / "opencode"):
         calls = []
-        with pytest.raises(OpenCodeVersionAmbiguityError, match="untrusted binary"):
+        with pytest.raises(OpenCodeVersionAmbiguityError, match="untrusted relative or workspace binary"):
             detect_variant(workspace=workspace, which=lambda _: str(binary),
                            version_probe=lambda *args: calls.append(args))
         assert not calls
@@ -661,7 +661,7 @@ def test_zero_version_conflicts_with_v2_structure(tmp_path: Path) -> None:
                        version_probe=lambda *_: "opencode v0.15.3")
 
 
-def test_client_discovery_ignores_workspace_and_cwd_binaries(tmp_path, monkeypatch):
+def test_client_discovery_filters_relative_and_workspace_binaries(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from agentbus.adapters.probe import _evidence_binaries
 
@@ -671,6 +671,19 @@ def test_client_discovery_ignores_workspace_and_cwd_binaries(tmp_path, monkeypat
     workspace.mkdir()
     monkeypatch.chdir(cwd)
     installation = SimpleNamespace(binaries=("client",))
-    for binary in (cwd / "client", workspace / "nested" / "client"):
+    for binary in ("client", "./client", workspace / "nested" / "client"):
         assert not _evidence_binaries(installation, workspace=workspace, which=lambda _: str(binary))
-    assert _evidence_binaries(installation, workspace=workspace, which=lambda _: "/usr/bin/client")
+    for binary in ("/usr/bin/client", str(cwd / "client"), str(Path.home() / ".local/bin/client")):
+        assert _evidence_binaries(installation, workspace=workspace, which=lambda _: binary)
+
+
+def test_opencode_trusted_absolute_binary_is_probed(tmp_path, monkeypatch):
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    workspace = tmp_path / "workspace"
+    for binary in ("/usr/bin/opencode", str(cwd / "opencode"), str(Path.home() / ".local/bin/opencode")):
+        calls = []
+        assert detect_variant(workspace=workspace, which=lambda _: binary,
+                              version_probe=lambda *args: calls.append(args) or "opencode v0.15.3").variant == VARIANT_V1
+        assert calls[0][0] == binary

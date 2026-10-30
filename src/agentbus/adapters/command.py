@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from agentbus.adapters.opencode import is_safe_client_executable
+
 MODULE = "agentbus.cli"
 SERVER_SUBCOMMAND = "mcp-serve"
 ENV_OVERRIDE = "AGENTBUS_MCP_COMMAND"
@@ -231,14 +233,7 @@ def _absolutize_argv(
 
 
 def _untrusted_path_binary(binary: str | Path, workspace: Path | None = None) -> bool:
-    try:
-        resolved = Path(binary).expanduser().resolve()
-        roots = [Path.cwd().resolve()]
-        if workspace is not None:
-            roots.append(workspace.expanduser().resolve())
-        return any(resolved == root or root in resolved.parents for root in roots)
-    except (OSError, RuntimeError, ValueError):
-        return True
+    return not is_safe_client_executable(binary, workspace=workspace)
 
 
 def validate_mcp_command(
