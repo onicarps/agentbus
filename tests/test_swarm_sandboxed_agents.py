@@ -737,6 +737,7 @@ def test_connect_never_discloses_environment_tokens(sandbox: Sandbox) -> None:
     server_env = data["mcpServers"]["agentbus"]["env"]
     assert "AGENTBUS_TOKEN" not in server_env
     assert set(server_env.keys()) == {"AGENTBUS_WORKSPACE", "AGENTBUS_PRODUCER_ID"}
+    assert secret_token not in json.dumps(report.to_dict())
 
 
 def _which_from_bin(sandbox: Sandbox, *names: str) -> Callable[[str], str | None]:
@@ -1129,6 +1130,9 @@ def test_runner_executes_agent_adapter_against_sandbox_stub(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="sandbox stubs rely on POSIX shebang execution"
+)
 def test_aider_bridge_runs_via_stub_and_leaves_parked_config_alone(
     sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1219,6 +1223,9 @@ def test_coverage_ledger_covers_every_swarm_agent() -> None:
         assert row["real_agent_process"] is False, agent
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="sandbox stubs rely on POSIX shebang execution"
+)
 def test_factory_runner_never_requests_mission_mode(
     sandbox: Sandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
