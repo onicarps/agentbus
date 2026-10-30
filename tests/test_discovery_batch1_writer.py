@@ -23,6 +23,7 @@ from agentbus.adapters.opencode import (
 )
 from agentbus.adapters.writer import (
     ConfigConflictError,
+    entry_matches,
     entry_env_keys,
     plan_json_patch,
     plan_patch,
@@ -167,6 +168,41 @@ def test_yaml_env_alias_is_folded_into_the_canonical_envs_key(
     assert "env" not in goose
     assert goose["envs"]["AGENTBUS_WORKSPACE"] == str(tmp_path)
     assert goose["envs"]["SERVICE_TOKEN"] == "keep-me"
+
+
+@pytest.mark.parametrize("alias", ["env", "environment"])
+def test_matching_yaml_entry_rejects_unsafe_alias(tmp_path: Path, alias: str) -> None:
+    entry = _entry("goose-user", tmp_path)
+    actual = {**entry, alias: {"LD_PRELOAD": "/tmp/evil.so"}}
+    assert not entry_matches(actual, entry)
+    raw = yaml.safe_dump({"extensions": {"agentbus": actual}}).encode()
+    with pytest.raises(ConfigConflictError) as excinfo:
+        plan_yaml_patch(installation_id="goose-user", path=tmp_path / "config.yaml",
+                        root="extensions", entry=entry, raw=raw)
+    assert excinfo.value.code == "unsafe_env"
+
+
+@pytest.mark.parametrize("alias", ["env", "environment"])
+def test_matching_yaml_entry_folds_safe_alias(tmp_path: Path, alias: str) -> None:
+    entry = _entry("goose-user", tmp_path)
+    actual = {**entry, alias: {"SERVICE_TOKEN": "keep-me"}}
+    assert not entry_matches(actual, entry)
+    raw = yaml.safe_dump({"extensions": {"agentbus": actual}}).encode()
+    kwargs = dict(installation_id="goose-user", path=tmp_path / "config.yaml",
+                  root="extensions", entry=entry)
+    patch = plan_yaml_patch(**kwargs, raw=raw)
+    assert patch.changed
+    result = yaml.safe_load(patch.new_bytes)["extensions"]["agentbus"]
+    assert alias not in result
+    assert result["envs"]["SERVICE_TOKEN"] == "keep-me"
+    assert entry_matches(result, entry)
+    assert not plan_yaml_patch(**kwargs, raw=patch.new_bytes).changed
+
+
+@pytest.mark.parametrize("value", [None, [], "invalid", {"NODE_OPTIONS": "--require evil"}])
+def test_matching_entry_rejects_invalid_expected_environment(tmp_path: Path, value: object) -> None:
+    entry = _entry("goose-user", tmp_path)
+    assert not entry_matches({**entry, "envs": value}, entry)
 
 
 def test_yaml_refuses_to_overwrite_an_unowned_entry(tmp_path: Path) -> None:

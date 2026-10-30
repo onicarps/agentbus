@@ -377,6 +377,14 @@ def _unsafe_extra_keys(actual: Mapping[str, Any], expected: Mapping[str, Any]) -
 def entry_matches(actual: Any, expected: Mapping[str, Any]) -> bool:
     if not isinstance(actual, dict) or _unsafe_extra_keys(actual, expected):
         return False
+    for container in _ENTRY_ENV_KEYS:
+        if container not in actual:
+            continue
+        current = actual[container]
+        if container not in expected or not isinstance(current, dict):
+            return False
+        if any(_unsafe_env_key(k) for k in current):
+            return False
     for key, value in expected.items():
         if key in _ENTRY_ENV_KEYS and isinstance(value, dict):
             current = actual.get(key)
