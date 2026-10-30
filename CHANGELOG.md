@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] - 2026-10-29
+## [0.28.0] - 2026-10-30
 
 ### Added — Declarative discovery and safe client connection
 
@@ -25,6 +25,8 @@
 
 ### Changed — Safe, serialized setup
 
+- README rewritten in plain English for first-time users.
+- Setup paths defend against symlink traversal and unsafe lock targets.
 - `agentbus init` previews are now **strictly read-only**: they no longer create
   `.agentbus/token` or the `.agentbus/workspace` marker.
 - All mutating setup paths take an advisory `.agentbus/init.lock` and install

@@ -42,11 +42,11 @@ pipx install okf-agentbus
 # 1. Download install.sh pinned to release commit 0f6d389
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/onicarps/agentbus/0f6d389622a168b78eb3bdc3b02729c5bc4680aa/install.sh -o install.sh
 
-# 2. Verify script SHA-256 and run with release v0.27.0:
+# 2. Verify script SHA-256 and run with release v0.28.0:
 # On Linux:
-echo "03e64e9bb7e252c072ba77e0cc62324f3e3d34a9c4aaeb4886a0e897c80528b2  install.sh" | sha256sum --check && AGENTBUS_PACKAGE_NAME="okf-agentbus==0.27.0" bash install.sh
+echo "03e64e9bb7e252c072ba77e0cc62324f3e3d34a9c4aaeb4886a0e897c80528b2  install.sh" | sha256sum --check && AGENTBUS_PACKAGE_NAME="okf-agentbus==0.28.0" bash install.sh
 # On macOS:
-echo "03e64e9bb7e252c072ba77e0cc62324f3e3d34a9c4aaeb4886a0e897c80528b2  install.sh" | shasum -a 256 --check && AGENTBUS_PACKAGE_NAME="okf-agentbus==0.27.0" bash install.sh
+echo "03e64e9bb7e252c072ba77e0cc62324f3e3d34a9c4aaeb4886a0e897c80528b2  install.sh" | shasum -a 256 --check && AGENTBUS_PACKAGE_NAME="okf-agentbus==0.28.0" bash install.sh
 ```
 
 > **Supply-Chain Verification Note:** The SHA-256 checksum verifies the `install.sh` script itself. It does not verify downstream artifacts (such as the separately downloaded `uv` installer when `uv` is not already installed, or the fetched Python package wheels and their dependencies). For audited environments with strict verification policies, install pinned packages using your standard package manager, lockfiles, or internal artifact mirror.
